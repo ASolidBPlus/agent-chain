@@ -459,16 +459,14 @@ export class Treasury {
     const reservation = this.store.reserve({
       intentId,
       topic: intentTopic(intentId),
-      // The freshest head the tail has OBSERVED - see Store.observedHead for
-      // why it must be that and not the cursor.
+      // NO CURRENT CONSUMER. Stamped here because the reserve-time head is
+      // IRRECOVERABLE LATER; the sweep does not read it. See the
+      // `reservedAtBlock` comment on Store.reserve for why it is kept.
       //
       // NO RPC FALLBACK, deliberately. Reading the head here would put a chain
-      // call on the money path for every send, to bound a sweep that runs
-      // occasionally. When the tail has not polled yet this is null, which the
-      // sweep already treats as "cannot bound" - the same as a row written
-      // before the column existed. The cost is that an intent reserved in the
-      // first second of a cold start is not sweepable, which is the correct
-      // trade against a per-send read.
+      // call on the money path for every send, for a column on the money path
+      // that no code path consumes. When the tail has not polled yet this is
+      // null, and the future consumer must read null as "cannot bound".
       reservedAtBlock: this.store.observedHead() ?? undefined,
       idSource: source,
       agentId: fromAgentId,

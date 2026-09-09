@@ -54,9 +54,11 @@ export class EventTail {
 
   private async poll(): Promise<number> {
     const latest = await this.chain.publicClient.getBlockNumber();
-    // Recorded whether or not this pass finds anything: a reservation taken
-    // between polls needs a lower bound, and this is the freshest head anyone
-    // here has seen without spending an RPC call on the money path.
+    // NO CURRENT CONSUMER, and this is where a reader meets the mechanism
+    // first, so: this per-second write feeds `reserved_at_block`, which nothing
+    // reads - not even the sweep below. It is recorded whether or not this pass
+    // finds anything because the reserve-time head cannot be recovered
+    // afterwards. See the `reservedAtBlock` comment on Store.reserve.
     this.store.setObservedHead(latest);
     const from = (this.store.getCursor(CURSOR) ?? -1n) + 1n;
     if (from > latest) return 0;

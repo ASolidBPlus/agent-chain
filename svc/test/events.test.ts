@@ -709,6 +709,93 @@ describe('sweepOnce', () => {
     store.close();
   });
 
+  // THE SKIP IS THE RESOLVE QUERY'S ALONE. The emissions counter is keyed on
+  // TOPIC with no stage filter, and it must stay that way: lateness is the
+  // anomaly detector's premise, which is why the design counts rather than
+  // accumulates - so that no retention window is needed. A stage bound on the
+  // COUNTER would be that window under another name.
+  //
+  // Measured across two rollovers rather than argued from the query.
+  it('still raises an anomaly for an id reserved two stages ago', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'ancient', 1n);
+
+    store.setStage('run-2');
+    store.setStage('run-3');
+
+    // Two emissions arriving now, long after the reserving stage ended.
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC2, from: WALLET }, transactionHash: '0xaaa' }]), store).pollOnce();
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(2n, [{ args: { intentId: TOPIC2, from: WALLET }, transactionHash: '0xbbb' }]), store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly).toBeDefined();
+    expect(anomaly!.agentId).toBe('orch:mark');
+
+    // And the sweep still skips it - the two queries genuinely differ.
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 0 });
+    store.close();
+  });
+
+  // EMISSION ROWS ARE IMMORTAL, which is a SEPARATE property from the counter
+  // being stage-blind - build-triage's point, and they were right that one
+  // guard does not pin both.
+  //
+  // The query mutant only covers a stage term in the WHERE. The same hazard
+  // arrives by other mechanisms: a caller-side filter, a stage prune, or a
+  // WALL-CLOCK TTL. The first two are caught by the two-rollover test because
+  // it drives through pollOnce with an old-stage row - but a TTL keyed on AGE
+  // is not, because every row a test creates is seconds old. So this one ages
+  // the row instead of advancing the stage.
+  it('still raises for an intent row that is DAYS old', async () => {
+    const { store } = seeded();
+    reserve(store, 'ancient-by-clock', 1n);
+
+    // Backdate the reservation a week. A retention rule keyed on age - the one
+    // mechanism the stage tests cannot express - would have removed it.
+    store.backdateIntentForTest('ancient-by-clock', Date.now() - 7 * 86_400_000);
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC2, from: WALLET }, transactionHash: '0xaaa' }]), store).pollOnce();
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(2n, [{ args: { intentId: TOPIC2, from: WALLET }, transactionHash: '0xbbb' }]), store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly).toBeDefined();
+    // And the id is still consumed, which is the tombstone half of the same
+    // property: an aged row that stops refusing a retry is a double-charge.
+    expect(
+      store.reserve({
+        intentId: 'ancient-by-clock', topic: TOPIC2, agentId: 'orch:mark',
+        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+      }).outcome,
+    ).toBe('duplicate');
+    store.close();
+  });
+
+  // The foreign case too, since it is the other half of the detector and would
+  // be lost to the same window.
+  it('still raises a FOREIGN sender for an id reserved two stages ago', async () => {
+    const { store } = seeded();
+    reserve(store, 'ancient-foreign', 1n);
+    store.setStage('run-2');
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC2, from: '0x000000000000000000000000000000000000dEaD' }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly!.reason).toBe('foreign_sender');
+    store.close();
+  });
+
   // THE WORKING-SET BOUND. Rows are never deleted, but a row whose stage has
   // rolled over has already had its hold cleared by construction - stage spend
   // is keyed by (agent, stage), so the current stage's bucket is a different
