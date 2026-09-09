@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Runnable evidence for spec S8 criteria 3, 7, 8 and the chain-svc half of 9:
+# spawn, aliases, transfers, memos, retirement. Needs Docker and Foundry, so it
+# cannot run in the repo's CI - run it by hand and paste the output:
+#   ./chain/svc/scripts/verify-money.sh
+set -euo pipefail
+
+IMAGE=${IMAGE:-powerout-anvil:dev}
+NAME=${NAME:-powerout-anvil-money-verify}
+VOLUME=${VOLUME:-powerout-chain-state-money-verify}
+RPC=${RPC:-http://127.0.0.1:8545}
+PORT=${PORT:-7001}
+TOKEN=${CHAIN_SVC_TOKEN:-verify-token}
+MNEMONIC="test test test test test test test test test test test junk"
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SVC="$HERE/.."
+CONTRACTS="$SVC/../contracts"
+DEPLOYMENTS="$SVC/../deployments"
+WORK=$(mktemp -d)
+SVC_PID=""
+FAIL=0
+FAILED_CHECKS=""
+
+step() { printf '\n=== %s\n' "$1"; }
+check() { # check <label> <actual> <expected>
+  if [ "$2" = "$3" ]; then
+    echo "  ok   $1: $2"
+  else
+    echo "  FAIL $1: got '$2' want '$3'"
+    FAIL=1
+    FAILED_CHECKS="$FAILED_CHECKS
+    - $1: got '$2' want '$3'"
+  fi
+}
+# Docker teardown only. Deliberately separate from cleanup(): running the full
+# cleanup up front would delete $WORK, which was created moments earlier - it
+# did, and the service then failed to start with no log to say why.
+predown() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+}
+cleanup() {
+  [ -n "$SVC_PID" ] && kill "$SVC_PID" 2>/dev/null || true
+  predown
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+predown
+
+# Platform credential: hub-core / facilitator / setup script. Mints and funds.
+A=(-H "Authorization: Bearer $TOKEN" -H 'content-type: application/json')
+api()  { curl -fsS "${A[@]}" "$@"; }
+code() { curl -s -o /dev/null -w '%{http_code}' "${A[@]}" "$@"; }
+body() { curl -s "${A[@]}" "$@"; }
+# Wallet credential: one agent, spends from itself only.
+wcode() { local t=$1; shift; curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $t" -H 'content-type: application/json' "$@"; }
+wbody() { local t=$1; shift; curl -s -H "Authorization: Bearer $t" -H 'content-type: application/json' "$@"; }
+jget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)"; }
+
+step "chain up + deploy"
+docker volume create "$VOLUME" >/dev/null
+docker run -d --name "$NAME" -e ANVIL_MNEMONIC="$MNEMONIC" \
+  -v "$VOLUME:/state" -p 127.0.0.1:8545:8545 "$IMAGE" >/dev/null
+for _ in $(seq 1 30); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' "$NAME")" = healthy ] && break; sleep 1
+done
+rm -f "$DEPLOYMENTS/local.json"
+KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
+( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
+    forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) >/dev/null 2>&1
+echo "  deployed: $(python3 -c "import json;print(json.load(open('$DEPLOYMENTS/local.json'))['VEEBux'])")"
+
+( cd "$SVC" && RPC_URL="$RPC" CHAIN_SVC_TOKEN="$TOKEN" KEYSTORE_SECRET=verify-secret \
+    ANVIL_MNEMONIC="$MNEMONIC" DEPLOYMENTS_DIR="$DEPLOYMENTS" KEYSTORE_DIR="$WORK/keystore" \
+    POLICY_DIR="$WORK/policies" STORE_PATH="$WORK/store/db.sqlite" PORT="$PORT" \
+    bun run src/index.ts ) >"$WORK/svc.log" 2>&1 &
+SVC_PID=$!
+for _ in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+U="http://127.0.0.1:$PORT"
+
+step "criterion 3 - spawn a named, funded wallet"
+# Three spawns and the MEDIAN, because a single timing sample measures the host
+# as much as the service: this bound has read 277ms and 789ms on the same
+# machine minutes apart. Expected p50 under 1s on an idle host; the HARD failure
+# is at 5s, which catches a pathological regression without failing on load
+# (ruled 20:49 UTC). A warning instead of a failure was explicitly rejected -
+# a check that never fails measures nothing.
+TIMES=""
+for who in shadowbroker timing1 timing2; do
+  START=$(date +%s%N)
+  RESULT=$(api -X POST "$U/wallets" -d "{\"agentId\":\"orch:$who\",\"fundVee\":250,\"kind\":\"agent\",\"alias\":\"$who.vee\"}")
+  [ "$who" = shadowbroker ] && SB_TOKEN=$(echo "$RESULT" | jget "['walletToken']")
+  MS=$(( ($(date +%s%N) - START) / 1000000 ))
+  TIMES="$TIMES $MS"
+  [ "$who" = shadowbroker ] && SPAWN="$RESULT"
+done
+P50=$(echo $TIMES | tr ' ' '\n' | sort -n | sed -n 2p)
+echo "  POST /wallets -> $SPAWN"
+echo "  timings:$TIMES ms   p50=${P50}ms"
+[ "$P50" -lt 1000 ] && echo "  ok   p50 under the 1s expectation" || echo "  note p50 ${P50}ms is over the 1s expectation (host load?)"
+[ "$P50" -lt 5000 ] && echo "  ok   p50 within the 5s hard bound" || { echo "  FAIL p50 ${P50}ms exceeds the 5s hard bound"; FAIL=1; FAILED_CHECKS="$FAILED_CHECKS
+    - spawn p50 ${P50}ms exceeds the 5s hard bound"; }
+ADDR=$(echo "$SPAWN" | jget "['address']")
+
+check "balance"            "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "250"
+check "resolve canonical"  "$(api "$U/resolve/orch%3Ashadowbroker" | jget "['address']")" "$ADDR"
+check "resolve alias"      "$(api "$U/resolve/shadowbroker.vee"    | jget "['address']")" "$ADDR"
+check "reverse"            "$(api "$U/reverse/$ADDR" | jget "['canonical']")" "orch:shadowbroker"
+check "reverse aliases"    "$(api "$U/reverse/$ADDR" | jget "['aliases'][0]")" "shadowbroker.vee"
+
+step "criterion 3 - a repeat spawn must not mint money"
+AGAIN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":250,"kind":"agent","alias":"shadowbroker.vee"}')
+check "same address"       "$(echo "$AGAIN" | jget "['address']")" "$ADDR"
+check "balance unchanged"  "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "250"
+check "no token on repeat" "$(echo "$AGAIN" | python3 -c "import sys,json;print('walletToken' in json.load(sys.stdin))")" "False"
+
+step "criterion 9 - addressing at the service layer"
+check "two-colon id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')" "400"
+echo "    $(body -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')"
+check "bare local id"      "$(code -X POST "$U/wallets" -d '{"agentId":"darknetclient","kind":"agent"}')" "400"
+check "uppercase id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:ShadowBroker","kind":"agent"}')" "400"
+
+step "transfer by name, with a memo (wallet credential)"
+api -X POST "$U/wallets" -d '{"agentId":"alpha:darknetclient","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
+TX=$(wbody "$SB_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":50,"memo":"for the stream job","intentId":"a1"}')
+echo "  POST /sign-transfer -> $TX"
+check "sender balance"     "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "200"
+check "recipient balance"  "$(api "$U/balance/alpha.vee"           | jget "['vee']")" "60"
+HIST=$(api "$U/history/orch%3Ashadowbroker?limit=10")
+check "history memo"       "$(echo "$HIST" | jget "[0]['memo']")" "for the stream job"
+check "history counterparty" "$(echo "$HIST" | jget "[0]['to']")" "alpha:darknetclient"
+
+step "criterion 7 - lookalike names coexist"
+SC_TOKEN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:scammer","fundVee":5,"kind":"agent"}' | jget "['walletToken']")
+api -X POST "$U/aliases" -d '{"agentId":"orch:scammer","alias":"aIpha.vee"}' >/dev/null
+LOOK=$(api "$U/resolve/aIpha.vee"); REAL=$(api "$U/resolve/alpha.vee")
+echo "  aIpha.vee -> $LOOK"
+echo "  alpha.vee -> $REAL"
+[ "$(echo "$LOOK" | jget "['address']")" != "$(echo "$REAL" | jget "['address']")" ] \
+  && echo "  ok   different addresses" || { echo "  FAIL same address"; FAIL=1; }
+check "lookalike canonical" "$(echo "$LOOK" | jget "['canonical']")" "orch:scammer"
+
+step "criterion 11 - authorisation (C2d)"
+VICTIM=$(api -X POST "$U/wallets" -d '{"agentId":"orch:victim","fundVee":500,"kind":"agent","alias":"victim.vee"}')
+PERSONA=$(api -X POST "$U/wallets" -d '{"agentId":"orch:persona","fundVee":10,"kind":"agent","alias":"persona.vee"}')
+P_TOKEN=$(echo "$PERSONA" | jget "['walletToken']")
+echo "  the drain that was demonstrated before C2d existed:"
+check "sign as another wallet" "$(wcode "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.vee","vee":400}')" "403"
+echo "    $(wbody "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.vee","vee":400}')"
+check "victim untouched"       "$(api "$U/balance/orch%3Avictim" | jget "['vee']")" "500"
+check "self-mint refused"      "$(wcode "$P_TOKEN" -X POST "$U/wallets" -d '{"agentId":"orch:selfminted","fundVee":9999,"kind":"org"}')" "403"
+echo "    $(wbody "$P_TOKEN" -X POST "$U/wallets" -d '{"agentId":"orch:selfminted","fundVee":9999,"kind":"org"}')"
+check "read another wallet"    "$(wcode "$P_TOKEN" "$U/balance/orch%3Avictim")" "403"
+check "read own wallet"        "$(wcode "$P_TOKEN" "$U/balance/orch%3Apersona")" "200"
+check "supply is platform-only" "$(wcode "$P_TOKEN" "$U/supply")" "403"
+
+echo "  caps enforced AT CHAIN-SVC, with no wallet-mcp in the loop:"
+# Funded well above max_per_stage on purpose: the wallet must run out of CAP
+# before it runs out of MONEY, or the cap test proves only that the chain
+# rejects an overdraft. The first version funded 400 and the fifth send failed
+# 502 (insufficient balance) instead of 409 - a test that looked like a cap
+# failure and was not.
+CAP=$(api -X POST "$U/wallets" -d '{"agentId":"orch:capcheck","fundVee":1000,"kind":"agent","alias":"capcheck.vee"}')
+C_TOKEN=$(echo "$CAP" | jget "['walletToken']")
+check "max_per_tx 100, send 300" "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":300}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":300}')"
+check "balance untouched"        "$(api "$U/balance/orch%3Acapcheck" | jget "['vee']")" "1000"
+check "denied counterparty"      "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.vee","vee":1}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.vee","vee":1}')"
+
+# Criterion 4's exact arithmetic: 50 + 4x100 = 450, under max_per_stage 500;
+# the next 100 would reach 550 and is refused.
+echo "  stage cap (max_per_stage 500), platform POST /stage drives the stage:"
+api -X POST "$U/stage" -d '{"stage":"s1"}' >/dev/null
+check "opening send of 50"       "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":50}')" "200"
+for i in 1 2 3 4; do
+  R=$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')
+  echo "    send $i of 100 -> $R  (stage total $((50 + i * 100)))"
+  [ "$R" != 200 ] && { echo "  FAIL send $i should have been accepted"; FAIL=1; FAILED_CHECKS="$FAILED_CHECKS
+    - stage send $i: got '$R' want '200'"; }
+done
+check "next 100 trips the cap"   "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')"
+api -X POST "$U/stage" -d '{"stage":"s2"}' >/dev/null
+check "new stage resets the cap"  "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":1}')" "200"
+
+echo "  rotation revokes the old credential:"
+NEW=$(api -X POST "$U/wallets/orch%3Apersona/rotate" | jget "['walletToken']")
+check "old token rejected"       "$(wcode "$P_TOKEN" "$U/balance/orch%3Apersona")" "401"
+check "new token works"          "$(wcode "$NEW" "$U/balance/orch%3Apersona")" "200"
+
+step "criterion 8 - retirement"
+check "delete"             "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"
+check "spend refused"      "$(wcode "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":1,"intentId":"z1"}')" "409"
+echo "    $(wbody "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":1,"intentId":"z2"}')"
+check "alias stops resolving" "$(code "$U/resolve/aIpha.vee")" "404"
+check "canonical survives"    "$(code "$U/resolve/orch%3Ascammer")" "200"
+check "policy file frozen"    "$(python3 -c "import json;print(json.load(open('$WORK/policies/orch%3Ascammer.json'))['frozen'])")" "True"
+check "delete is idempotent"  "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"
+
+step "verdict"
+
+if [ "$FAIL" = 0 ]; then
+  echo "PASS: criteria 3, 7, 8, 11 and the chain-svc half of 9"
+else
+  # Name the failing checks here rather than only inline, so a load flake in CI
+  # or on a busy host is diagnosable from the tail of the log alone.
+  echo "FAIL. Checks that failed:$FAILED_CHECKS"
+  exit 1
+fi

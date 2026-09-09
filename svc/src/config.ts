@@ -3,7 +3,13 @@
 // defaults to "" fails later as a 401 from somewhere else, which is a config
 // error wearing an auth error's clothes.
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { HttpError } from './errors.ts';
+
+/// Ships with the package, so the defaults travel with the code that reads
+/// them rather than depending on a mount being present.
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export interface Config {
   port: number;
@@ -21,6 +27,10 @@ export interface Config {
   /// Where chain-svc writes each agent's policy file for wallet-mcp to read.
   policyDir: string;
   storePath: string;
+  /// Per-`kind` policy caps applied when POST /wallets carries no explicit
+  /// policy. Provisional game balance, tuned by the game owner - deliberately a
+  /// file rather than a constant in the code (ruled 20:49 UTC).
+  policyDefaultsPath: string;
   deploymentsDir: string;
   /// hub-core's outcome feed. Unset is legitimate until C5 exists - events are
   /// buffered and retried rather than dropped (spec S4).
@@ -60,6 +70,7 @@ export function loadConfig(env = process.env): Config {
       keystoreDir: optional('KEYSTORE_DIR', '/keystore'),
       policyDir: optional('POLICY_DIR', '/policies'),
       storePath: optional('STORE_PATH', '/store/chain-svc.sqlite'),
+      policyDefaultsPath: optional('POLICY_DEFAULTS_FILE', join(PACKAGE_ROOT, 'policy-defaults.json')),
       deploymentsDir: optional('DEPLOYMENTS_DIR', '/deployments'),
       hubCoreUrl: process.env.HUB_CORE_URL?.trim() || undefined,
     };
