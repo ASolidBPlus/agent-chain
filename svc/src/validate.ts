@@ -30,6 +30,29 @@ function assertLength(value: string, code: 'invalid_agent_id' | 'invalid_name'):
   }
 }
 
+/// Whether a string IS a canonical agent id, as a boolean.
+///
+/// DELEGATES to the assertion rather than re-testing the regex, so the two can
+/// never disagree about what is canonical. The same collapse as WALLET_KINDS:
+/// a second copy of the rule is a second authority, and this one would be
+/// consulted on the money path - §5 builds `<namespace>:<bare>` and asks
+/// whether the result is a real id before looking it up.
+///
+/// THE CASE EDGE FALLS OUT RATHER THAN NEEDING ITS OWN RULE. Canonical ids are
+/// lowercase-only while aliases preserve case for the lookalike mechanic
+/// (S3.2), so `arena:aIpha` simply is not canonical and the §5 fallback skips
+/// it. Lowercasing it is forbidden (`:14` - it would key money under an id the
+/// caller did not ask for) and rejecting the request would blame the caller for
+/// a string the server itself built.
+export function isCanonicalAgentId(value: string): boolean {
+  try {
+    assertCanonicalAgentId(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function assertCanonicalAgentId(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new HttpError('invalid_agent_id', 'agentId is required and must be a string');

@@ -140,7 +140,12 @@ describe('routing', () => {
   it('resolves a percent-encoded canonical id', async () => {
     const res = await fetch(`${base}/resolve/${encodeURIComponent('alpha.vee')}`, { headers: auth });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ address: WALLET, canonical: 'alpha:darknetclient' });
+    // `resolvedVia` on every answer, platform scope included (§5). Constant
+    // there rather than absent: a caller should not have to know which scope it
+    // used to know whether the field means anything.
+    expect(await res.json()).toEqual({
+      address: WALLET, canonical: 'alpha:darknetclient', resolvedVia: 'exact',
+    });
   });
 
   // Criterion 9's shape: a bare local id is syntactically fine, so it reaches
