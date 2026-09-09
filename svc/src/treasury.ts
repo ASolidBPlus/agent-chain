@@ -26,6 +26,23 @@ import {
 } from './policy.ts';
 import { assertLookupName, formatVee, parseVee } from './validate.ts';
 
+/// Which path a spend arrived by, for the `agent.spend` event.
+///
+/// THE MARKER IS A CLAIM, NOT A BOUNDARY (ruled 21:27 UTC). A persona holding
+/// its own wallet token could send this header itself; nothing here stops it,
+/// and nothing should. The boundary is the caps and the principal-derived
+/// source, both enforced server-side. `via` is a purple-team signal for the
+/// facilitator - a `direct` spend says something skipped the sanctioned path -
+/// and must never be used as a control.
+///
+/// Stated the way it has to be read downstream (spec S5, 21:46 UTC): `via` is a
+/// BEST-EFFORT DETECTION HINT, NEVER AN AUTHORISATION SIGNAL. A raw caller can
+/// forge `via: "mcp"`, so treat `via: "direct"` as "worth investigating" and
+/// never treat `via: "mcp"` as "cleared". The unspoofable fact is that an
+/// agent.spend is emitted at all.
+export function spendVia(marker?: string): 'mcp' | 'direct' {
+  return marker !== undefined && marker.startsWith('wallet-mcp/') ? 'mcp' : 'direct';
+}
 
 /// The three operations signTransfer needs from a wallet client, named so the
 /// prepare/sign/send split - which is where "provably before the broadcast"
@@ -128,6 +145,7 @@ export class Treasury {
       intentId?: unknown;
     },
     /// The X-Wallet-Client header, when the caller sent one.
+    clientMarker?: string,
   ): Promise<{ txHash: string; intentId: string; intentIdSource: 'caller' | 'server' }> {
     // The source is DERIVED from the credential, never read from the body. A
     // body fromAgentId is tolerated only when it agrees; disagreeing is a 403
@@ -247,6 +265,7 @@ export class Treasury {
       fromAgentId,
       to: name,
       amount,
+      via: spendVia(clientMarker),
       memo: body.memo,
     });
     return { ...sent, intentId, intentIdSource: source };
@@ -277,6 +296,7 @@ export class Treasury {
     fromAgentId: string;
     to: string;
     amount: bigint;
+    via: string;
     memo: unknown;
   }): Promise<{ txHash: string }> {
     try {
@@ -300,6 +320,23 @@ export class Treasury {
       // it is not added here. It used to be, and that was the defect: a
       // decision recorded after the act it authorised.
 
+      // `agent.spend` shows WHO DECIDED, where `chain.transfer` from the log
+      // tail only shows what moved (spec S5). Emitted here rather than in
+      // wallet-mcp (ruled 21:27 UTC) so that money can never move without one:
+      // wallet-mcp runs inside the persona, and a persona calling this endpoint
+      // directly would otherwise produce a transfer with nobody deciding it.
+      //
+      // `via` preserves the tell that moving the emitter would have cost; see
+      // spendVia for why it is a claim rather than a boundary.
+      this.store.enqueueEvent('agent.spend', {
+        kind: 'agent.spend',
+        name: args.fromAgentId,
+        to: args.to,
+        vee: formatVee(args.amount),
+        intent_id: args.intentId,
+        via: args.via,
+        txHash: hash,
+      });
       return { txHash: hash };
     } catch (err) {
       // Deliberately NOT a release. See the rule above.

@@ -18,6 +18,9 @@ import { join } from 'node:path';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
 
+/// Bounded so a stalled Anvil cannot hold a poll open indefinitely.
+const RPC_TIMEOUT_MS = 10_000;
+
 /// Chain ids conventionally reserved for LOCAL DEVELOPMENT chains: Anvil and
 /// Hardhat use 31337, Ganache 1337. chain-svc refuses to start against anything
 /// else, and that refusal is the point.
@@ -101,7 +104,11 @@ export class Chain {
       rpcUrls: { default: { http: [config.rpcUrl] } },
     });
 
-    const transport = http(config.rpcUrl);
+    // An explicit timeout for the same reason the event sink has one: a hung
+    // RPC would otherwise stall a poll for ever, and the interval that drives
+    // it does not wait. viem's default is 10s; naming it here keeps the two
+    // sides of that argument in one place.
+    const transport = http(config.rpcUrl, { timeout: RPC_TIMEOUT_MS });
     // viem polls every 4 SECONDS by default, which is sensible for a public
     // network and absurd for an instant-mining local chain: it made a spawn
     // that does the work in ~200ms take 4.2s, because waitForTransactionReceipt

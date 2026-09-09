@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertPrivateRpcUrl } from '../src/chain.ts';
+import { hubCoreUrl } from '../src/config.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -211,4 +212,36 @@ describe('the service refuses to start', () => {
     expect(code).not.toBe(0);
     expect(stderr).toContain('CHAIN_SVC_TOKEN');
   }, 30_000);
+});
+
+// #17 B3. CHAIN_SVC_TOKEN is both the inbound credential and the outbound
+// bearer to HUB_CORE_URL, so whatever answers there is HANDED the token that
+// authorises moving the game's money. An unvalidated destination for that
+// header is an exfiltration path whose trigger is a config typo.
+describe('HUB_CORE_URL is validated as strictly as RPC_URL', () => {
+  it('accepts unset and empty as "no hub-core yet"', () => {
+    expect(hubCoreUrl(undefined)).toBeUndefined();
+    expect(hubCoreUrl('')).toBeUndefined();
+    expect(hubCoreUrl('   ')).toBeUndefined();
+  });
+
+  it('accepts a private host', () => {
+    expect(hubCoreUrl('http://hub-core:8080')).toBe('http://hub-core:8080');
+    expect(hubCoreUrl('http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080');
+    expect(hubCoreUrl('http://10.1.2.3:8080')).toBe('http://10.1.2.3:8080');
+  });
+
+  it('refuses a public destination for the token', () => {
+    expect(() => hubCoreUrl('https://evil.example.com/collect')).toThrow(/refusing_public_hub_core/);
+    expect(() => hubCoreUrl('http://8.8.8.8/')).toThrow(/refusing_public_hub_core/);
+  });
+
+  it('refuses junk rather than silently treating it as unset', () => {
+    // The failure mode this replaces: a typo became `undefined`, events queued
+    // for ever, and nobody found out until someone asked why the timeline was
+    // empty.
+    expect(() => hubCoreUrl('not-a-url')).toThrow(/not a valid URL/);
+    expect(() => hubCoreUrl('ftp://hub-core/')).toThrow(/must be http or https/);
+    expect(() => hubCoreUrl('file:///etc/passwd')).toThrow(/must be http or https/);
+  });
 });

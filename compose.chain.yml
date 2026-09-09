@@ -1,8 +1,5 @@
 # The private chain for Operation PowerOUT, profile "chain" (spec S7).
 #
-# This file currently defines the `chain` service only. `chain-svc` lands with
-# C2 - adding it here before its image exists would make `docker compose up`
-# fail on a missing build context for everyone.
 #
 # Run from this directory:  docker compose -f compose.chain.yml --profile chain up -d
 services:
@@ -31,5 +28,88 @@ services:
       test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
       interval: 5s
 
+  # One-shot: deploys the contracts, writes deployments/local.json, exits 0.
+  # chain-svc waits for it with service_completed_successfully, so the service
+  # never starts against a chain with no contracts on it.
+  #
+  # Reuses the anvil image because it already carries forge and cast; building
+  # a second Foundry image to run one script would be waste. Spec S7 folded
+  # this into chain-svc's own image and command - separated so the service that
+  # holds the wallet keys does not also ship a Solidity toolchain.
+  chain-deploy:
+    build:
+      context: ./docker
+      dockerfile: anvil.Dockerfile
+    profiles: [chain]
+    depends_on:
+      chain:
+        condition: service_healthy
+    environment:
+      ANVIL_MNEMONIC: "${ANVIL_MNEMONIC:?ANVIL_MNEMONIC must be set in the hub .env - it derives the treasury key}"
+    volumes:
+      - ./contracts:/contracts
+      - ./deployments:/deployments
+    entrypoint: ["/bin/sh", "-c"]
+    # Account 0 of the mnemonic is the deployer and the treasury (spec S2), so
+    # the key is derived here rather than being a second secret to keep in step.
+    command:
+      - |
+        set -eu
+        KEY=$$(cast wallet private-key --mnemonic "$$ANVIL_MNEMONIC")
+        cd /contracts
+        DEPLOYER_PRIVATE_KEY=$$KEY DEPLOYMENTS_DIR=/deployments \
+          forge script script/Deploy.s.sol:Deploy --rpc-url http://chain:8545 --broadcast
+
+  chain-svc:
+    build:
+      # The repo root: chain/svc is a bun workspace member and the lockfile
+      # lives there, so --frozen-lockfile is only possible from the root.
+      context: ../
+      dockerfile: chain/svc/Dockerfile
+    profiles: [chain]
+    depends_on:
+      chain:
+        condition: service_healthy
+      chain-deploy:
+        condition: service_completed_successfully
+    environment:
+      RPC_URL: http://chain:8545
+      CHAIN_SVC_TOKEN: "${CHAIN_SVC_TOKEN:?CHAIN_SVC_TOKEN must be set in the hub .env}"
+      KEYSTORE_SECRET: "${KEYSTORE_SECRET:?KEYSTORE_SECRET must be set in the hub .env}"
+      ANVIL_MNEMONIC: "${ANVIL_MNEMONIC:?}"
+      DEPLOYMENTS_DIR: /deployments
+      KEYSTORE_DIR: /keystore
+      POLICY_DIR: /policies
+      STORE_PATH: /store/chain-svc.sqlite
+      HUB_CORE_URL: "${HUB_CORE_URL:-}"
+    volumes:
+      - keystore:/keystore
+      - policies:/policies
+      - svc-store:/store
+      - ./deployments:/deployments
+    ports:
+      - "127.0.0.1:7000:7000"
+
+  # The facilitator's block viewer (Joel, 20:30 UTC). Raw addresses, no auth
+  # beyond the host binding; the students' names-aware view is a later frontend
+  # over /history, /resolve and /reverse.
+  otterscan:
+    image: otterscan/otterscan:v2.11.0@sha256:7636f835fcdfc550c205a78876013d6e54c95846f3566e59cc71bc6136c80cc9
+    profiles: [chain]
+    depends_on:
+      chain:
+        condition: service_healthy
+    environment:
+      # The BROWSER makes the JSON-RPC calls, not this container: the entrypoint
+      # writes this value into config.json, which the page then fetches. So it
+      # must be the published loopback port and never chain:8545, which resolves
+      # only inside the compose network.
+      ERIGON_URL: http://127.0.0.1:8545
+    ports:
+      - "127.0.0.1:5100:80"
+
 volumes:
   chain-state: {}
+  keystore: {}
+  policies: {}
+  svc-store: {}
