@@ -40,6 +40,7 @@ export interface Config {
   policyDir: string;
   storePath: string;
   acknowledgeLedgerReset: boolean;
+  acknowledgeChainReset: boolean;
   /// Per-`kind` policy caps applied when POST /wallets carries no explicit
   /// policy. Provisional game balance, tuned by the game owner - deliberately a
   /// file rather than a constant in the code (ruled 20:49 UTC).
@@ -116,6 +117,11 @@ export function loadConfig(env = process.env): Config {
       acknowledgeLedgerReset:
         process.argv.includes('--acknowledge-ledger-reset') ||
         optional('CHAIN_SVC_ACKNOWLEDGE_LEDGER_RESET', '') === '1',
+      // The operator saying "I know the chain was replaced under this store".
+      // It permits ONE boot and repairs nothing - see deployment.ts.
+      acknowledgeChainReset:
+        process.argv.includes('--acknowledge-chain-reset') ||
+        optional('CHAIN_SVC_ACKNOWLEDGE_CHAIN_RESET', '') === '1',
       token: required('CHAIN_SVC_TOKEN'),
       keystoreSecret: required('KEYSTORE_SECRET'),
       anvilMnemonic: required('ANVIL_MNEMONIC'),

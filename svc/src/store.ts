@@ -39,6 +39,7 @@ export type Reservation =
   | { outcome: 'duplicate'; txHash: string | null };
 
 import { migrate } from './migrate.ts';
+import type { DeploymentIdentity } from './deployment.ts';
 
 export interface OutboundEvent {
   id: number;
@@ -162,6 +163,29 @@ export class Store {
         spent    TEXT NOT NULL,
         PRIMARY KEY (agent_id, stage)
       );
+      -- WHICH CHAIN THIS STORE BELONGS TO (spec S4: the store and the chain
+      -- state share one lifetime). Recorded on the first boot that sees a
+      -- deployment, and compared on every boot after.
+      --
+      -- The pair goes wrong in BOTH directions and we only detected one. #52
+      -- refuses when the STORE is wiped beside a live chain; this is the same
+      -- two artefacts the other way round - the chain replaced while the store
+      -- survives - which leaves every spawn marker pointing at names that no
+      -- longer exist on the new registry, and every wallet permanently
+      -- unresolvable with no repair path.
+      --
+      -- IDENTITY, NOT NAMES. The obvious check - a spawn marker whose canonical
+      -- name is unregistered - is the STEADY STATE OF A BURNER, which registers
+      -- no names by design while still getting a marker. This asks the only
+      -- question that matters instead: are these the same two artefacts they
+      -- were? That also catches a chain SWAP, which a name check never could.
+      CREATE TABLE IF NOT EXISTS deployment (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        chain_id       TEXT NOT NULL,
+        veebux         TEXT NOT NULL,
+        name_registry  TEXT NOT NULL,
+        recorded_at    INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS stage_state (
         id    INTEGER PRIMARY KEY CHECK (id = 1),
         stage TEXT NOT NULL
@@ -249,6 +273,32 @@ export class Store {
       | { address: string }
       | null;
     return row?.address ?? null;
+  }
+
+  // --- which chain this store belongs to (spec S4) --------------------------
+
+  /// The deployment this store was first used against, or null on a store that
+  /// has never seen one.
+  recordedDeployment(): DeploymentIdentity | null {
+    const row = this.db
+      .query(`SELECT chain_id, veebux, name_registry FROM deployment WHERE id = 1`)
+      .get() as { chain_id: string; veebux: string; name_registry: string } | null;
+    return row
+      ? { chainId: row.chain_id, veeBux: row.veebux, nameRegistry: row.name_registry }
+      : null;
+  }
+
+  /// Written ONCE, on the first boot that sees a deployment. Never updated by
+  /// an acknowledgement: acknowledging a disagreement permits a boot, it does
+  /// not make the two artefacts agree. Updating it is repair's job, at the
+  /// point where "these now agree" becomes a true statement.
+  recordDeployment(id: DeploymentIdentity): void {
+    this.db
+      .query(
+        `INSERT INTO deployment (id, chain_id, veebux, name_registry, recorded_at)
+         VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+      )
+      .run(id.chainId, id.veeBux, id.nameRegistry, Date.now());
   }
 
   // --- the bare-id detector (spec S5) --------------------------------------
