@@ -49,6 +49,8 @@ interface RouteContext {
   /// Parsed JSON body, {} for a request that carried none.
   body: Record<string, unknown>;
   principal: Principal;
+  /// The X-Wallet-Client header, if the caller sent one. See postSignTransfer.
+  clientMarker: string | undefined;
 }
 
 export interface Route {
@@ -196,8 +198,8 @@ async function postFund({ services, body, principal }: RouteContext): Promise<un
   return services.treasury.fund(body);
 }
 
-async function postSignTransfer({ services, body, principal }: RouteContext): Promise<unknown> {
-  return services.treasury.signTransfer(principal, body);
+async function postSignTransfer({ services, body, principal, clientMarker }: RouteContext): Promise<unknown> {
+  return services.treasury.signTransfer(principal, body, clientMarker);
 }
 
 async function deleteWallet({ services, param, principal }: RouteContext): Promise<unknown> {
@@ -344,12 +346,14 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
     const method = req.method ?? 'GET';
     const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
 
+    const marker = req.headers['x-wallet-client'];
     const result = await found.route.handler({
       services,
       param: found.param,
       url,
       body,
       principal,
+      clientMarker: Array.isArray(marker) ? marker[0] : marker,
     });
     return send(res, 200, result);
   } catch (err) {

@@ -6,6 +6,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpError } from './errors.ts';
+import { assertPrivateRpcUrl } from './chain.ts';
 
 /// Ships with the package, so the defaults travel with the code that reads
 /// them rather than depending on a mount being present.
@@ -16,6 +17,17 @@ export interface Config {
   rpcUrl: string;
   /// Bearer token every caller must present. Also the bearer chain-svc uses
   /// when POSTing to hub-core's /events (spec S4).
+  ///
+  /// THE COST OF THAT SHARING, stated because it is deliberate and not free:
+  /// this one secret authorises moving the game's money, and chain-svc SENDS it
+  /// to whatever answers at HUB_CORE_URL. A wrong or hostile value there does
+  /// not merely lose events - it is handed a platform-scope credential. That is
+  /// why HUB_CORE_URL is validated as strictly as RPC_URL rather than defaulted
+  /// to an empty string: an unvalidated destination for this header is an
+  /// exfiltration path with a config typo as its trigger.
+  ///
+  /// Splitting it into a separate outbound token is the right fix and belongs
+  /// with C5, when hub-core exists to hold the other half.
   token: string;
   /// Passphrase for the scrypt KDF that encrypts each wallet key file.
   keystoreSecret: string;
@@ -33,8 +45,40 @@ export interface Config {
   policyDefaultsPath: string;
   deploymentsDir: string;
   /// hub-core's outcome feed. Unset is legitimate until C5 exists - events are
-  /// buffered and retried rather than dropped (spec S4).
+  /// buffered and retried rather than dropped (spec S4). SET-BUT-JUNK is not
+  /// legitimate, and is rejected at startup; see `token` for why.
   hubCoreUrl?: string;
+}
+
+/// Unset means "no hub-core yet" and is fine. Set means chain-svc will send it
+/// the token that authorises moving the game's money, so it must be a private
+/// http(s) destination and nothing else - the same rule RPC_URL gets, for the
+/// same reason.
+export function hubCoreUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`chain-svc: HUB_CORE_URL ${value} is not a valid URL`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`chain-svc: HUB_CORE_URL ${value} must be http or https, not ${url.protocol}`);
+  }
+
+  // Reuses RPC_URL's private-host rule verbatim rather than restating it: two
+  // copies of "what counts as private" drift, and this one carries the token.
+  try {
+    assertPrivateRpcUrl(value);
+  } catch {
+    throw new Error(
+      `chain-svc: refusing_public_hub_core - HUB_CORE_URL ${value} is not a private host. ` +
+        `chain-svc sends CHAIN_SVC_TOKEN there, and that token authorises moving the game's money.`,
+    );
+  }
+  return value;
 }
 
 function required(name: string): string {
@@ -72,7 +116,7 @@ export function loadConfig(env = process.env): Config {
       storePath: optional('STORE_PATH', '/store/chain-svc.sqlite'),
       policyDefaultsPath: optional('POLICY_DEFAULTS_FILE', join(PACKAGE_ROOT, 'policy-defaults.json')),
       deploymentsDir: optional('DEPLOYMENTS_DIR', '/deployments'),
-      hubCoreUrl: process.env.HUB_CORE_URL?.trim() || undefined,
+      hubCoreUrl: hubCoreUrl(process.env.HUB_CORE_URL),
     };
   } finally {
     process.env = previous;

@@ -10,6 +10,7 @@ import { loadPolicyDefaults } from './policy.ts';
 import { Spawner } from './spawn.ts';
 import { Store } from './store.ts';
 import { Treasury } from './treasury.ts';
+import { EventTail } from './events.ts';
 import { createChainSvcServer } from './server.ts';
 
 async function main(): Promise<void> {
@@ -35,16 +36,24 @@ async function main(): Promise<void> {
     treasury: new Treasury(config, chain, keystore, store, resolver, loadPolicyDefaults(config.policyDefaultsPath)),
   };
 
+  // Started before the server accepts requests, so a transfer cannot happen
+  // before there is anything reading the log for it.
+  const events = new EventTail(config, chain, store);
+  await events.pollOnce().catch((err) => console.warn('chain-svc: initial event poll failed', err.message));
+  events.start();
+
   const server = createChainSvcServer(services);
   server.listen(config.port, '0.0.0.0', () => {
     console.log(
       `chain-svc listening on :${config.port} (chain ${deployment.chainId}, ` +
-        `VEEBux ${deployment.VEEBux}, treasury ${deployment.treasury})`,
+        `VEEBux ${deployment.VEEBux}, treasury ${deployment.treasury}, ` +
+        `events -> ${config.hubCoreUrl ?? 'buffered, no HUB_CORE_URL set'})`,
     );
   });
 
   const shutdown = (signal: string) => {
     console.log(`chain-svc: ${signal}, shutting down`);
+    events.stop();
     server.close(() => {
       store.close();
       process.exit(0);
