@@ -107,8 +107,14 @@ export class Store {
         -- refunded budget never taken, and the zero-clamp turned that overshoot
         -- into wiping the wallet's real spend.
         held_wei   TEXT NOT NULL DEFAULT '0',
+        -- keccak256(bytes(intent_id)), the form the chain logs. Stored rather
+        -- than derived on demand so the sweep can join an IntentTransfer back
+        -- to the intent that authorised it, and so the derivation lives in ONE
+        -- place (Treasury.intentTopic) rather than being repeated here.
+        topic      TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS intents_topic ON intents (topic);
       CREATE TABLE IF NOT EXISTS stage_spend (
         agent_id TEXT NOT NULL,
         stage    TEXT NOT NULL,
@@ -282,6 +288,8 @@ export class Store {
   /// nothing was written.
   reserve(args: {
     intentId: string;
+    /// keccak256 of the intent id, as the chain logs it. See the `topic` column.
+    topic?: string;
     agentId: string;
     stage: string;
     amount: bigint;
@@ -297,7 +305,7 @@ export class Store {
     /// transaction and the call site has to say which it wants.
     capWei: bigint | null;
   }): Reservation {
-    const { intentId, agentId, stage, amount, capWei } = args;
+    const { intentId, topic, agentId, stage, amount, capWei } = args;
 
     // ONE transaction covering BOTH the intent and the cap, because they are
     // one decision: "may this send happen". Two transactions would admit a
@@ -317,8 +325,8 @@ export class Store {
 
       this.db
         .query(
-          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
         )
         .run(
           intentId,
@@ -326,6 +334,7 @@ export class Store {
           stage,
           amount.toString(),
           capWei === null ? '0' : amount.toString(),
+          topic ?? null,
           Date.now(),
         );
       if (capWei !== null) {
@@ -383,6 +392,17 @@ export class Store {
       .query(`SELECT agent_id, tx_hash FROM intents WHERE intent_id = ?`)
       .get(intentId) as { agent_id: string; tx_hash: string | null } | null;
     return row ? { agentId: row.agent_id, txHash: row.tx_hash } : null;
+  }
+
+  /// Which wallet reserved the intent the chain logged under this topic, for
+  /// the anomaly payload. Null when the topic belongs to no reservation here -
+  /// which is itself the interesting case, because it means the transfer came
+  /// from somewhere this store has never seen.
+  agentForIntentTopic(topic: string): string | null {
+    const row = this.db.query(`SELECT agent_id FROM intents WHERE topic = ?`).get(topic) as
+      | { agent_id: string }
+      | null;
+    return row?.agent_id ?? null;
   }
 
   intentTxHash(intentId: string): string | null {
@@ -448,7 +468,17 @@ export class Store {
   private releaseStageSpend(agentId: string, stage: string, amount: bigint): void {
     const release = this.db.transaction((): void => {
       const current = this.spentThisStage(agentId, stage);
-      // Clamped at zero: a double release must not manufacture budget.
+      // Clamped at zero, and now UNREACHABLE BY CONSTRUCTION rather than
+      // defence against a live path - recorded because the previous comment
+      // implied a reachability that no longer exists.
+      //
+      // It could fire while `release` took the amount from its CALLER: naming
+      // more than was reserved drove the spend negative, and a negative spend
+      // reads as the wallet owing budget, which admits MORE spending. A5 made
+      // `release` derive the amount from the row, so the only caller now passes
+      // exactly what was recorded and the subtraction cannot overshoot. Kept
+      // because `releaseStageSpend` would be reachable again the moment
+      // something else calls it with a figure of its own.
       const next = current > amount ? current - amount : 0n;
       this.db
         .query(

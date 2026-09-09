@@ -840,6 +840,23 @@ describe('POST /wallets/:agentId/balance', () => {
     return { t, store };
   }
 
+  // Seat 2 recorded this against the pre-merge trees: `setBalance` reserves an
+  // intent, and its TOP-UP branch called `fund` without it while the SWEEP
+  // branch passed it through - so a top-up was the one money movement whose
+  // intent could not be joined from /history. Both sides compiled, which is why
+  // it needed a test rather than a rebase.
+  it('a TOP-UP records the intent id on its memo', async () => {
+    const { t, store } = treasuryAt(vee(10));
+    await t.setBalance('orch:a', { vee: '100', intentId: 'top-up-1' });
+    expect(store.memosFor(['0xfunded']).get('0xfunded')?.intentId).toBe('top-up-1');
+  }, 20_000);
+
+  it('a SWEEP records the intent id on its memo', async () => {
+    const { t, store } = treasuryAt(vee(100));
+    await t.setBalance('orch:a', { vee: '40', intentId: 'sweep-1' });
+    expect(store.memosFor(['0xswept']).get('0xswept')?.intentId).toBe('sweep-1');
+  }, 20_000);
+
   it('funds the difference when the balance is below target', async () => {
     const { t } = treasuryAt(vee(10));
     const res = await t.setBalance('orch:a', { vee: '100', intentId: 'b-1' });
