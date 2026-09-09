@@ -1,0 +1,17 @@
+{
+  "name": "@powerout/wallet-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The stdio MCP server an agent uses to hold and spend VEE Bux by name",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "build": "bun build src/server.ts --target=bun --outfile dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}
