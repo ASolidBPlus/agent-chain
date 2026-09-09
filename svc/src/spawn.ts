@@ -181,6 +181,11 @@ export class Spawner {
   private parseKind(value: unknown): WalletKind {
     if (value === undefined || value === null) return 'agent';
     if (isWalletKind(value)) return value;
+    // A guard in test/spawn.test.ts extracts this function by counting braces,
+    // so a stray } in a comment here would truncate what it reads. It blanks
+    // comments first, which is why this line is safe - and this line is what
+    // witnesses that it still does.
+    //
     // Built FROM the constant, so the message cannot drift from the condition
     // it explains: a kind added to WALLET_KINDS is accepted here and named here
     // in the same edit, and there is no second list to forget.
@@ -246,6 +251,17 @@ export class Spawner {
     return this.send('registerFor', [name, address, address]);
   }
 
+  /// Both registry writes go through here, and both carry ZERO_FEES like every
+  /// other send in this service - see test/fees.test.ts, which enumerates every
+  /// .writeContract( and .sendTransaction( in src/ and fails if one of them
+  /// omits the spread or lets a later key override it.
+  ///
+  /// This comment is also the fee guard's own fixture. The guard blanks
+  /// comments before scanning, because a comment naming a send call used to
+  /// produce a phantom block and skip the real sites behind it - and with no
+  /// such comment anywhere in src/, that blanking step was unexercised by the
+  /// tree and could be deleted with nothing noticing. Documentation the guard
+  /// used to reject is the natural place to witness that it no longer does.
   private async send(functionName: 'registerFor' | 'setTargetFor', args: unknown[]): Promise<string> {
     try {
       const hash = await this.chain.walletClient.writeContract({

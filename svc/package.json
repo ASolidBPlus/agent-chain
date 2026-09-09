@@ -10,6 +10,6 @@
     "abi": "bun run scripts/generate-abi.ts"
   },
   "dependencies": {
-    "viem": "^2.40.0"
+    "viem": "2.56.3"
   }
 }
