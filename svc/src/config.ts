@@ -39,6 +39,7 @@ export interface Config {
   /// Where chain-svc writes each agent's policy file for wallet-mcp to read.
   policyDir: string;
   storePath: string;
+  acknowledgeLedgerReset: boolean;
   /// Per-`kind` policy caps applied when POST /wallets carries no explicit
   /// policy. Provisional game balance, tuned by the game owner - deliberately a
   /// file rather than a constant in the code (ruled 20:49 UTC).
@@ -108,6 +109,13 @@ export function loadConfig(env = process.env): Config {
     return {
       port,
       rpcUrl: optional('RPC_URL', 'http://chain:8545'),
+      // The operator stating they intend to end this game's idempotency
+      // lifetime. Accepted from BOTH a flag and the environment because the
+      // refusal it releases has to be clearable in compose, where nobody types
+      // a command line, as well as from run.sh where somebody does.
+      acknowledgeLedgerReset:
+        process.argv.includes('--acknowledge-ledger-reset') ||
+        optional('CHAIN_SVC_ACKNOWLEDGE_LEDGER_RESET', '') === '1',
       token: required('CHAIN_SVC_TOKEN'),
       keystoreSecret: required('KEYSTORE_SECRET'),
       anvilMnemonic: required('ANVIL_MNEMONIC'),
