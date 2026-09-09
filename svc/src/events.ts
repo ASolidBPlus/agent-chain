@@ -29,6 +29,7 @@ const SINK_TIMEOUT_MS = 5_000;
 export class EventTail {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private deliverTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private droppedTotal = 0;
   /// Re-entrancy guards. `setInterval` does not wait for the previous pass.
   private polling = false;
@@ -296,21 +297,35 @@ export class EventTail {
     return { delivered, failed, skipped: false };
   }
 
-  start(pollMs = 1000, deliverMs = 1000): void {
+  /// The sweep runs FAR less often than the poll, and the difference is not a
+  /// performance guess: the poll must keep up with the chain, while the sweep
+  /// only resolves reservations the poll has ALREADY recorded. Running it at
+  /// the poll's cadence would re-walk the same unresolved rows every second to
+  /// learn nothing new, because nothing can change between polls that the poll
+  /// did not itself record.
+  start(pollMs = 1000, deliverMs = 1000, sweepMs = 30_000): void {
     // Failures are swallowed on purpose: the tail is a background reporter and
-    // must never be able to stop the service that holds the wallets.
+    // must never be able to stop the service that holds the wallets. That now
+    // covers the sweep too, and it matters more there - the sweep touches the
+    // intents table, and an exception escaping a timer would take the process
+    // down with every wallet key in it.
     this.pollTimer = setInterval(() => {
       void this.pollOnce().catch((err) => console.warn('chain-svc: event poll failed', (err as Error).message));
     }, pollMs);
     this.deliverTimer = setInterval(() => {
       void this.deliverOnce().catch((err) => console.warn('chain-svc: event delivery failed', (err as Error).message));
     }, deliverMs);
+    this.sweepTimer = setInterval(() => {
+      void this.sweepOnce().catch((err) => console.warn('chain-svc: intent sweep failed', (err as Error).message));
+    }, sweepMs);
   }
 
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.deliverTimer) clearInterval(this.deliverTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.pollTimer = null;
     this.deliverTimer = null;
+    this.sweepTimer = null;
   }
 }

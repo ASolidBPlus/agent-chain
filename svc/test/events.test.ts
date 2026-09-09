@@ -641,9 +641,12 @@ describe('sweepOnce', () => {
     return { store, tail: new EventTail({ token: 'tok' } as Config, chainAt(5n, []), store) };
   }
 
+  /// Reserves in the store's CURRENT stage, because the sweep's working set is
+  /// bounded to it - a fixture pinning an arbitrary stage would be excluded and
+  /// every assertion below would pass for the wrong reason.
   const reserve = (store: Store, intentId: string, block: bigint | undefined) =>
     store.reserve({
-      intentId, topic: TOPIC2, agentId: 'orch:mark', stage: 's1',
+      intentId, topic: TOPIC2, agentId: 'orch:mark', stage: store.currentStage(),
       amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: block,
     });
 
@@ -656,7 +659,7 @@ describe('sweepOnce', () => {
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
     expect(store.intentTxHash('landed')).toBe('0xaaa');
     // The money moved, so the budget stays spent.
-    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
     store.close();
   });
 
@@ -694,13 +697,61 @@ describe('sweepOnce', () => {
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
     // The hold stands...
-    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
     // ...and the id is still consumed, which is the half that matters: a retry
     // must be refused, not broadcast a second time.
     expect(
       store.reserve({
         intentId: 'unlanded', topic: TOPIC2, agentId: 'orch:mark',
-        stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+      }).outcome,
+    ).toBe('duplicate');
+    store.close();
+  });
+
+  // THE WORKING-SET BOUND. Rows are never deleted, but a row whose stage has
+  // rolled over has already had its hold cleared by construction - stage spend
+  // is keyed by (agent, stage), so the current stage's bucket is a different
+  // row - and only a best-effort positive resolve remains. Skipping it bounds
+  // the sweep's COST without touching the table.
+  it('skips a rolled-over row and sweeps a current-stage one', async () => {
+    const { store, tail } = seeded();
+
+    // Reserved in the stage that is about to end, and its transfer DID land -
+    // so if it were swept it would be confirmed, which is how we can tell the
+    // difference between "skipped" and "nothing to do".
+    reserve(store, 'old-stage', 1n);
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+
+    store.setStage('run-2');
+
+    // And one in the new stage, also landed.
+    store.reserve({
+      intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
+      stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
+    });
+    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET });
+
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
+
+    expect(store.intentTxHash('new-stage')).toBe('0xbbb'); // swept
+    expect(store.intentTxHash('old-stage')).toBeNull();    // skipped, not resolved
+    store.close();
+  });
+
+  // A SKIP IS NOT A DELETE, and the difference is the whole point: the row
+  // survives, so the id still refuses a retry for ever.
+  it('a skipped row keeps its id consumed', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'rolled', 1n);
+    store.setStage('run-2');
+
+    await tail.sweepOnce();
+
+    expect(
+      store.reserve({
+        intentId: 'rolled', topic: TOPIC2, agentId: 'orch:mark',
+        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
     ).toBe('duplicate');
     store.close();
@@ -728,7 +779,7 @@ describe('sweepOnce', () => {
     expect(
       store.reserve({
         intentId: 'terminal', topic: TOPIC2, agentId: 'orch:mark',
-        stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }),
     ).toEqual({ outcome: 'duplicate', txHash: '0xaaa' });
     store.close();
@@ -743,7 +794,7 @@ describe('sweepOnce', () => {
     store.setCursor('chain-log-tail', 9_999_999n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
-    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n); // still held
+    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n); // still held
     store.close();
   });
 
@@ -765,4 +816,57 @@ describe('sweepOnce', () => {
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
     store.close();
   });
+});
+// THE WIRING. Everything #34 landed was inert because `sweepOnce` had no
+// caller, and a one-line `setInterval` is exactly the change that looks like
+// plumbing and is not - it makes dormant money code reachable. So the test is
+// that the timer FIRES, not that the method exists.
+describe('start() schedules the sweep', () => {
+  it('runs the sweep on its own cadence, and stop() ends it', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    const tail = new EventTail({ token: 'tok' } as Config, chainAt(1n, []), store);
+
+    let swept = 0;
+    (tail as unknown as { sweepOnce: () => Promise<unknown> }).sweepOnce = async () => {
+      swept++;
+      return { confirmed: 0, held: 0 };
+    };
+
+    // Poll and deliver disabled by a long interval; only the sweep is short.
+    tail.start(60_000, 60_000, 5);
+    await new Promise((r) => setTimeout(r, 60));
+    tail.stop();
+    const afterStop = swept;
+    expect(swept).toBeGreaterThan(0); // it fired
+
+    await new Promise((r) => setTimeout(r, 30));
+    expect(swept).toBe(afterStop); // and stopped firing
+    store.close();
+  }, 20_000);
+
+  // The tail must never be able to stop the service that holds the wallets,
+  // and that now covers the sweep - which touches the intents table, so an
+  // exception escaping its timer would be the worst of the three.
+  it('swallows a sweep failure instead of taking the process down', async () => {
+    const store = new Store(':memory:');
+    const tail = new EventTail({ token: 'tok' } as Config, chainAt(1n, []), store);
+    (tail as unknown as { sweepOnce: () => Promise<unknown> }).sweepOnce = async () => {
+      throw new Error('sweep exploded');
+    };
+
+    const warnings: string[] = [];
+    const real = console.warn;
+    console.warn = (...a: unknown[]) => void warnings.push(a.join(' '));
+    try {
+      tail.start(60_000, 60_000, 5);
+      await new Promise((r) => setTimeout(r, 40));
+      tail.stop();
+    } finally {
+      console.warn = real;
+    }
+
+    expect(warnings.join('\n')).toContain('intent sweep failed');
+    store.close();
+  }, 20_000);
 });

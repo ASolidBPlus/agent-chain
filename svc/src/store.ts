@@ -584,12 +584,25 @@ export class Store {
     firstFrom: string | null;
     reservedAtBlock: bigint | null;
   }> {
+    // THE WORKING SET, not the whole table. Rows are NEVER deleted - the
+    // idempotency key's lifetime is the game's - but the sweep only has work to
+    // do for intents reserved in the CURRENT stage.
+    //
+    // A row whose stage has rolled over has already had its hold cleared by
+    // construction, because stage spend is keyed by (agent_id, stage) and the
+    // current stage's bucket is a different row. All that remains for it is a
+    // best-effort positive resolve, which nobody is waiting on. Skipping it
+    // bounds the sweep's COST without touching the table's contents: the table
+    // still grows, and the id still answers `duplicate` for ever.
+    //
+    // A skip, not a retention delete. Those look similar and are opposites: one
+    // stops doing work, the other destroys the record that makes a retry safe.
     const rows = this.db
       .query(
         `SELECT intent_id, topic, agent_id, emissions, first_tx, first_from, reserved_at_block
-         FROM intents WHERE tx_hash IS NULL`,
+         FROM intents WHERE tx_hash IS NULL AND stage = ?`,
       )
-      .all() as Array<{
+      .all(this.currentStage()) as Array<{
       intent_id: string;
       topic: string | null;
       agent_id: string;
