@@ -66,7 +66,23 @@ export class WalletStore {
     renameSync(temp, this.path);
   }
 
-  /// The result a previous send under this intent id produced, if any.
+  /// AN INTENT IS NEVER REMOVED FROM THIS LEDGER. There is deliberately no
+  /// delete, expire or prune, and adding one would be a double-charge.
+  ///
+  /// The same invariant chain-svc's intents table holds, one layer up: THE
+  /// IDEMPOTENCY KEY'S LIFETIME IS THE GAME'S, REGARDLESS OF OUTCOME. A
+  /// persona re-sending under an id it has used before must meet the ORIGINAL
+  /// OUTCOME, and an entry that can disappear is one that stops answering.
+  ///
+  /// chain-svc's reservation is the authority and would refuse the replay even
+  /// if this file were empty - but "the other layer would catch it" is how both
+  /// layers end up trusting each other and neither holding the line. This one
+  /// is what makes the replay free rather than a round trip.
+  ///
+  /// A failed send records nothing here today, which is correct: nothing was
+  /// resolved, so there is no outcome to replay, and chain-svc answers the
+  /// retry. If a terminal FAILED outcome is ever recorded, it must be recorded
+  /// and kept - a tombstone - never written and later removed.
   recall(intentId: string): IntentResult | null {
     return this.state.intents[intentId] ?? null;
   }

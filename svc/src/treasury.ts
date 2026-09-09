@@ -271,10 +271,8 @@ export class Treasury {
     if (current === target) return { balance: formatVee(current) };
 
     const reason = typeof body.reason === 'string' ? body.reason : null;
-    const intentId =
-      typeof body.intentId === 'string' && body.intentId !== ''
-        ? body.intentId
-        : `chain-svc:${randomUUID()}`;
+    const suppliedId = typeof body.intentId === 'string' && body.intentId !== '';
+    const intentId = suppliedId ? (body.intentId as string) : `chain-svc:${randomUUID()}`;
 
     // IDEMPOTENT ON THE CALLER'S intentId, through the same reservation the
     // agent path uses - with NO CAP HOLD, because this is platform scope and
@@ -295,6 +293,7 @@ export class Treasury {
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
       capWei: null,
+      idSource: suppliedId ? 'caller' : 'server',
     });
     if (reservation.outcome === 'duplicate') {
       // Also measured rather than assumed: a replay reports what the wallet
@@ -460,6 +459,18 @@ export class Treasury {
     const reservation = this.store.reserve({
       intentId,
       topic: intentTopic(intentId),
+      // The freshest head the tail has OBSERVED - see Store.observedHead for
+      // why it must be that and not the cursor.
+      //
+      // NO RPC FALLBACK, deliberately. Reading the head here would put a chain
+      // call on the money path for every send, to bound a sweep that runs
+      // occasionally. When the tail has not polled yet this is null, which the
+      // sweep already treats as "cannot bound" - the same as a row written
+      // before the column existed. The cost is that an intent reserved in the
+      // first second of a cold start is not sweepable, which is the correct
+      // trade against a per-send read.
+      reservedAtBlock: this.store.observedHead() ?? undefined,
+      idSource: source,
       agentId: fromAgentId,
       stage,
       amount,

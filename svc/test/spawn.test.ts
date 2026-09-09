@@ -336,6 +336,49 @@ describe('policy defaults', () => {
 // THE RELEASE RULE, tested where it can actually go wrong. The store tests
 // prove the reservation is atomic; these prove signTransfer does not hand it
 // back after the money may already have moved.
+// The bound recorded at reservation must be the observed HEAD, not the cursor.
+// They are equal after a clean poll, so only a store where they DIVERGE can
+// tell the two apart - and that divergence is exactly the window a transfer
+// lands in, which is why the cursor is unsound.
+describe('the reservation records a sound lower bound', () => {
+  it('records the observed head, not the cursor, when they differ', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    writeFileSync(
+      join(dir, 'orch%3Aa.json'),
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 1000, max_per_stage: 5000, allow: ['*'], deny: [], frozen: false }),
+    );
+    const store = new Store(':memory:');
+    store.setObservedHead(10n);
+    store.setCursor('chain-log-tail', 3n); // processed less than it has looked at
+
+    class FailingTreasury extends Treasury {
+      protected signerFor(): Signer {
+        return {
+          prepareTransactionRequest: async (r: Record<string, unknown>) => r,
+          signTransaction: async () => '0xsigned' as const,
+          sendRawTransaction: async () => {
+            throw new Error('socket hang up'); // leaves the reservation unresolved
+          },
+        };
+      }
+    }
+    const t = new FailingTreasury(
+      { ...config, policyDir: dir } as Config,
+      { viemChain: {}, deployment: { VEEBux: '0x000000000000000000000000000000000000dEaD' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
+      store,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async () => null } as unknown as Resolver,
+      DEFAULTS,
+    );
+
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1', intentId: 'bounded' }).catch(() => undefined);
+
+    const row = store.unresolvedIntents().find((r) => r.intentId === 'bounded');
+    expect(row?.reservedAtBlock).toBe(10n); // the observed head, not the cursor's 3
+    store.close();
+  }, 20_000);
+});
+
 describe('the release rule', () => {
   const args = { agentId: 'orch:a', stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n };
 

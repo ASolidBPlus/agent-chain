@@ -256,6 +256,17 @@ export function enforcePolicy(args: {
   const { policy, to, canonical, amount } = args;
   const perTx = capToWei(policy.max_per_tx);
 
+  // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
+  // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
+  // number - and wallet-mcp refuses `vee <= 0` for the model. But a direct
+  // caller with a wallet token bypasses wallet-mcp entirely, and a zero-VEE
+  // sign-transfer burns an intent id and emits a zero Transfer for nothing.
+  // Harmless in itself; the reason to refuse it here is that the rule "the
+  // policy layer is a courtesy, the boundary is the boundary" has to hold for
+  // every check, not the ones that happened to be duplicated.
+  if (amount <= 0n) {
+    throw new HttpError('invalid_amount', 'vee must be greater than zero');
+  }
   if (amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} VEE`);
   }

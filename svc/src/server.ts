@@ -136,21 +136,38 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
     record !== null && (principal.scope === 'platform' || principal.agentId === record.agentId);
   if (!mine) throw new HttpError('unknown_intent', `no intent ${intentId}`);
 
-  if (!record.txHash) return { intentId, status: 'reserved' };
-
-  try {
-    const receipt = await services.chain.publicClient.getTransactionReceipt({
-      hash: record.txHash as `0x${string}`,
-    });
-    return {
-      intentId,
-      status: receipt.status === 'success' ? 'confirmed' : 'failed',
-      txHash: record.txHash,
-    };
-  } catch {
-    // No receipt yet - it is in the mempool, not missing.
-    return { intentId, status: 'broadcast', txHash: record.txHash };
+  // ANSWERED FROM THE STORE, not by a chain call. The tail already records
+  // every IntentTransfer against the intent that authorised it, so the question
+  // "did this land" has a local answer - and one that is stable rather than
+  // dependent on an RPC succeeding at the moment a caller asks.
+  //
+  // `reserved` no longer means "unresolvable". It means the tail has not seen a
+  // matching emission YET: either the transfer has not landed or the chain has
+  // not been examined that far. The sweep is what turns that into `failed`, and
+  // only when the cursor has passed the bound recorded at reservation.
+  if (record.txHash) {
+    return { intentId, status: 'confirmed', txHash: record.txHash };
   }
+
+  const wallet = services.store.spawnedAddress(record.agentId);
+  const ours =
+    record.emissions > 0 &&
+    record.firstFrom !== null &&
+    wallet !== null &&
+    record.firstFrom.toLowerCase() === wallet.toLowerCase();
+
+  if (ours) {
+    // Seen on chain, not yet swept into the row.
+    return { intentId, status: 'broadcast', txHash: record.firstTx };
+  }
+  if (record.emissions > 0) {
+    // An emission exists under this id but NOT from the reserving wallet.
+    // transferWithIntent is permissionless, so this is somebody spending
+    // against the intent rather than the intent resolving - reported rather
+    // than counted as a resolution.
+    return { intentId, status: 'reserved', foreignEmission: true };
+  }
+  return { intentId, status: 'reserved' };
 }
 
 async function getBalance({ services, param, principal }: RouteContext): Promise<unknown> {

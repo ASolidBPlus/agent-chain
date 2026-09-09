@@ -28,6 +28,23 @@ async function sink(handler: (body: string) => number): Promise<{ url: string; r
 
 const chain = {} as Chain;
 
+/// Like chainWith, but the head ADVANCES - so two pollOnce calls see two
+/// different windows, which is the boundary the single-window helper cannot
+/// express.
+function chainAt(
+  block: bigint,
+  logs: Array<{ args: { intentId: string; from?: string }; transactionHash: string }>,
+): Chain {
+  return {
+    deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+    publicClient: {
+      getBlockNumber: async () => block,
+      getContractEvents: async ({ eventName }: { eventName: string }) =>
+        eventName === 'IntentTransfer' ? logs : [],
+    },
+  } as unknown as Chain;
+}
+
 describe('event delivery', () => {
   it('delivers buffered events and removes them', async () => {
     const s = await sink(() => 200);
@@ -264,6 +281,10 @@ describe('the intent anomaly', () => {
   // that makes it an anomaly - failing open on exactly the case this exists for.
   it('counts an emission with no sender, recording the sender as null', async () => {
     const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-nosender', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
     const tail = new EventTail({ token: 'tok' } as Config, chainWith([
       { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
       { args: { intentId: TOPIC }, transactionHash: '0xbbb' } as never,
@@ -282,6 +303,55 @@ describe('the intent anomaly', () => {
     store.close();
   });
 
+  // THE REGRESSION. Two emissions for one intent id, arriving in two DIFFERENT
+  // poll windows - which is the realistic shape, because the poll runs every
+  // second and two chain-svc instances do not coordinate their timing.
+  //
+  // This test FAILS against the head that shipped the detector: `byIntent` was
+  // a local Map over one poll's window and nothing persisted, so the two
+  // emissions were each a group of one. Every anomaly test built both
+  // emissions inside a single `pollOnce()` against a stub whose head never
+  // moved, so the poll boundary was not a variable in any of them and no
+  // mutant could have made it one.
+  //
+  // A single-window test that passes proves the detector RUNS. Only the pair
+  // proves it DETECTS - which is why the one-window case below stays as its
+  // control rather than being replaced by this.
+  it('raises chain.anomaly across TWO polls, not just within one', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-late', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+
+    // Poll 1: head at block 1, the first emission.
+    await new EventTail(
+      { token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' }]),
+      store,
+    ).pollOnce();
+
+    // Poll 2: the head has ADVANCED, and the second emission arrives. The
+    // handoff between the two calls is the thing under test.
+    await new EventTail(
+      { token: 'tok' } as Config,
+      chainAt(2n, [{ args: { intentId: TOPIC, from: '0xBBB2' }, transactionHash: '0xbbb' }]),
+      store,
+    ).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+
+    expect(anomaly).toBeDefined();
+    expect(anomaly!.agentId).toBe('orch:mark');
+    expect(anomaly!.transfers).toEqual([
+      { txHash: '0xaaa', from: '0xAAA1' },
+      { txHash: '0xbbb', from: '0xBBB2' },
+    ]);
+    store.close();
+  });
+
   it('raises nothing for the normal case of one transfer per intent', async () => {
     const store = new Store(':memory:');
     const tail = new EventTail({ token: 'tok' } as Config, chainWith([
@@ -295,9 +365,256 @@ describe('the intent anomaly', () => {
     store.close();
   });
 
-  // The transfer came from a store that has never seen this intent - which is
-  // the split-brain case, and the null is the signal rather than a gap.
-  it('reports a null agent when no local reservation matches the topic', async () => {
+  // THE PREMISE OF THE NARROWING, verified rather than asserted (mesh-planner,
+  // 09:41). The whole scope decision rests on the split-brain double-spend
+  // reserving the SAME intent id in BOTH stores - the retry carries the
+  // idempotency key, and `reserve` dedupes on it - so each store sees an id it
+  // reserved and its own count reaches two.
+  //
+  // One store is what a single instance experiences in that scenario, so this
+  // models it faithfully: reserve the id here, then present two emissions for
+  // it across two advancing polls, as the two instances' broadcasts would
+  // appear to this one.
+  //
+  // Note the two signals are complementary, not redundant: split-brain uses the
+  // SAME wallet key so the senders MATCH, and it is the COUNT that catches it.
+  // A foreign sender is the other case.
+  it('catches the split-brain double-spend: same id, same sender, two polls', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'shared-key', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+    const SAME_WALLET = '0xWALLET';
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: SAME_WALLET }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(2n, [{ args: { intentId: TOPIC, from: SAME_WALLET }, transactionHash: '0xbbb' }]),
+      store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+
+    expect(anomaly).toBeDefined();
+    expect(anomaly!.agentId).toBe('orch:mark');
+    // Identical senders - so nothing but the COUNT distinguishes this.
+    expect(anomaly!.transfers).toEqual([
+      { txHash: '0xaaa', from: SAME_WALLET },
+      { txHash: '0xbbb', from: SAME_WALLET },
+    ]);
+    store.close();
+  });
+
+  // The bound the sweep needs, and the reason it is the observed HEAD rather
+  // than the cursor: the two differ by exactly the window a transfer lands in.
+  it('records the observed head, ahead of the cursor', async () => {
+    const store = new Store(':memory:');
+    await new EventTail({ token: 'tok' } as Config, chainAt(7n, []), store).pollOnce();
+
+    expect(store.observedHead()).toBe(7n);
+    // The cursor tracks what has been PROCESSED and is not a sound bound.
+    expect(store.getCursor('chain-log-tail')).toBe(7n);
+    store.close();
+  });
+
+  it('never moves the observed head backwards', async () => {
+    const store = new Store(':memory:');
+    await new EventTail({ token: 'tok' } as Config, chainAt(9n, []), store).pollOnce();
+    await new EventTail({ token: 'tok' } as Config, chainAt(3n, []), store).pollOnce();
+    expect(store.observedHead()).toBe(9n);
+    store.close();
+  });
+
+  // The COUNT has to survive polls, not just the first anomaly. Two emissions
+  // raise it; a third must report three, which is what proves the number in the
+  // payload is a running total rather than a constant.
+  it('counts a third emission, across three polls', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'thrice', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+    const hashes = ['0xaaa', '0xbbb', '0xccc'];
+    for (const [i, txHash] of hashes.entries()) {
+      await new EventTail({ token: 'tok' } as Config,
+        chainAt(BigInt(i + 1), [{ args: { intentId: TOPIC, from: '0xW' }, transactionHash: txHash }]),
+        store).pollOnce();
+    }
+
+    const anomalies = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .filter((e) => e.kind === 'chain.anomaly');
+
+    expect(anomalies).toHaveLength(2); // raised on the 2nd and again on the 3rd
+    expect((anomalies[1]!.transfers as unknown[])).toHaveLength(3);
+    expect(anomalies[1]!.detail).toContain('3 IntentTransfer events');
+    store.close();
+  });
+
+  // And a re-seen SECOND emission must not count again. The first is guarded by
+  // first_tx; this is the other half, and only a replay of the anomalous
+  // emission exercises it.
+  it('does not double-count a re-seen SECOND emission', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 're-second', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+    const first = { args: { intentId: TOPIC, from: '0xW' }, transactionHash: '0xaaa' };
+    const second = { args: { intentId: TOPIC, from: '0xW' }, transactionHash: '0xbbb' };
+
+    await new EventTail({ token: 'tok' } as Config, chainAt(1n, [first]), store).pollOnce();
+    await new EventTail({ token: 'tok' } as Config, chainAt(2n, [second]), store).pollOnce();
+    store.setCursor('chain-log-tail', 1n); // the pass failed; the window is replayed
+    await new EventTail({ token: 'tok' } as Config, chainAt(2n, [second]), store).pollOnce();
+
+    const anomalies = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .filter((e) => e.kind === 'chain.anomaly');
+
+    expect(anomalies).toHaveLength(1); // not two
+    expect((anomalies[0]!.transfers as unknown[])).toHaveLength(2);
+    store.close();
+  });
+
+  // Re-seeing a block must not manufacture an anomaly. The cursor only advances
+  // after a successful pass, so a failed pass replays the window.
+  it('does not double-count the same emission across a replayed window', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'replayed', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+    const log = { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' };
+
+    await new EventTail({ token: 'tok' } as Config, chainAt(1n, [log]), store).pollOnce();
+    // Same block, same emission, seen again.
+    const store2Tail = new EventTail({ token: 'tok' } as Config, chainAt(1n, [log]), store);
+    store.setCursor('chain-log-tail', 0n); // force the window to be re-scanned
+    await store2Tail.pollOnce();
+
+    expect(store.dueEvents(50).map((e) => e.kind)).not.toContain('chain.anomaly');
+    store.close();
+  });
+
+  // FOREIGN SENDER, both directions, because one alone would leave the property
+  // true by accident. The expected sender is the AUTHORITATIVE one - the wallet
+  // this store spawned for the intent's agent - and the emission's `from` is
+  // the observed value tested against it. Never `first_from` as a stand-in:
+  // that is the observed value, and comparing it to itself proves nothing.
+  it('flags a FOREIGN sender on the very first emission', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.reserve({
+      intentId: 'i-foreign', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: '0x000000000000000000000000000000000000dEaD' }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+
+    expect(anomaly).toBeDefined();
+    expect(anomaly!.reason).toBe('foreign_sender');
+    expect(anomaly!.agentId).toBe('orch:mark');
+    store.close();
+  });
+
+  // The predictability datum, carried so a facilitator does not need a second
+  // lookup: a model-chosen id quoted by a stranger is a guessable id being
+  // guessed; a chain-svc:<uuid> being quoted is a different question entirely.
+  it.each([
+    ['caller' as const, 'may be guessable'],
+    ['server' as const, 'not guessable'],
+  ])('a foreign emission reports a %s-supplied id', async (idSource, phrase) => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.reserve({
+      intentId: `i-${idSource}`, topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n, idSource,
+    });
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: '0x000000000000000000000000000000000000dEaD' }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    const anomaly = store.dueEvents(50)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+
+    expect(anomaly!.idSource).toBe(idSource);
+    expect(anomaly!.detail).toContain(phrase);
+  });
+
+  it('does NOT flag our own wallet as foreign', async () => {
+    const store = new Store(':memory:');
+    const WALLET = '0x000000000000000000000000000000000000bEEF';
+    store.markSpawned('orch:mark', WALLET);
+    store.reserve({
+      intentId: 'i-ours', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: WALLET }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    expect(store.dueEvents(50).map((e) => e.kind)).not.toContain('chain.anomaly');
+    store.close();
+  });
+
+  // Case sensitivity is the way this quietly inverts: addresses arrive
+  // checksummed from one source and lower-cased from another, and a raw !==
+  // would flag every one of our own emissions as foreign.
+  it('does not flag our own wallet when the casing differs', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.reserve({
+      intentId: 'i-case', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: '0x000000000000000000000000000000000000BEEF' }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    expect(store.dueEvents(50).map((e) => e.kind)).not.toContain('chain.anomaly');
+    store.close();
+  });
+
+  // When the wallet is unknown there is no authority to compare against, so no
+  // judgement is made. Failing open here is right - flagging on an unknown
+  // expected value would make every intent for an unspawned agent an anomaly -
+  // but it is a real hole in coverage and belongs in a test rather than a
+  // comment nobody reads.
+  it('makes no foreign judgement when the wallet is unknown', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-unknown', topic: TOPIC, agentId: 'orch:nowallet',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+
+    await new EventTail({ token: 'tok' } as Config,
+      chainAt(1n, [{ args: { intentId: TOPIC, from: '0xANYONE' }, transactionHash: '0xaaa' }]),
+      store).pollOnce();
+
+    expect(store.dueEvents(50).map((e) => e.kind)).not.toContain('chain.anomaly');
+    store.close();
+  });
+
+  // THE NARROWING, ruled 09:41. An id NOBODY here reserved is another party's
+  // traffic on a shared chain, or a direct caller moving their own funds under
+  // a self-chosen id - neither is the game's double-spend, which is reusing a
+  // RESERVED allotment to land the same authorised spend twice. Previously this
+  // raised with `agentId: null`; now it raises nothing, deliberately.
+  it('raises nothing for an id this store never reserved', async () => {
     const store = new Store(':memory:');
     const tail = new EventTail({ token: 'tok' } as Config, chainWith([
       { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
@@ -306,10 +623,146 @@ describe('the intent anomaly', () => {
 
     await tail.pollOnce();
 
-    const anomaly = store.dueEvents(20)
-      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
-      .find((e) => e.kind === 'chain.anomaly');
-    expect(anomaly!.agentId).toBeNull();
+    expect(store.dueEvents(20).map((e) => e.kind)).not.toContain('chain.anomaly');
+    store.close();
+  });
+});
+// The sweep. Its two branches are not symmetric, and the tests are shaped
+// around that: the positive one needs the SENDER because emission is not
+// exclusive, the negative one needs the BOUND because an unbounded absence is
+// not evidence.
+describe('sweepOnce', () => {
+  const TOPIC2 = `0x${'cd'.repeat(32)}`;
+  const WALLET = '0x000000000000000000000000000000000000bEEF';
+
+  function seeded(): { store: Store; tail: EventTail } {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:mark', WALLET);
+    return { store, tail: new EventTail({ token: 'tok' } as Config, chainAt(5n, []), store) };
+  }
+
+  const reserve = (store: Store, intentId: string, block: bigint | undefined) =>
+    store.reserve({
+      intentId, topic: TOPIC2, agentId: 'orch:mark', stage: 's1',
+      amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: block,
+    });
+
+  it('confirms an intent whose transfer landed, and KEEPS the hold', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'landed', 1n);
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.setCursor('chain-log-tail', 9n);
+
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
+    expect(store.intentTxHash('landed')).toBe('0xaaa');
+    // The money moved, so the budget stays spent.
+    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n);
+    store.close();
+  });
+
+  // Emission is not EXCLUSIVE: transferWithIntent is permissionless, so an
+  // event under our id proves an event exists, not that chain-svc made it.
+  it('does NOT confirm an emission from a foreign sender', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'foreign', 1n);
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE' });
+    store.setCursor('chain-log-tail', 9n);
+
+    const result = await tail.sweepOnce();
+    expect(result.confirmed).toBe(0);
+    expect(result.held).toBe(1); // and NOT released either - an emission exists
+    expect(store.intentTxHash('foreign')).toBeNull();
+    store.close();
+  });
+
+  // THE GUARD TEST, and it pins the NO-GO's own trigger as a permanent
+  // assertion rather than a fixed bug. `cursor == bound` is the ORDINARY
+  // post-poll state - a poll sets the observed head and the cursor to the same
+  // number - so a reservation taken just after a poll had its hold refunded and
+  // ITS IDEMPOTENCY KEY FREED by the very next sweep, and the retry broadcast a
+  // second transfer.
+  //
+  // Absence is never proof of never: a signed transaction can sit in the
+  // mempool arbitrarily long. So there is no negative branch at all.
+  it.each([
+    ['cursor above the bound', 9n],
+    ['cursor EQUAL to the bound, the ordinary post-poll state', 1n],
+  ])('never releases an unresolved intent - %s', async (_label, cursor) => {
+    const { store, tail } = seeded();
+    reserve(store, 'unlanded', 1n);
+    store.setCursor('chain-log-tail', cursor);
+
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
+    // The hold stands...
+    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n);
+    // ...and the id is still consumed, which is the half that matters: a retry
+    // must be refused, not broadcast a second time.
+    expect(
+      store.reserve({
+        intentId: 'unlanded', topic: TOPIC2, agentId: 'orch:mark',
+        stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n,
+      }).outcome,
+    ).toBe('duplicate');
+    store.close();
+  });
+
+  // RIDER 2 (10:41): a terminal intent answers with its status, and the SAME id
+  // is refused rather than re-reserved. This is the measured double-charge -
+  // "re-reserving the same intent id -> reserved NOT duplicate" - turned into a
+  // standing assertion instead of a fixed bug.
+  //
+  // Deliberately separate from the guard test above, which reaches the same
+  // `duplicate` from the other side: that one enters via THE SWEEP NOT
+  // RELEASING, this one via A TERMINAL INTENT NOT BEING RE-RESERVABLE. They
+  // fail for different reasons and one passing would not cover the other.
+  it('a terminal intent keeps its id consumed and answers with its outcome', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'terminal', 1n);
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    await tail.sweepOnce();
+
+    // Terminal status, from the store rather than a chain call.
+    expect(store.intentTxHash('terminal')).toBe('0xaaa');
+    // And the id is spent: a retry is refused WITH the original transaction,
+    // never admitted as a fresh reservation.
+    expect(
+      store.reserve({
+        intentId: 'terminal', topic: TOPIC2, agentId: 'orch:mark',
+        stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n,
+      }),
+    ).toEqual({ outcome: 'duplicate', txHash: '0xaaa' });
+    store.close();
+  });
+
+  // THE GUARANTEE, not an accident of branch order: the bound is consumed only
+  // by the negative branch, so a null one blocks RELEASE and never blocks
+  // COMPLETION.
+  it('never releases a row with NO bound, however far the cursor has moved', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'unbounded', undefined);
+    store.setCursor('chain-log-tail', 9_999_999n);
+
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
+    expect(store.spentThisStage('orch:mark', 's1')).toBe(10n ** 18n); // still held
+    store.close();
+  });
+
+  it('still COMPLETES a row with no bound when its transfer landed', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'unbounded-landed', undefined);
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+
+    expect((await tail.sweepOnce()).confirmed).toBe(1);
+    expect(store.intentTxHash('unbounded-landed')).toBe('0xaaa');
+    store.close();
+  });
+
+  it('holds an intent the tail has not yet processed past', async () => {
+    const { store, tail } = seeded();
+    reserve(store, 'too-soon', 100n);
+    store.setCursor('chain-log-tail', 20n); // cursor is BELOW the bound
+
+    expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
     store.close();
   });
 });
