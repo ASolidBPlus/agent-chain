@@ -105,6 +105,27 @@ describe('schema migration', () => {
     expect(replay).toEqual({ outcome: 'duplicate', txHash: '0xPAID' });
   });
 
+  // THE FIRST SCHEMA CHANGE AFTER THE MIGRATION SHIPPED, and the case the
+  // original gate got wrong: a store stamped v1 by the previous release skipped
+  // the reconciliation entirely, because it was gated on `version === 0`. It
+  // would have needed a numbered migration adding the same column the baseline
+  // adds - two mechanisms owning one list of columns.
+  it('upgrades a store stamped by the PREVIOUS release, not just a legacy one', () => {
+    const s1 = new Store(dbPath());
+    s1.close();
+    const db = new Database(dbPath());
+    db.exec('PRAGMA user_version = 1');            // as the previous release left it
+    db.exec('ALTER TABLE spawns DROP COLUMN bare_id_count'); // ...without v2's column
+    db.close();
+
+    expect(columns(dbPath(), 'spawns')).not.toContain('bare_id_count');
+    const s2 = new Store(dbPath());
+    s2.close();
+
+    expect(columns(dbPath(), 'spawns')).toContain('bare_id_count');
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
+  });
+
   // v0 IS AMBIGUOUS. A store created by a build that already had `topic` is
   // also stamped 0, and a baseline replaying a fixed history would either fail
   // on it or skip a column the other kind of v0 store needs.

@@ -14,7 +14,8 @@ import { asChainError } from './chain.ts';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Keystore } from './keystore.ts';
-import type { Resolver } from './resolver.ts';
+import { resolveBareName } from './resolver.ts';
+import type { Resolver, WalletResolution } from './resolver.ts';
 import type { Store } from './store.ts';
 import { walletPrincipal, type Principal } from './auth.ts';
 import {
@@ -394,6 +395,111 @@ export class Treasury {
 
   /// Used only by wallet-mcp and org-core (spec S4). chain-svc holds the key;
   /// the caller never sees it.
+  /// Wallet-scope `to` resolution plus the two instruments §5 requires, kept
+  /// together because they must not drift apart: what resolves, what gets
+  /// counted, and what gets signalled are one decision.
+  private async resolveTo(name: string, fromAgentId: string): Promise<WalletResolution> {
+    // Exactly one colon, guaranteed by CANONICAL_ID at every entry point, so
+    // this is total rather than merely usual.
+    const namespace = fromAgentId.slice(0, fromAgentId.indexOf(':'));
+    try {
+      // The free function with THIS resolver's lookup, so a caller holding
+      // only a lookup runs the same code rather than a copy of it.
+      const resolved = await resolveBareName((n) => this.resolver.lookup(n), name, namespace);
+      // Counted on any BARE `to` that was not an exact hit - whether the
+      // fallback then succeeded or not. See Store.countBareId.
+      if (resolved.bare && resolved.resolvedVia === 'own_namespace') {
+        this.countAndSignalBareId(fromAgentId, name, 'own_namespace');
+      }
+      return resolved;
+    } catch (err) {
+      if (err instanceof HttpError && err.code === 'ambiguous_name') {
+        // SIGNALLED, NOT COUNTED. The bare form IS an exactly registered name
+        // here, so the counter must not move - and folding it in would put two
+        // meanings in one number, re-merging what §4's repeat_emission /
+        // foreign_sender split keeps apart. The counter says "this persona
+        // never learned the convention"; this event says "go and look at who
+        // registered that alias", which is a different cause with a different
+        // remediation.
+        await this.signalCollision(name, fromAgentId);
+      } else if (err instanceof HttpError && err.code === 'unknown_name' && !name.includes(':')) {
+        // A bare miss is the untaught form too - it is what `unknown_name` was
+        // detecting before §5, and it must keep firing.
+        this.countAndSignalBareId(fromAgentId, name, 'unresolved');
+      }
+      throw err;
+    }
+  }
+
+  /// Counts AND DELIVERS. The column is the durable count; the event is how it
+  /// REACHES anyone.
+  ///
+  /// This was a counter with no reader - no route, no event, no consumer
+  /// outside its own tests - while its sibling in the same change went out
+  /// through `enqueueEvent`, the mechanism that exists for exactly this. The
+  /// detector §5 traded `unknown_name` for would have ACCUMULATED IN A COLUMN
+  /// instead of arriving, recoverable only by someone opening the store. A
+  /// VALUE NOTHING SURFACES IS NOT YET A SIGNAL.
+  ///
+  /// Still count, don't accumulate (the 09:41 rule): the outbox DELIVERS and
+  /// drains, so this adds no retention. The running total travels with each
+  /// event so a facilitator sees the trend without querying anything.
+  private countAndSignalBareId(
+    agentId: string,
+    to: string,
+    outcome: 'own_namespace' | 'unresolved',
+  ): void {
+    this.store.countBareId(agentId);
+    this.store.enqueueEvent('chain.bare_id', {
+      kind: 'chain.bare_id',
+      agentId,
+      to,
+      outcome,
+      count: this.store.bareIdCount(agentId),
+    });
+  }
+
+  /// The facilitator-visible half of the ambiguity refusal. Best effort: a
+  /// failure to describe the collision must not change the REFUSAL, which has
+  /// already been decided.
+  private async signalCollision(bare: string, agentId: string): Promise<void> {
+    const namespace = agentId.slice(0, agentId.indexOf(':'));
+
+    // ENRICHMENT IS BEST-EFFORT; THE SIGNAL IS NOT. Wrapping the whole thing in
+    // one catch loses the ALERT because a detail could not be fetched - and the
+    // detail here is a second registry read, which is exactly the sort of thing
+    // that fails on the day something odd is happening. A collision reported
+    // without its registrant is still "go and look"; a collision not reported
+    // at all is a squat nobody hears about.
+    const detail = async <T>(read: () => Promise<T>): Promise<T | null> => {
+      try {
+        return await read();
+      } catch {
+        return null;
+      }
+    };
+    const alias = await detail(() => this.resolver.lookup(bare));
+    const peer = await detail(() => this.resolver.lookup(`${namespace}:${bare}`));
+    const registrant = await detail(() => this.resolver.registrantOf(bare));
+
+    try {
+      this.store.enqueueEvent('chain.name_collision', {
+        kind: 'chain.name_collision',
+        agentId,
+        bare,
+        candidates: [
+          { alias: bare, canonical: alias?.canonical ?? null, address: alias?.address ?? null },
+          { canonical: `${namespace}:${bare}`, address: peer?.address ?? null },
+        ],
+        registrant,
+      });
+    } catch {
+      // The caller already has its 409. Losing the facilitator's copy must not
+      // turn a refusal into a 502 - but this is now the ONLY thing swallowed,
+      // rather than the whole signal.
+    }
+  }
+
   async signTransfer(
     principal: Principal,
     body: {
@@ -405,7 +511,17 @@ export class Treasury {
     },
     /// The X-Wallet-Client header, when the caller sent one.
     clientMarker?: string,
-  ): Promise<{ txHash: string; intentId: string; intentIdSource: 'caller' | 'server' }> {
+  ): Promise<{
+    txHash: string;
+    intentId: string;
+    intentIdSource: 'caller' | 'server';
+    /// WHO was paid, as the registry knows them - so a persona can see whom it
+    /// actually paid rather than the string it typed.
+    canonical: string | null;
+    /// WHICH RULE resolved it (§5). `canonical` alone would leave a correct
+    /// bare id and a wrong name that happens to resolve looking identical.
+    resolvedVia: 'exact' | 'own_namespace';
+  }> {
     // The source is DERIVED from the credential, never read from the body. A
     // body fromAgentId is tolerated only when it agrees; disagreeing is a 403
     // rather than a silent override, so a caller that lies is told so.
@@ -427,7 +543,12 @@ export class Treasury {
     const policy = await this.policyFor(fromAgentId);
     // RESOLVE FIRST. The policy check needs the registry's primary name for the
     // address, not just the string the caller typed - see enforcePolicy.
-    const target = await this.resolver.require(name);
+    //
+    // WALLET-SCOPE resolution: a bare `to` may name a peer in the CALLER'S OWN
+    // namespace (§5). The namespace is derived from `fromAgentId`, which is
+    // itself derived from the credential a few lines above and never from the
+    // body - so the fallback cannot be steered by the request.
+    const target = await this.resolveTo(name, fromAgentId);
     enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
@@ -482,7 +603,12 @@ export class Treasury {
       // The promise wallet-mcp makes to the model: a replay of the same send
       // returns the ORIGINAL result. Answering with the recorded hash is what
       // makes a retry safe.
-      if (reservation.txHash) return { txHash: reservation.txHash, intentId, intentIdSource: source };
+      if (reservation.txHash) {
+        return {
+          txHash: reservation.txHash, intentId, intentIdSource: source,
+          canonical: target.canonical, resolvedVia: target.resolvedVia,
+        };
+      }
       // Reserved but never completed: the first attempt reached the broadcast
       // and we do not know its outcome. Re-sending here is precisely the
       // double-charge, so this refuses and says why. It is an operator's job
@@ -540,7 +666,10 @@ export class Treasury {
       via: spendVia(clientMarker),
       memo: body.memo,
     });
-    return { ...sent, intentId, intentIdSource: source };
+    return {
+      ...sent, intentId, intentIdSource: source,
+      canonical: target.canonical, resolvedVia: target.resolvedVia,
+    };
   }
 
   /// The wallet client, as a seam. Overridable ONLY so a test can drive the

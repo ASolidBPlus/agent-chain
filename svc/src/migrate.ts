@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export class SchemaError extends Error {
   constructor(
@@ -82,6 +82,11 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; dd
   { table: 'intents', column: 'id_source', ddl: 'TEXT' },
   { table: 'memos', column: 'intent_id', ddl: 'TEXT' },
   { table: 'memos', column: 'from_agent_id', ddl: 'TEXT' },
+  // v2, §5: how many colon-less `to` values this wallet has sent that were not
+  // exactly registered names. NOT NULL DEFAULT 0 so an existing wallet starts
+  // at zero rather than null - a null counter would have to be treated as
+  // "unknown", and the detector's whole job is to be readable at a glance.
+  { table: 'spawns', column: 'bare_id_count', ddl: 'INTEGER NOT NULL DEFAULT 0' },
 ];
 
 export function classifiedColumns(): Set<string> {
@@ -141,7 +146,17 @@ export function migrate(
   // migration assuming v0 means pre-topic would fail on half of them. So the
   // baseline INTROSPECTS and adds what is absent, rather than replaying a
   // history the store never recorded.
-  if (version === 0) {
+  //
+  // AND IT RUNS FOR EVERY VERSION BELOW CURRENT, not only for 0. The first
+  // schema change after this module shipped (§5's bare-id counter) showed why:
+  // with the reconciliation gated on `version === 0`, a store already stamped
+  // v1 would skip it and need a NUMBERED migration to add the same column the
+  // baseline adds - two mechanisms that must agree about one list of columns,
+  // which is the shape that put four copies of the wallet-kind list in this
+  // codebase. Introspection is idempotent and additive-only, so running it at
+  // every upgrade is correct for a store of ANY age and there is nothing for
+  // the two paths to disagree about.
+  if (version < SCHEMA_VERSION) {
     for (const { table, column, ddl } of ADDITIVE_COLUMNS) {
       if (!tableExists(db, table)) continue;
       if (columnsOf(db, table).has(column)) continue;

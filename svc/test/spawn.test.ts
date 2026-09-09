@@ -13,6 +13,7 @@ import { Spawner } from '../src/spawn.ts';
 import { loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
+import { asChainError } from '../src/chain.ts';
 import { HttpError } from '../src/errors.ts';
 import type { Config } from '../src/config.ts';
 import type { Chain } from '../src/chain.ts';
@@ -442,7 +443,7 @@ describe('the reservation records a sound lower bound', () => {
       { viemChain: {}, deployment: { VEEBux: '0x000000000000000000000000000000000000dEaD' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       store,
-      { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async () => null } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' })) } as unknown as Resolver,
       DEFAULTS,
     );
 
@@ -519,7 +520,7 @@ describe('the release rule', () => {
         exploding('chain') as Chain,
         { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
         store,
-        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
+        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
         DEFAULTS,
       );
     // NOT treasury.vee: that is on the default deny list, so the policy check
@@ -539,6 +540,12 @@ describe('the release rule', () => {
         txHash: '0xorig',
         intentId: 'replay',
         intentIdSource: 'caller',
+        // A REPLAY CARRIES THEM TOO. Resolution happens before the reservation
+        // is consulted, so the replay knows whom it paid and by which rule -
+        // and a caller that gets the original hash back without them would have
+        // to guess whether the id it used still means the same wallet.
+        canonical: null,
+        resolvedVia: 'exact',
       });
       store.close();
     });
@@ -574,7 +581,7 @@ describe('a missing intent id is visible, not silent', () => {
     exploding('chain') as Chain,
     { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
     new Store(':memory:'),
-    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
+    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
     DEFAULTS,
   );
 
@@ -650,7 +657,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
       DEFAULTS,
     );
   }
@@ -668,7 +675,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async () => null } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical })) } as unknown as Resolver,
       DEFAULTS,
     );
   }
@@ -712,7 +719,11 @@ describe('concurrent signTransfer against a stage cap', () => {
       new Store(':memory:'),
       {
         require: async (n: string) => ({ address: addressOf(n), canonical: 'orch:someone' }),
-        lookup: async (n: string) => ({ address: addressOf(n), canonical: 'orch:someone' }),
+        // No NAMESPACE PEERS in this fixture: a real registry resolves the
+        // names that exist, and `orch:marky.vee` does not. A blanket resolver
+        // makes every bare name ambiguous with its own constructed peer.
+        lookup: async (n: string) =>
+          n.includes(':') ? null : { address: addressOf(n), canonical: 'orch:someone' },
       } as unknown as Resolver,
       DEFAULTS,
     );
@@ -758,7 +769,27 @@ describe('concurrent signTransfer against a stage cap', () => {
       new Store(':memory:'),
       {
         require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:someone' }),
-        lookup,
+        // The callback models THE DENY ENTRY's registry state over time, which
+        // is what every test here varies. Since §5 the resolution path calls
+        // `lookup` too, so the TARGET is resolved explicitly rather than
+        // falling into the callback and making every test also a test of
+        // whether `marky.vee` exists - which none of them are about.
+        //
+        // Wrapped the way the real Resolver.lookup wraps: a failed registry
+        // read reaches callers as a chain error, never as a raw Error, so a
+        // stub that throws raw would be testing a collaborator that does not
+        // exist.
+        lookup: async (n: string) => {
+          if (n === 'marky.vee') {
+            return { address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:someone' };
+          }
+          if (n.includes(':')) return null; // no namespace peers in this fixture
+          try {
+            return await lookup(n);
+          } catch (err) {
+            throw asChainError(err);
+          }
+        },
       } as unknown as Resolver,
       DEFAULTS,
     );
@@ -951,7 +982,7 @@ describe('POST /wallets/:agentId/balance', () => {
       } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: WALLET }) } as unknown as Keystore,
       store,
-      { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async () => null } as unknown as Resolver,
+      { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: WALLET, canonical: 'orch:a' })) } as unknown as Resolver,
       DEFAULTS,
     );
     t.balance = balance;

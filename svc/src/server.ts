@@ -11,6 +11,7 @@ import { asChainError } from './chain.ts';
 import { assertMayRead, authenticate, requirePlatform, type Principal } from './auth.ts';
 import type { Config } from './config.ts';
 import { HttpError, errorBody, toHttpError } from './errors.ts';
+import { resolveBareName } from './resolver.ts';
 import type { Resolver } from './resolver.ts';
 import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
@@ -92,10 +93,26 @@ async function getSupply({ services, principal }: RouteContext): Promise<unknown
   }
 }
 
-async function getResolve({ services, param }: RouteContext): Promise<unknown> {
+async function getResolve({ services, param, principal }: RouteContext): Promise<unknown> {
   const name = assertLookupName(param);
+
+  // WALLET SCOPE GETS §5's BARE-ID FALLBACK; PLATFORM SCOPE DOES NOT, and that
+  // is a consequence rather than a separate rule: the fallback needs the
+  // CALLER'S namespace, and a platform principal has no `agentId` to take one
+  // from. So a bare unregistered name stays `unknown_name` there.
+  //
+  // `wallet_resolve` is the primary addressing path a persona uses to check who
+  // it is about to pay, so it must answer the same question `/sign-transfer`
+  // would - a resolve that said `unknown_name` for a name the send would accept
+  // is worse than no resolve at all.
+  if (principal.scope === 'wallet') {
+    const namespace = principal.agentId.slice(0, principal.agentId.indexOf(':'));
+    const found = await resolveBareName((n) => services.resolver.lookup(n), name, namespace);
+    return { address: found.address, canonical: found.canonical, resolvedVia: found.resolvedVia };
+  }
+
   const found = await services.resolver.require(name);
-  return { address: found.address, canonical: found.canonical };
+  return { address: found.address, canonical: found.canonical, resolvedVia: 'exact' as const };
 }
 
 async function getReverse({ services, param }: RouteContext): Promise<unknown> {

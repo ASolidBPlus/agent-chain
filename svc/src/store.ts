@@ -71,6 +71,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS spawns (
         agent_id   TEXT PRIMARY KEY,
         address    TEXT NOT NULL,
+        -- §5's bare-id detector. Counts, never accumulates: a log of every bare
+        -- send would be keyed on caller behaviour and grow forever, and the
+        -- 09:41 rule forbids exactly that. A counter bounded by this table has
+        -- no retention window to get wrong.
+        bare_id_count INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS frozen (
@@ -244,6 +249,40 @@ export class Store {
       | { address: string }
       | null;
     return row?.address ?? null;
+  }
+
+  // --- the bare-id detector (spec S5) --------------------------------------
+
+  /// Counts one wallet-scope `to` that had no colon and was NOT an exactly
+  /// registered name.
+  ///
+  /// THIS EXISTS BECAUSE §5 DELETED A DETECTOR. `unknown_name` used to be the
+  /// only signal that a persona addresses peers by the id it SEES rather than
+  /// the id the registry HOLDS; accepting the untaught form silences it, and a
+  /// persona that never learns would then produce no signal at all. Same shape
+  /// as on-chain dedupe silencing `chain.anomaly` (§4): the change cannot stop
+  /// the behaviour, only stop recording it.
+  ///
+  /// REMOVING THIS COUNTER DELETES THE DETECTOR. It is not dead weight because
+  /// nothing in the service reads it - the facilitator does.
+  ///
+  /// It counts the BEHAVIOUR, not one of its outcomes: a bare `to` counts
+  /// whether the namespace fallback then succeeded, was skipped for shape, or
+  /// failed - so it keeps firing exactly as `unknown_name` did, and a
+  /// mixed-case persona stays visible. It does NOT count a legitimate
+  /// colon-less alias or platform name (`treasury.vee`), because those are an
+  /// exact hit and using them is correct.
+  countBareId(agentId: string): void {
+    this.db
+      .query(`UPDATE spawns SET bare_id_count = bare_id_count + 1 WHERE agent_id = ?`)
+      .run(agentId);
+  }
+
+  bareIdCount(agentId: string): number {
+    const row = this.db
+      .query(`SELECT bare_id_count FROM spawns WHERE agent_id = ?`)
+      .get(agentId) as { bare_id_count: number } | null;
+    return row?.bare_id_count ?? 0;
   }
 
   // --- frozen ------------------------------------------------------------

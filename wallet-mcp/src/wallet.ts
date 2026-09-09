@@ -23,11 +23,16 @@ const RECONCILE_BUDGET_MS = 10_000;
 
 const RECONCILE_INTERVAL_MS = 250;
 
-const REFUSAL_FOR: Record<string, Refusal> = {
+/// chain-svc error code -> the reason a persona sees. Exported so a root test
+/// can check every key against the codes chain-svc actually emits: a typo or a
+/// retired code here degrades silently into `error`, which tells the model
+/// nothing and is indistinguishable from a genuine fault.
+export const REFUSAL_FOR: Record<string, Refusal> = {
   over_max_per_tx: 'over_max_per_tx',
   over_stage_cap: 'over_stage_cap',
   counterparty_denied: 'counterparty_denied',
   unknown_name: 'unknown_name',
+  ambiguous_name: 'ambiguous_name',
   wallet_frozen: 'frozen',
 };
 
@@ -140,13 +145,35 @@ export class Wallet {
   }
 
   /// The primary addressing path (spec S5). A persona pays a NAME.
-  async resolve(name: string): Promise<{ address: string; canonical: string | null } | { error: string }> {
+  async resolve(
+    name: string,
+  ): Promise<
+    | { address: string; canonical: string | null; resolvedVia?: string }
+    | { error: string; detail?: string }
+  > {
     const res = await this.client.resolve(name);
     const down = Wallet.unreachable(res);
     if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'unknown_name') };
-    const body = res.body as { address?: string; canonical?: string | null; error?: string } | null;
-    if (res.status !== 200 || !body?.address) return { error: this.redact(body?.error ?? 'unknown_name') };
-    return { address: body.address, canonical: body.canonical ?? null };
+    const body = res.body as {
+      address?: string; canonical?: string | null; error?: string; detail?: string; resolvedVia?: string;
+    } | null;
+    if (res.status !== 200 || !body?.address) {
+      // The DETAIL travels with the code. chain-svc names both readings it
+      // tried; dropping that here is the flattening this file exists to forbid,
+      // one field over.
+      return {
+        error: this.redact(body?.error ?? 'unknown_name'),
+        ...(body?.detail ? { detail: this.redact(body.detail) } : {}),
+      };
+    }
+    // `resolvedVia` says WHICH RULE resolved it - a persona checking who it is
+    // about to pay should be able to see that the answer came from its own
+    // namespace rather than from an exactly registered name.
+    return {
+      address: body.address,
+      canonical: body.canonical ?? null,
+      ...(body.resolvedVia ? { resolvedVia: body.resolvedVia } : {}),
+    };
   }
 
   async history(limit = 20): Promise<Array<Record<string, unknown>> | { error: string }> {
@@ -225,9 +252,20 @@ export class Wallet {
       // It matters more here than in the general case: this is a game students
       // DEBUG. An outage dressed as a missing name sends them looking for a
       // registration bug that does not exist.
-      return resolved.error === 'unknown_name'
-        ? this.fail('unknown_name', `no wallet is registered as ${to}`)
-        : this.fail('error', resolved.error);
+      // THE DETAIL COMES FROM chain-svc, NOT FROM HERE. Since §5 a bare `to`
+      // has TWO readings - the name as typed and the peer in this wallet's own
+      // namespace - and the refusal has to name both, or a persona reads "no
+      // wallet is registered as toby" while `arena:toby` exists and concludes
+      // the registry is broken.
+      //
+      // Reconstructing that sentence locally would be a second authority for
+      // one fact, and the two would drift the first time either side reworded
+      // it. chain-svc already says exactly what it tried; this passes it
+      // through and adds nothing.
+      if (resolved.error === 'unknown_name' || resolved.error === 'ambiguous_name') {
+        return this.fail(REFUSAL_FOR[resolved.error]!, resolved.detail ?? resolved.error);
+      }
+      return this.fail('error', resolved.error);
     }
 
     const local = checkLocally(readPolicy(this.config.policyFile), to, vee);

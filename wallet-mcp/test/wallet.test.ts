@@ -25,6 +25,8 @@ interface Fake {
   intentReplies: Array<{ status: number; body: unknown }>;
   intentQueries: string[];
   names: Record<string, { address: string; canonical: string }>;
+  /// Bare names chain-svc refuses as ambiguous rather than resolving (§5).
+  ambiguous: string[];
 }
 
 async function fakeChainSvc(): Promise<Fake> {
@@ -36,6 +38,11 @@ async function fakeChainSvc(): Promise<Fake> {
     reply: { status: 200, body: { txHash: '0xtx1' } },
     intentReplies: [],
     intentQueries: [],
+    // Names the registry refuses as AMBIGUOUS: a bare form that is both a
+    // registered name and a peer in the caller's namespace (§5). chain-svc
+    // answers 409 rather than picking one, and the fake has to model that or
+    // wallet-mcp's half of the refusal is untested.
+    ambiguous: [],
     names: {
       'alpha.vee': { address: '0xaaa', canonical: 'alpha:darknetclient' },
       'treasury.vee': { address: '0xttt', canonical: 'treasury.vee' },
@@ -55,8 +62,18 @@ async function fakeChainSvc(): Promise<Fake> {
 
       if (url.pathname.startsWith('/resolve/')) {
         const name = decodeURIComponent(url.pathname.slice('/resolve/'.length));
+        if (state.ambiguous.includes(name)) {
+          return json(409, {
+            error: 'ambiguous_name',
+            detail: `${name} is both a registered name and a wallet in your namespace`,
+          });
+        }
         const found = state.names[name];
-        return found ? json(200, found) : json(404, { error: 'unknown_name' });
+        // chain-svc sends a DETAIL naming both readings it tried. The fake has
+        // to as well, or a test cannot tell propagation from reconstruction.
+        return found
+          ? json(200, found)
+          : json(404, { error: 'unknown_name', detail: `no wallet is registered as ${name}, nor as orch:${name}` });
       }
       if (url.pathname.startsWith('/reverse/')) return json(200, { canonical: AGENT, aliases: ['shadowbroker.vee'] });
       if (url.pathname.startsWith('/balance/')) return json(200, { vee: '250', eth: '1' });
@@ -191,6 +208,33 @@ describe('send', () => {
       reason: 'unknown_name',
     });
     expect(fake.transfers).toHaveLength(0);
+  });
+
+  // DO NOT FLATTEN, on the RESOLUTION side. Since §5 a bare `to` has two
+  // readings, and chain-svc's refusal names both. Rebuilding that sentence here
+  // would be a second authority for one fact: the two would drift the first
+  // time either side reworded it, and the persona would be told only half of
+  // what was tried.
+  //
+  // Measured: replacing the propagated detail with a locally-built
+  // "no wallet is registered as <to>" survived every other test in this file.
+  it("passes chain-svc's own detail through, rather than inventing one", async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    const result = await wallet.send({ to: 'ghost', vee: '1', intent_id: 'd3' });
+    expect(result).toMatchObject({ ok: false, reason: 'unknown_name' });
+    // BOTH readings, which only the authority knows about.
+    expect((result as { detail?: string }).detail).toContain('orch:ghost');
+  });
+
+  // A bare id that collides with a registered name is refused, not guessed, and
+  // reaches the persona as its OWN reason - not flattened into unknown_name,
+  // which would say "no wallet" when the problem is that there are two.
+  it('surfaces ambiguous_name as its own reason', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    fake.ambiguous.push('toby');
+    const result = await wallet.send({ to: 'toby', vee: '1', intent_id: 'd4' });
+    expect(result).toMatchObject({ ok: false, reason: 'ambiguous_name' });
+    expect((result as { detail?: string }).detail).toContain('both');
   });
 
   it('refuses when the policy file says frozen', async () => {

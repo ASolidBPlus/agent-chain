@@ -14,6 +14,11 @@ export type ErrorCode =
   | 'not_your_wallet'
   | 'wrong_scope'
   | 'unknown_name'
+  /// A bare `to` that is BOTH a registered name and a wallet in the caller's
+  /// namespace (§5). 409 rather than 404: both readings exist, so this is a
+  /// conflict to resolve, not a miss. Never resolved by guessing - picking
+  /// either candidate is the vanity-squat phishing primitive.
+  | 'ambiguous_name'
   | 'unknown_intent'
   | 'wallet_frozen'
   | 'over_max_per_tx'
@@ -25,7 +30,10 @@ export type ErrorCode =
   | 'chain_unreachable'
   | 'internal_error';
 
-const STATUS: Record<ErrorCode, number> = {
+/// Exported so a RUNTIME check can enumerate the codes: `ErrorCode` is a type
+/// and is erased, so nothing downstream could otherwise verify that the code it
+/// maps is one this service actually emits.
+export const STATUS: Record<ErrorCode, number> = {
   invalid_agent_id: 400,
   invalid_name: 400,
   invalid_amount: 400,
@@ -38,6 +46,7 @@ const STATUS: Record<ErrorCode, number> = {
   not_your_wallet: 403,
   wrong_scope: 403,
   unknown_name: 404,
+  ambiguous_name: 409,
   // Deliberately indistinguishable from an intent that belongs to another
   // wallet: see getIntent. A 403 there would confirm the id exists.
   unknown_intent: 404,

@@ -17,6 +17,13 @@ export type Refusal =
   | 'over_stage_cap'
   | 'counterparty_denied'
   | 'unknown_name'
+  /// A bare `to` that is BOTH a registered name and a peer in this wallet's own
+  /// namespace (§5). A DISTINCT reason, not folded into `unknown_name`: the
+  /// name resolved twice, not zero times, and telling a persona "no wallet is
+  /// registered as toby" when two are would send it looking for the wrong
+  /// thing. Refusing rather than guessing is what stops a vanity squat
+  /// redirecting in-namespace payments.
+  | 'ambiguous_name'
   | 'frozen'
   | 'duplicate_intent'
   // Not a policy refusal: the send may have happened. Kept in this union
