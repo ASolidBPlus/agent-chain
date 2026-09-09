@@ -312,7 +312,7 @@ describe('policy enforcement', () => {
       const store = new Store(':memory:');
       const args = { intentId: 'unsent', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap };
       store.reserve(args);
-      store.release('unsent', 'orch:a', 's1', vee(100));
+      store.release('unsent');
       expect(store.spentThisStage('orch:a', 's1')).toBe(0n);
       expect(store.reserve(args).outcome).toBe('reserved');
       store.close();
@@ -325,17 +325,78 @@ describe('policy enforcement', () => {
       const args = { intentId: 'done', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap };
       store.reserve(args);
       store.completeIntent('done', '0xabc');
-      store.release('done', 'orch:a', 's1', vee(100));
+      store.release('done');
       expect(store.reserve(args)).toEqual({ outcome: 'duplicate', txHash: '0xabc' });
       store.close();
     });
 
     // Both halves of `release` are gated on the SAME fact - did the DELETE
     // remove a row - because they were not, and the refund ran regardless.
+    // A1. `reserve` grew a no-hold mode, so "an intent row exists" and "a hold
+    // was taken" became independent facts - and the refund was keyed on the
+    // first. Releasing a no-hold reservation refunded budget never taken, and
+    // the zero-clamp turned the overshoot into wiping the wallet's real spend.
+    it('releasing a NO-HOLD reservation refunds nothing, and leaves a real hold alone', () => {
+      const store = new Store(':memory:');
+
+      // A real agent send, holding 100.
+      store.reserve({ intentId: 'agent-send', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap });
+      expect(store.spentThisStage('orch:a', 's1')).toBe(vee(100));
+
+      // A platform set-balance for 400, holding NOTHING.
+      store.reserve({ intentId: 'platform-set', agentId: 'orch:a', stage: 's1', amount: vee(400), capWei: null });
+      expect(store.spentThisStage('orch:a', 's1')).toBe(vee(100)); // unchanged, correct
+
+      store.release('platform-set');
+
+      // The agent's real hold survives. Before the fix this refunded 400 that
+      // was never held, and the clamp floored the result at zero.
+      expect(store.spentThisStage('orch:a', 's1')).toBe(vee(100));
+      store.close();
+    });
+
+    // A5. Seat 2's two separations. `release` takes ONLY an intent id now, so
+    // there is no caller coordinate left to be wrong - but these assert the
+    // behaviour rather than the signature, because a future overload could
+    // reintroduce either.
+    it('refunds the stage the intent was reserved IN, not one the caller names', () => {
+      const store = new Store(':memory:');
+      store.reserve({ intentId: 'i', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap });
+      store.reserve({ intentId: 'j', agentId: 'orch:a', stage: 's2', amount: vee(300), capWei: cap });
+
+      store.release('i');
+
+      expect(store.spentThisStage('orch:a', 's1')).toBe(0n);   // refunded
+      expect(store.spentThisStage('orch:a', 's2')).toBe(vee(300)); // untouched
+      store.close();
+    });
+
+    it('refunds the wallet the intent belongs TO, not another one', () => {
+      const store = new Store(':memory:');
+      store.reserve({ intentId: 'i', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap });
+      store.reserve({ intentId: 'k', agentId: 'orch:b', stage: 's1', amount: vee(200), capWei: cap });
+
+      store.release('i');
+
+      expect(store.spentThisStage('orch:a', 's1')).toBe(0n);
+      expect(store.spentThisStage('orch:b', 's1')).toBe(vee(200)); // another wallet's budget is not touched
+      store.close();
+    });
+
+    // The refund comes from the ROW, not the caller's argument - the caller's
+    // idea of the amount is exactly what went wrong.
+    it('refunds what was held even when the caller names a different amount', () => {
+      const store = new Store(':memory:');
+      store.reserve({ intentId: 'x', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap });
+      store.release('x');
+      expect(store.spentThisStage('orch:a', 's1')).toBe(0n);
+      store.close();
+    });
+
     it('refunds nothing for an intent that was never reserved', () => {
       const store = new Store(':memory:');
       take(store, 'orch:a', 's1', vee(500), cap);
-      store.release('never-existed', 'orch:a', 's1', vee(9999));
+      store.release('never-existed');
       // The budget stands. The old code refunded unconditionally and merely
       // CLAMPED at zero, which is a different property and the wrong one: it
       // made an unknown intent id a way to zero a wallet's stage spend.
@@ -347,8 +408,8 @@ describe('policy enforcement', () => {
       const store = new Store(':memory:');
       const args = { intentId: 'twice', agentId: 'orch:a', stage: 's1', amount: vee(100), capWei: cap };
       store.reserve(args);
-      store.release('twice', 'orch:a', 's1', vee(100));
-      store.release('twice', 'orch:a', 's1', vee(100));
+      store.release('twice');
+      store.release('twice');
       expect(store.spentThisStage('orch:a', 's1')).toBe(0n);
       store.close();
     });
@@ -363,7 +424,7 @@ describe('policy enforcement', () => {
       expect(store.reserve(args).outcome).toBe('reserved');
       store.completeIntent('landed', '0xabc');
 
-      store.release('landed', 'orch:a', 's1', vee(100));
+      store.release('landed');
 
       expect(store.reserve(args)).toEqual({ outcome: 'duplicate', txHash: '0xabc' });
       expect(store.spentThisStage('orch:a', 's1')).toBe(vee(100));

@@ -26,8 +26,12 @@ export type Refusal =
 
 export interface WalletPolicy {
   agentId: string;
-  max_per_tx: number;
-  max_per_stage: number;
+  /// NUMBER OR DECIMAL STRING, matching chain-svc, which writes this file. A
+  /// cap is an amount and every other amount here is a decimal string; a
+  /// reader stricter than the writer would refuse a policy the boundary
+  /// accepted, which is the same disagreement the shared file exists to stop.
+  max_per_tx: number | string;
+  max_per_stage: number | string;
   allow: string[];
   deny: string[];
   frozen: boolean;
@@ -39,20 +43,33 @@ export interface WalletPolicy {
 export function readPolicy(path: string): WalletPolicy | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as WalletPolicy;
-    if (typeof parsed?.max_per_tx === 'number' && Array.isArray(parsed.allow)) return parsed;
+    const cap = (v: unknown) => typeof v === 'number' || typeof v === 'string';
+    if (cap(parsed?.max_per_tx) && Array.isArray(parsed?.allow)) return parsed;
   } catch {
     // Unreadable policy: see checkLocally - this is NOT treated as permission.
   }
   return null;
 }
 
-/// `*` matches anything, `*.vee` matches a suffix. Same restricted dialect as
-/// chain-svc, on purpose: two glob implementations that disagree would produce
+/// `*` matches anything, `*.vee` a suffix, `arena:*` a prefix; anything else is
+/// a literal. THE SAME RESTRICTED DIALECT AS chain-svc, character for
+/// character, on purpose: two glob implementations that disagree would produce
 /// a local "allowed" and a server-side refusal, which reads to a model as the
-/// platform being broken.
+/// platform being broken - and in the other direction a local "allowed" over a
+/// pattern the boundary reads as a literal.
+///
+/// The trailing-star form was added with chain-svc's (ruled 06:15). If you
+/// change one of these, change both; `chain/svc/test/policy.test.ts` asserts
+/// they agree across allow AND deny.
+///
+/// Validation of malformed patterns lives in chain-svc, which WRITES this file.
+/// This side only reads it, and a reader that re-validated could refuse a
+/// policy the boundary accepted - which is the disagreement above, wearing a
+/// different hat.
 export function matchesPattern(pattern: string, name: string): boolean {
   if (pattern === '*') return true;
   if (pattern.startsWith('*')) return name.endsWith(pattern.slice(1));
+  if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1));
   return pattern === name;
 }
 

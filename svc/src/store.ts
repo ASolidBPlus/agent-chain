@@ -98,6 +98,15 @@ export class Store {
         stage      TEXT NOT NULL,
         amount     TEXT NOT NULL,
         tx_hash    TEXT,
+        -- The stage budget this intent HOLDS, in wei, or '0' when it took no
+        -- hold (a platform-scope transfer). RECORDED rather than inferred: the
+        -- refund used to be keyed on whether the DELETE removed a row, which
+        -- was correct while every reservation held its amount and stopped being
+        -- correct the moment capWei:null made 'an intent row exists'
+        -- independent of 'a hold was taken'. Releasing a no-hold reservation
+        -- refunded budget never taken, and the zero-clamp turned that overshoot
+        -- into wiping the wallet's real spend.
+        held_wei   TEXT NOT NULL DEFAULT '0',
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS stage_spend (
@@ -194,6 +203,14 @@ export class Store {
       .run(agentId, Date.now());
   }
 
+  /// The ONLY way back from frozen (spec S3). `DELETE /wallets` still means
+  /// retirement and is not reversible by this - retirement also clears the
+  /// wallet's aliases, so un-freezing a retired wallet would give back the
+  /// ability to spend without giving back the ability to be paid.
+  unfreeze(agentId: string): void {
+    this.db.query(`DELETE FROM frozen WHERE agent_id = ?`).run(agentId);
+  }
+
   isFrozen(agentId: string): boolean {
     return this.db.query(`SELECT 1 AS present FROM frozen WHERE agent_id = ?`).get(agentId) != null;
   }
@@ -268,7 +285,17 @@ export class Store {
     agentId: string;
     stage: string;
     amount: bigint;
-    capWei: bigint;
+    /// The stage cap to test against, or NULL for no cap hold at all - which
+    /// is what a PLATFORM-scope transfer takes (arena spec S3). The intent is
+    /// still recorded, so idempotency and the IntentTransfer story are
+    /// unchanged; only the budget half is skipped, because the treasury has no
+    /// stage cap and an operator reset refused as over_stage_cap mid-game would
+    /// be a bad failure.
+    ///
+    /// This is the one place the primitive's two halves come apart, and it is a
+    /// PARAMETER rather than a second method so that both halves stay in one
+    /// transaction and the call site has to say which it wants.
+    capWei: bigint | null;
   }): Reservation {
     const { intentId, agentId, stage, amount, capWei } = args;
 
@@ -284,20 +311,31 @@ export class Store {
       // Re-read INSIDE the transaction: a value read before it began is the
       // same stale figure the check-then-act acted on.
       const current = this.spentThisStage(agentId, stage);
-      if (current + amount > capWei) return { outcome: 'over_stage_cap', txHash: null };
+      if (capWei !== null && current + amount > capWei) {
+        return { outcome: 'over_stage_cap', txHash: null };
+      }
 
       this.db
         .query(
-          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?)`,
+          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?, ?)`,
         )
-        .run(intentId, agentId, stage, amount.toString(), Date.now());
-      this.db
-        .query(
-          `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
-           ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
-        )
-        .run(agentId, stage, (current + amount).toString());
+        .run(
+          intentId,
+          agentId,
+          stage,
+          amount.toString(),
+          capWei === null ? '0' : amount.toString(),
+          Date.now(),
+        );
+      if (capWei !== null) {
+        this.db
+          .query(
+            `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
+             ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
+          )
+          .run(agentId, stage, (current + amount).toString());
+      }
       return { outcome: 'reserved', txHash: null };
     });
     return attempt();
@@ -371,24 +409,32 @@ export class Store {
   ///
   /// If you find yourself writing a second release path that reasons about the
   /// intent separately from the cap, stop — that is the tell.
-  release(intentId: string, agentId: string, stage: string, amount: bigint): void {
+  /// Give a reservation back - BOTH halves - when the send it was taken for
+  /// PROVABLY did not happen. See THE RELEASE RULE below.
+  ///
+  /// TAKES ONLY AN INTENT ID. Every other coordinate comes from the row: which
+  /// wallet, which stage, how much was held. That is A1's principle finished
+  /// rather than applied once - the first fix stopped trusting the caller's
+  /// AMOUNT and went on trusting its idea of WHICH AGENT and WHICH STAGE, from
+  /// the same SELECT that already knew both.
+  ///
+  /// Not reachable while `signTransfer` passes the same two variables to
+  /// `reserve` and `release` - which is exactly where the previous guard sat
+  /// before `capWei: null` existed. It separates for a second caller, for a
+  /// caller whose stage moves mid-request (`currentStage()` can change once
+  /// hub-core is configured), and for the scan-gated sweep, which by
+  /// construction RECONSTRUCTS these coordinates instead of remembering them.
+  release(intentId: string): void {
     const undo = this.db.transaction((): void => {
-      // BOTH HALVES ARE GATED ON THE SAME FACT, and they were not: the DELETE
-      // was conditional on `tx_hash IS NULL` while the refund ran regardless,
-      // so releasing a COMPLETED intent left the intent correctly intact and
-      // handed its stage budget back anyway - measured, a second 100-VEE send
-      // was then admitted under a 100-VEE cap.
-      //
-      // Latent today, because release is only reached pre-broadcast. Not latent
-      // for the scan-gated sweep described above, which will call release on
-      // intents that turn out to HAVE LANDED: that is the withdrawn timer
-      // sweep's defect wearing a different hat, and this is where it would have
-      // arrived. The DELETE's own `changes` count is the authority - if it
-      // removed nothing, there was nothing to give back.
-      const removed = this.db
-        .query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`)
-        .run(intentId).changes;
-      if (removed === 1) this.releaseStageSpend(agentId, stage, amount);
+      const row = this.db
+        .query(`SELECT agent_id, stage, held_wei FROM intents WHERE intent_id = ? AND tx_hash IS NULL`)
+        .get(intentId) as { agent_id: string; stage: string; held_wei: string } | null;
+      if (!row) return;
+
+      this.db.query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`).run(intentId);
+
+      const held = BigInt(row.held_wei);
+      if (held > 0n) this.releaseStageSpend(row.agent_id, row.stage, held);
     });
     undo();
   }

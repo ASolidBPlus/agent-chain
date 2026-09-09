@@ -120,3 +120,44 @@ describe('normaliseVee', () => {
     );
   });
 });
+
+// chain-svc WRITES this file and wallet-mcp READS it, so the reader must accept
+// everything the writer emits. Caps became decimal strings (ruled 07:58); a
+// reader still demanding numbers would reject every policy chain-svc produces
+// and the model would see "no policy" - which fails OPEN to chain-svc's
+// boundary rather than closed, so nothing would visibly break until a cap
+// silently stopped being pre-checked.
+describe('reading the policy chain-svc actually writes', () => {
+  it('accepts STRING caps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pol-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        agentId: 'orch:a',
+        max_per_tx: '25',
+        max_per_stage: '100',
+        allow: ['*.vee'],
+        deny: ['treasury.vee'],
+        frozen: false,
+      }),
+    );
+
+    const policy = readPolicy(file);
+    expect(policy).not.toBeNull();
+    expect(policy!.max_per_tx).toBe('25');
+    // And the cap it read actually enforces, in wei rather than as a float.
+    expect(checkLocally(policy, 'bob.vee', '26')).toBe('over_max_per_tx');
+    expect(checkLocally(policy, 'bob.vee', '25')).toBeNull();
+  });
+
+  it('still accepts numeric caps, so an older file keeps working', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pol-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 25, max_per_stage: 100, allow: ['*.vee'], deny: [], frozen: false }),
+    );
+    expect(checkLocally(readPolicy(file), 'bob.vee', '26')).toBe('over_max_per_tx');
+  });
+});

@@ -19,29 +19,21 @@ import type { Keystore } from './keystore.ts';
 import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
-import { isPolicy, loadPolicyDefaults, readPolicyFile, type AgentPolicy, type PolicyDefaults, type WalletKind } from './policy.ts';
-import { assertAlias, assertCanonicalAgentId, keyFileName, parseVee } from './validate.ts';
+import { mergePolicy, loadPolicyDefaults, readPolicyFile, type AgentPolicy, type PolicyDefaults, type WalletKind,
+  assertPatternsUsable,
+} from './policy.ts';
+import {
+  assertAlias,
+  assertCanonicalAgentId,
+  keyFileName,
+  parseVee,
+} from './validate.ts';
 
 /// Every wallet gets native ETH at spawn so nothing ever fails on gas even if
 /// the chain's zero-gas flags change (spec S2).
 const GAS_ENDOWMENT = parseEther('1');
 
 /// A caller-supplied policy (hub-core setting per-agent values, spec S4).
-function assertPolicy(value: unknown): AgentPolicy {
-  if (!isPolicy(value)) {
-    throw new HttpError(
-      'invalid_request',
-      'policy must be {max_per_tx, max_per_stage, allow, deny} with positive numbers and string arrays',
-    );
-  }
-  return {
-    max_per_tx: value.max_per_tx,
-    max_per_stage: value.max_per_stage,
-    allow: [...value.allow],
-    deny: [...value.deny],
-  };
-}
-
 export interface SpawnRequest {
   agentId?: unknown;
   fundVee?: unknown;
@@ -92,9 +84,11 @@ export class Spawner {
     const fundVee = parseVee(body.fundVee ?? 0, 'fundVee');
     // hub-core may set per-agent caps; otherwise they come by kind from the
     // game-balance file, never from a constant in this module.
-    const policy = body.policy === undefined || body.policy === null
-      ? this.policyDefaults[kind]
-      : assertPolicy(body.policy);
+    // A supplied policy is a PATCH over the kind defaults, not a complete
+    // document: `{allow, deny}` with the caps left alone is the arena's whole
+    // use, and demanding all four made that the one shape that failed while
+    // sending nothing succeeded.
+    const policy = mergePolicy(body.policy, this.policyDefaults[kind]);
 
     // A burner is deliberately an unnamed address the game has to trace, so a
     // named burner is a contradiction rather than a request to be helpful about.
@@ -112,6 +106,15 @@ export class Spawner {
       // A caller that lost it calls rotate.
       return { agentId, address: already as Address, ...(alias ? { alias } : {}) };
     }
+
+    // Both entry points enforce the canonical-deny rule; this was on the PATCH
+    // path only, so a deny entry refused there was accepted here.
+    //
+    // Placed AFTER the cheap validation and the idempotency check, because it
+    // reads the registry: an argument refusal should not depend on the chain
+    // being reachable, and a repeat spawn should not pay for a check whose
+    // answer it already stored.
+    await this.assertDenyEntriesAreCanonical(policy.deny);
 
     const address = (await this.keystore.has(agentId))
       ? (await this.keystore.load(agentId)).address
@@ -257,6 +260,85 @@ export class Spawner {
   private async existingPolicy(agentId: string): Promise<AgentPolicy> {
     // Falls back to the `agent` defaults only when there is no file to preserve.
     return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
+  }
+
+  /// Partial update of a wallet's policy (arena spec S3). Platform scope.
+  ///
+  /// `frozen: false` is the ONLY way back from frozen. `DELETE /wallets` keeps
+  /// meaning retirement and stays irreversible: it also clears the wallet's
+  /// aliases, so un-retiring by un-freezing would return the ability to spend
+  /// without the ability to be paid.
+  async patchPolicy(
+    agentId: string,
+    body: {
+      frozen?: unknown;
+      max_per_tx?: unknown;
+      max_per_stage?: unknown;
+      allow?: unknown;
+      deny?: unknown;
+    },
+  ): Promise<Record<string, unknown>> {
+    assertCanonicalAgentId(agentId);
+    if (!this.store.spawnedAddress(agentId)) {
+      throw new HttpError('wallet_not_found', `no wallet for ${agentId}`);
+    }
+
+    // ONE VALIDATOR FOR ONE DOCUMENT. This used to have its own - `assertCap`
+    // and `assertPatternList` - while `POST /wallets` used `mergePolicy`, so
+    // the two entry points to the same policy file enforced different rules:
+    // a wallet spawned with `max_per_tx: "25"` could not be patched in the
+    // form it was spawned with, and the form PATCH did accept wrote a JSON
+    // number into a file whose other caps were strings.
+    //
+    // A patch over the CURRENT policy is the same operation as a patch over
+    // the kind defaults, so it is the same function with a different base.
+    const current = await this.existingPolicy(agentId);
+    const next = mergePolicy(body, current);
+
+    // Also called here now. It was on this path only, so `POST /wallets` with
+    // `deny: ["mark.vee"]` was accepted while PATCH with the identical value
+    // was refused - the same asymmetry in the other direction.
+    await this.assertDenyEntriesAreCanonical(next.deny);
+
+    const frozen = typeof body.frozen === 'boolean' ? body.frozen : this.store.isFrozen(agentId);
+    if (typeof body.frozen === 'boolean') {
+      if (body.frozen) this.store.freeze(agentId);
+      else this.store.unfreeze(agentId);
+    }
+
+    await this.writePolicyFile(agentId, next, frozen);
+    return { agentId, ...next, frozen };
+  }
+
+  /// A deny entry must name a CANONICAL id or a PLATFORM name, never a vanity
+  /// alias (chain spec S5's durable rule). The two are indistinguishable by
+  /// shape - `treasury.vee` and `mark.vee` are the same string form - so the
+  /// REGISTRY is the authority: an entry is canonical when it IS the primary
+  /// name for the address it resolves to.
+  ///
+  /// Why the rule exists: a canonical entry is matched against the canonical
+  /// that the transfer's own `to` resolution already produced, so it holds in
+  /// every state the registry can be in. An alias-named entry depends on
+  /// resolving the ENTRY itself, which is the read that can fail.
+  ///
+  /// An entry that resolves to nothing is ACCEPTED. It names no identity today,
+  /// which is the same "not found is a legitimate no-match" rule the deny check
+  /// itself uses - and refusing it would make a policy un-writable until the
+  /// wallet it names exists, which inverts the spawn order.
+  private async assertDenyEntriesAreCanonical(deny: string[]): Promise<void> {
+    for (const entry of deny) {
+      if (entry.includes('*')) continue; // a pattern names no single identity
+      const found = await this.resolver.lookup(entry).catch(() => null);
+      if (!found) continue; // names nothing yet
+      if (found.canonical && found.canonical !== entry) {
+        throw new HttpError(
+          'invalid_request',
+          `deny entry ${JSON.stringify(entry)} is a vanity alias for ${found.canonical}; ` +
+            `deny the canonical id or platform name instead, so the rule does not depend on ` +
+            `resolving the alias at spend time`,
+        );
+      }
+    }
   }
 
   /// The per-agent policy file wallet-mcp reads (spec S5). Written atomically:

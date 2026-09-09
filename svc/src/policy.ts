@@ -17,9 +17,19 @@ export type WalletKind = 'org' | 'agent' | 'burner';
 
 /// The caps written into an agent's policy file at spawn, which wallet-mcp
 /// enforces (spec S5).
+/// A cap, as a whole-VEE amount. NUMBER OR DECIMAL STRING, because a cap IS an
+/// amount and every other amount on these wires is a decimal string (ruled
+/// 03:55). A number is accepted for the same reason it is on `vee`: an integer
+/// is exactly representable, and a config author writes 25 as readily as "25".
+///
+/// Never compared as a float. `Number("12.5") > max_per_tx` would reintroduce,
+/// inside the check, the imprecision the string form exists to prevent - see
+/// veeToWei.
+export type VeeCap = number | string;
+
 export interface AgentPolicy {
-  max_per_tx: number;
-  max_per_stage: number;
+  max_per_tx: VeeCap;
+  max_per_stage: VeeCap;
   allow: string[];
   deny: string[];
 }
@@ -49,12 +59,79 @@ export function loadPolicyDefaults(path: string): PolicyDefaults {
   return out;
 }
 
+/// A cap in wei, from either accepted form. One conversion for both, so a
+/// number and its string spelling can never compare differently.
+export function capToWei(cap: VeeCap): bigint {
+  const text = typeof cap === 'number' ? String(cap) : cap;
+  const [whole, frac = ''] = text.split('.');
+  return BigInt(whole + frac.padEnd(18, '0').slice(0, 18));
+}
+
+/// Is this a usable cap? A positive integer, or a positive decimal string with
+/// at most 18 places - the same shape `vee` takes on the wire.
+export function isCap(value: unknown): value is VeeCap {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== 'string') return false;
+  if (!/^\d+(\.\d{1,18})?$/.test(value)) return false;
+  return capToWei(value) > 0n;
+}
+
+const isNameList = (a: unknown): a is string[] =>
+  Array.isArray(a) && a.every((x) => typeof x === 'string' && x.length > 0);
+
+/// A CALLER-SUPPLIED POLICY IS A PATCH OVER THE KIND DEFAULTS, not a complete
+/// document. Every field is optional and an omitted one falls to the default
+/// for the wallet's kind (spec S4.1: "caps may be omitted and fall to
+/// chain-svc's agent defaults").
+///
+/// It used to demand all four, which produced an asymmetry nobody would design
+/// on purpose and which broke the arena: sending NO policy succeeded and fell
+/// to defaults, while sending a strictly MORE SPECIFIC one - `allow`/`deny`
+/// with the caps left to the defaults, which is the arena's whole use - was
+/// refused outright. Found by mesh-agent-builder running the stack rather than
+/// reading it.
+export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy {
+  if (value === undefined || value === null) return defaults;
+  if (typeof value !== 'object') {
+    throw new HttpError('invalid_request', 'policy must be an object');
+  }
+  const p = value as Record<string, unknown>;
+
+  for (const field of ['max_per_tx', 'max_per_stage'] as const) {
+    if (p[field] !== undefined && !isCap(p[field])) {
+      // invalid_amount, not invalid_request (ruled 07:58): a cap IS an amount,
+      // and a caller that sent 25.5 has made an amount mistake, not a
+      // malformed-request one. Same code `vee` gets for the same reason.
+      throw new HttpError(
+        'invalid_amount',
+        `${field} must be a decimal string of whole VEE, e.g. "25"; an integer number is ` +
+          `tolerated, a non-integer number is refused rather than rounded`,
+      );
+    }
+  }
+  for (const field of ['allow', 'deny'] as const) {
+    if (p[field] !== undefined && !isNameList(p[field])) {
+      throw new HttpError('invalid_request', `${field} must be an array of non-empty strings`);
+    }
+  }
+
+  const merged: AgentPolicy = {
+    max_per_tx: (p.max_per_tx as VeeCap) ?? defaults.max_per_tx,
+    max_per_stage: (p.max_per_stage as VeeCap) ?? defaults.max_per_stage,
+    allow: (p.allow as string[]) ?? defaults.allow,
+    deny: (p.deny as string[]) ?? defaults.deny,
+  };
+  assertPatternsUsable(merged.allow, 'allow');
+  assertPatternsUsable(merged.deny, 'deny');
+  return merged;
+}
+
+/// Still used to validate a policy FILE read back from disk, where a complete
+/// document is what was written.
 export function isPolicy(value: unknown): value is AgentPolicy {
   if (typeof value !== 'object' || value === null) return false;
   const p = value as Record<string, unknown>;
-  const positive = (n: unknown) => typeof n === 'number' && Number.isFinite(n) && n > 0;
-  const names = (a: unknown) => Array.isArray(a) && a.every((x) => typeof x === 'string' && x.length > 0);
-  return positive(p.max_per_tx) && positive(p.max_per_stage) && names(p.allow) && names(p.deny);
+  return isCap(p.max_per_tx) && isCap(p.max_per_stage) && isNameList(p.allow) && isNameList(p.deny);
 }
 
 
@@ -72,14 +149,54 @@ export async function readPolicyFile(policyDir: string, agentId: string): Promis
 }
 
 
-/// `*` matches anything; `*.vee` matches any name with that suffix. Deliberately
-/// not a general glob: the patterns come from a game config, and a regex
-/// dialect nobody has specified is a way to write an allow rule that silently
-/// matches more than its author meant.
+/// The pattern dialect for allow and deny lists. THREE forms and no more:
+///
+///   `*`        matches anything
+///   `*suffix`  matches any name ending `suffix`   (`*.vee`)
+///   `prefix*`  matches any name starting `prefix` (`arena:*`)
+///   anything else is a LITERAL, compared whole.
+///
+/// Still deliberately not a general glob: the patterns come from a game config,
+/// and a regex dialect nobody has specified is a way to write an allow rule
+/// that silently matches more than its author meant. The trailing-star form was
+/// added (ruled 06:15) because `arena:*` was needed and, until then, matched
+/// NOTHING - it fell through to the literal comparison, so it was compared as
+/// the seven-character string `arena:*`. In an allow list that refuses
+/// everything, which is loud; in a DENY list it denies nothing, which is not.
+///
+/// A star anywhere else (`a*b`, `**`, `a*b*c`) is REFUSED AT POLICY LOAD rather
+/// than silently treated as a literal - see assertPatternsUsable. A pattern
+/// that looks like a glob and behaves like a string is the failure this dialect
+/// exists to avoid, and the old code had exactly one of them.
+///
+/// chain/wallet-mcp carries an identical copy. They must agree: wallet-mcp's
+/// local refusal is the model-facing fast path and chain-svc's is the boundary,
+/// and a pattern that means different things in the two is the drift the shared
+/// policy file was written to prevent. `test/policy.test.ts` asserts agreement
+/// across both lists.
 export function matchesPattern(pattern: string, name: string): boolean {
   if (pattern === '*') return true;
   if (pattern.startsWith('*')) return name.endsWith(pattern.slice(1));
+  if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1));
   return pattern === name;
+}
+
+/// Refuses a pattern whose star is in a position this dialect does not
+/// implement, so it fails at load with a name rather than at match time by
+/// quietly matching nothing. Called for both `allow` and `deny`: a malformed
+/// entry in `deny` is the dangerous one, because it fails silently open.
+export function assertPatternsUsable(patterns: string[], field: 'allow' | 'deny'): void {
+  for (const p of patterns) {
+    const stars = p.split('*').length - 1;
+    const usable = p === '*' || (stars === 1 && (p.startsWith('*') || p.endsWith('*'))) || stars === 0;
+    if (!usable) {
+      throw new HttpError(
+        'invalid_request',
+        `${field} pattern ${JSON.stringify(p)} is not supported: a star is allowed only as the ` +
+          `whole pattern, a leading star (*.vee), or a trailing star (arena:*)`,
+      );
+    }
+  }
 }
 
 export function isDenied(policy: AgentPolicy, name: string): boolean {
@@ -100,7 +217,7 @@ export function isAllowed(policy: AgentPolicy, name: string): boolean {
 /// and the spend record have to be one atomic step, or concurrent sends all
 /// read the same pre-spend total and all pass. See Store.reserveStageSpend.
 export function stageCapWei(policy: AgentPolicy): bigint {
-  return BigInt(policy.max_per_stage) * 10n ** 18n;
+  return capToWei(policy.max_per_stage);
 }
 
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
@@ -137,7 +254,7 @@ export function enforcePolicy(args: {
   amount: bigint;
 }): void {
   const { policy, to, canonical, amount } = args;
-  const perTx = BigInt(policy.max_per_tx) * 10n ** 18n;
+  const perTx = capToWei(policy.max_per_tx);
 
   if (amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} VEE`);
