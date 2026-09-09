@@ -343,7 +343,7 @@ describe('the release rule', () => {
         exploding('chain') as Chain,
         { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
         store,
-        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }) } as unknown as Resolver,
+        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
         DEFAULTS,
       );
     // NOT treasury.vee: that is on the default deny list, so the policy check
@@ -398,7 +398,7 @@ describe('a missing intent id is visible, not silent', () => {
     exploding('chain') as Chain,
     { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
     new Store(':memory:'),
-    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }) } as unknown as Resolver,
+    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
     DEFAULTS,
   );
 
@@ -474,10 +474,208 @@ describe('concurrent signTransfer against a stage cap', () => {
       { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }) } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD' }), lookup: async () => null } as unknown as Resolver,
       DEFAULTS,
     );
   }
+
+  /// Same harness, but the resolver reports a CANONICAL that differs from the
+  /// requested name - which is what an alias is.
+  async function treasuryResolving(canonical: string, deny: string[]): Promise<CountingTreasury> {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    writeFileSync(
+      join(dir, 'orch%3Aa.json'),
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 1000, max_per_stage: 5000, allow: ['*'], deny, frozen: false }),
+    );
+    return new CountingTreasury(
+      { ...config, policyDir: dir } as Config,
+      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
+      new Store(':memory:'),
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async () => null } as unknown as Resolver,
+      DEFAULTS,
+    );
+  }
+
+  // THE RULED TEST (04:05), end to end. The unit tests pass `canonical` in by
+  // hand, so they prove enforcePolicy uses it - they cannot prove signTransfer
+  // RESOLVES FIRST and hands it over. Measured: with the call site reverted to
+  // the pre-resolution order, every unit test still passes and this one fails.
+  it('refuses an ALIAS of a denied wallet, and never reaches the chain', async () => {
+    const t = await treasuryResolving('treasury.vee', ['treasury.vee']);
+    const code = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'treasure.vee', vee: '1', intentId: 'alias-1' }),
+    );
+    expect(code).toBe('counterparty_denied');
+    expect(t.broadcasts).toBe(0);
+  }, 20_000);
+
+  // The control: the same wallet, not denied, must still go through - otherwise
+  // a probe that refuses everything would pass the test above.
+  it('still sends to an alias whose wallet is not denied', async () => {
+    const t = await treasuryResolving('orch:bob', []);
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1', intentId: 'alias-2' });
+    expect(t.broadcasts).toBe(1);
+  }, 20_000);
+
+  /// A resolver where a deny entry and the requested name are DIFFERENT names
+  /// for the SAME address - the case no amount of string matching can catch.
+  async function treasuryWithAliases(deny: string[], sameAddress: string[]): Promise<CountingTreasury> {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    writeFileSync(
+      join(dir, 'orch%3Aa.json'),
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 1000, max_per_stage: 5000, allow: ['*'], deny, frozen: false }),
+    );
+    const SHARED = '0x000000000000000000000000000000000000bEEF';
+    const OTHER = '0x000000000000000000000000000000000000dEaD';
+    const addressOf = (n: string) => (sameAddress.includes(n) ? SHARED : OTHER);
+    return new CountingTreasury(
+      { ...config, policyDir: dir } as Config,
+      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
+      new Store(':memory:'),
+      {
+        require: async (n: string) => ({ address: addressOf(n), canonical: 'orch:someone' }),
+        lookup: async (n: string) => ({ address: addressOf(n), canonical: 'orch:someone' }),
+      } as unknown as Resolver,
+      DEFAULTS,
+    );
+  }
+
+  // THE CASE NAME MATCHING CANNOT REACH. The deny names one alias; the caller
+  // uses a DIFFERENT alias of the same wallet. Neither string matches the entry
+  // and the canonical matches neither, so only comparing ADDRESSES catches it.
+  it('refuses a wallet denied under a different alias entirely', async () => {
+    const t = await treasuryWithAliases(['mark.vee'], ['mark.vee', 'marky.vee']);
+    const code = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'id-1' }),
+    );
+    expect(code).toBe('counterparty_denied');
+    expect(t.broadcasts).toBe(0);
+  }, 20_000);
+
+  // The control: a different wallet with a similar name still goes through, so
+  // the identity check is not simply refusing everything.
+  it('still sends to a DIFFERENT wallet when a deny entry exists', async () => {
+    const t = await treasuryWithAliases(['mark.vee'], ['mark.vee']);
+    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.vee', vee: '1', intentId: 'id-2' });
+    expect(t.broadcasts).toBe(1);
+  }, 20_000);
+
+  // A deny-entry resolve that FAILS is not the same as one that finds nothing,
+  // and they now get opposite answers (ruled 05:29). Splitting them is the
+  // whole point: "there is no such denied identity" is an answer, "I could not
+  // find out" is not.
+  function treasuryWhoseLookup(lookup: (n: string) => Promise<unknown>): CountingTreasury {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    writeFileSync(
+      join(dir, 'orch%3Aa.json'),
+      JSON.stringify({
+        agentId: 'orch:a', max_per_tx: 1000, max_per_stage: 5000,
+        allow: ['*'], deny: ['mark.vee'], frozen: false,
+      }),
+    );
+    return new CountingTreasury(
+      { ...config, policyDir: dir } as Config,
+      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
+      new Store(':memory:'),
+      {
+        require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:someone' }),
+        lookup,
+      } as unknown as Resolver,
+      DEFAULTS,
+    );
+  }
+
+  // READ FAILED -> refuse. Admitting a transfer we could not evaluate the deny
+  // list against errs in the one direction a cap must not.
+  it('refuses when a deny entry cannot be resolved, rather than sending anyway', async () => {
+    const t = treasuryWhoseLookup(async () => {
+      throw new Error('registry read failed');
+    });
+    const code = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-1' }),
+    );
+    expect(['chain_error', 'chain_unreachable']).toContain(code);
+    expect(t.broadcasts).toBe(0);
+  }, 20_000);
+
+  // NOT FOUND -> proceed. An unregistered deny entry names no identity, which
+  // is a real answer and not an unknown.
+  it('sends when a deny entry names nothing registered', async () => {
+    const t = treasuryWhoseLookup(async () => null);
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-2' });
+    expect(t.broadcasts).toBe(1);
+  }, 20_000);
+
+  // The failure is not cached, so a registry that recovers starts denying
+  // again. Caching it would turn one failed read into a wallet un-denied for
+  // the life of the process.
+  it('does not remember a failed resolve, so recovery restores the deny', async () => {
+    let calls = 0;
+    const t = treasuryWhoseLookup(async () => {
+      if (++calls === 1) throw new Error('registry read failed');
+      return { address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:someone' };
+    });
+
+    const first = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-3' }),
+    );
+    expect(['chain_error', 'chain_unreachable']).toContain(first);
+
+    const second = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-4' }),
+    );
+    expect(second).toBe('counterparty_denied');
+    expect(t.broadcasts).toBe(0);
+  }, 20_000);
+
+  // SEAT 1'S FIXTURE, one line different from the read-failure one and the
+  // difference is the whole finding: a deny entry that is NOT YET REGISTERED
+  // resolves to null, and "not registered" is as transient as "read failed" -
+  // names get registered, that is what the game does. Deny a counterparty by
+  // canonical id BEFORE that agent is spawned, spawn it, and a cached null
+  // un-denies its aliases for the life of the process.
+  it('denies a wallet whose deny entry was registered AFTER an earlier send', async () => {
+    let registered = false;
+    const t = treasuryWhoseLookup(async () =>
+      registered ? { address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:mark' } : null,
+    );
+
+    // First send: the deny entry names nothing yet, so nothing matches.
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-1' });
+    expect(t.broadcasts).toBe(1);
+
+    // The name is now registered, to the same wallet the alias points at.
+    registered = true;
+
+    const code = await codeOf(() =>
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-2' }),
+    );
+    expect(code).toBe('counterparty_denied');
+    expect(t.broadcasts).toBe(1); // still one: the second never reached the chain
+  }, 20_000);
+
+  // And the other direction, which a cached POSITIVE would get wrong:
+  // `setTargetFor` re-points a name and retirement clears it, so a resolution
+  // that was correct once can stop being correct.
+  it('stops denying once the deny entry no longer resolves to that wallet', async () => {
+    let pointsAtTarget = true;
+    const t = treasuryWhoseLookup(async () =>
+      pointsAtTarget
+        ? { address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:mark' }
+        : { address: '0x000000000000000000000000000000000000dEaD', canonical: 'orch:mark' },
+    );
+
+    expect(
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-3' })),
+    ).toBe('counterparty_denied');
+
+    pointsAtTarget = false;
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-4' });
+    expect(t.broadcasts).toBe(1);
+  }, 20_000);
 
   it('broadcasts exactly floor(cap/amount) of N concurrent sends', async () => {
     const t = await treasuryWithStageCap(100); // one 100-VEE send fits

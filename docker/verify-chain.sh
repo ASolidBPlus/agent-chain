@@ -97,15 +97,25 @@ mv /tmp/local.json.hidden ../deployments/local.json
 step "the startup banner does not leak the treasury key"
 # anvil prints the mnemonic and every private key unless -q. Account 0 is the
 # treasury, and docker logs is not a secret store.
-leaks=$(docker logs "$NAME" 2>&1 | grep -ciE "private key|mnemonic|0x[0-9a-f]{64}" || true)
-[ "$leaks" = 0 ] || { echo "FAIL: $leaks secret-shaped lines in docker logs"; exit 1; }
-echo "secret-shaped lines in docker logs: 0"
+# Greps for the TWO LITERAL SECRETS, not for a shape. This used to match
+# /private key|mnemonic|0x[0-9a-f]{64}/, which also matches every transaction
+# and block hash anvil logs - so the number counted things that are not secrets
+# (8 in a full run: 3 banner lines plus 5 from the deploy), and, worse, it would
+# go quietly green the day anvil stopped printing the key banner for ANY reason,
+# because it was measuring the shape of a log line rather than the presence of a
+# credential. A control that can only fail loudly when things are fine is the
+# thing this check exists to prevent.
+secrets() { docker logs "$1" 2>&1 | grep -cF -e "$MNEMONIC" -e "$KEY" || true; }
+
+leaks=$(secrets "$NAME")
+[ "$leaks" = 0 ] || { echo "FAIL: the mnemonic or the treasury key appears $leaks times in docker logs"; exit 1; }
+echo "mnemonic/treasury-key occurrences in docker logs: 0"
 # The control, so that zero means something: the same grep against an
 # unsuppressed banner must be non-zero.
 docker run --rm -d --name "$NAME-noq" --entrypoint anvil "$IMAGE" \
   --host 0.0.0.0 --port 8545 --accounts 1 --mnemonic "$MNEMONIC" >/dev/null 2>&1
 sleep 3
-control=$(docker logs "$NAME-noq" 2>&1 | grep -ciE "private key|mnemonic|0x[0-9a-f]{64}" || true)
+control=$(secrets "$NAME-noq")
 docker rm -f "$NAME-noq" >/dev/null 2>&1
 [ "$control" -gt 0 ] || { echo "FAIL: control found no leak either - the grep proves nothing"; exit 1; }
 echo "control (same grep, no -q): $control"

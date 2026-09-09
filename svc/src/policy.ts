@@ -103,16 +103,63 @@ export function stageCapWei(policy: AgentPolicy): bigint {
   return BigInt(policy.max_per_stage) * 10n ** 18n;
 }
 
-export function enforcePolicy(args: { policy: AgentPolicy; to: string; amount: bigint }): void {
-  const { policy, to, amount } = args;
+/// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
+///
+/// A wallet holds MORE THAN ONE name by design - that is not an edge case, it
+/// is what `POST /aliases` is for: `addAlias` calls
+/// `registerFor(alias, wallet, wallet)`, so a vanity alias and the canonical
+/// agent id resolve to the same address. Matching the deny list against the
+/// string the caller typed therefore denied a NAME and not a WALLET. Measured
+/// before the fix, with `deny: ["mark.vee"]` - "mark.vee" refused,
+/// "orch:mark" ALLOWED, same wallet, no registrar write and no privilege.
+///
+/// This function closes it by NAME: deny matches the requested name OR the
+/// canonical, so a deny naming the canonical cannot be dodged with an alias.
+/// That is the ruled case (04:05) and the common one, because `reverse[target]`
+/// keeps the first-registered name as the canonical.
+///
+/// It CANNOT close a deny naming one alias while the caller uses another -
+/// neither string matches the entry, and the canonical matches neither. That
+/// case is closed by IDENTITY in `Treasury.assertNotDeniedByIdentity`, which
+/// resolves each literal deny entry once and compares addresses. Both passes
+/// exist because neither is sufficient: wildcards have no address to resolve,
+/// and strings cannot see through an alias.
+///
+/// Guidance that follows from the residual: a deny entry should name a
+/// CANONICAL id, never a vanity alias - an alias-named deny relies on the
+/// identity pass, which fails open if the registry read fails.
+export function enforcePolicy(args: {
+  policy: AgentPolicy;
+  to: string;
+  /// The registry's primary name for the resolved address. Pass it: matching
+  /// only `to` is the alias bypass this function used to have.
+  canonical?: string;
+  amount: bigint;
+}): void {
+  const { policy, to, canonical, amount } = args;
   const perTx = BigInt(policy.max_per_tx) * 10n ** 18n;
 
   if (amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} VEE`);
   }
-  // Deny wins over allow: a name matching both is refused, because the deny
-  // list is the one an author writes to stop something specific.
-  if (isDenied(policy, to) || !isAllowed(policy, to)) {
+
+  // BOTH NAMES, and the two lists use them differently ON PURPOSE (ruled 04:05).
+  //
+  // DENY matches EITHER, so it is strictly harder to evade: a wallet holds more
+  // than one name by design - `addAlias` registers an alias against the same
+  // address - so denying `treasury.vee` while `treasure.vee` resolved to the
+  // same wallet was a refusal and an allowance for one counterparty.
+  //
+  // ALLOW also matches either, and NOT the canonical alone, which is what a
+  // literal reading of "evaluate against the resolved principal" would give.
+  // Measured: the default agent allow list is `["*.vee"]` and canonical ids look
+  // like `orch:bob`, so canonical-only matching refuses EVERY send to EVERY
+  // agent wallet. Widening deny is the safe direction; narrowing allow is not.
+  const names = canonical && canonical !== to ? [to, canonical] : [to];
+  const denied = names.some((n) => isDenied(policy, n));
+  const allowed = names.some((n) => isAllowed(policy, n));
+
+  if (denied || !allowed) {
     throw new HttpError('counterparty_denied', `${to} is not an allowed counterparty`);
   }
 }

@@ -372,3 +372,59 @@ describe('policy enforcement', () => {
     });
   });
 });
+
+// The deny list's known limit, asserted so it cannot change silently. This is
+// NOT a test that the behaviour is right - it is a test that the behaviour is
+// what the comment in policy.ts says, so that the day someone fixes it, this
+// fails and the comment gets retired with it.
+describe('deny matches the resolved principal, not just the requested name', () => {
+  const denied = {
+    agentId: 'orch:mark',
+    max_per_tx: 1000,
+    max_per_stage: 5000,
+    allow: ['*'],
+    deny: ['mark.vee'],
+    frozen: false,
+  };
+  const oneVee = 10n ** 18n; // the `vee` helper is scoped to the describe above
+  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee }));
+  const toResolved = (name: string, canonical: string) =>
+    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee }));
+
+  it('refuses the denied name', () => {
+    expect(to('mark.vee')).toBe('counterparty_denied');
+  });
+
+  // THE BYPASS THIS CLOSES. `addAlias` registers an alias with
+  // registerFor(alias, wallet, wallet), so a vanity alias and the canonical id
+  // resolve to the SAME address. Denying one name used to leave the wallet
+  // reachable under the other - no registrar write, no privilege, no attack,
+  // just the name that is always there.
+  it('refuses the same wallet reached by its canonical id', () => {
+    expect(toResolved('mark.vee', 'orch:mark')).toBe('counterparty_denied');
+  });
+
+  // The ruled test (04:05): deny treasury.vee, register treasure.vee as a
+  // treasury alias, send to treasure.vee. The registry keeps the FIRST
+  // registered name as `reverse[target]`, so the alias resolves canonical to
+  // treasury.vee and the deny entry bites.
+  it('refuses a treasury alias when the deny list names the treasury', () => {
+    const p = { ...denied, deny: ['treasury.vee'] };
+    const code = codeOf(() =>
+      enforcePolicy({ policy: p, to: 'treasure.vee', canonical: 'treasury.vee', amount: oneVee }),
+    );
+    expect(code).toBe('counterparty_denied');
+  });
+
+  // ALLOW must NOT be evaluated against the canonical alone. Measured: the
+  // default agent allow list is ["*.vee"] and canonical ids look like
+  // `orch:bob`, so canonical-only matching matches nothing and every send in
+  // the game is refused. Widening deny is safe; narrowing allow is not.
+  it('still allows an ordinary send whose canonical does not match the allow list', () => {
+    const p = { ...denied, allow: ['*.vee'], deny: [] };
+    const code = codeOf(() =>
+      enforcePolicy({ policy: p, to: 'bob.vee', canonical: 'orch:bob', amount: oneVee }),
+    );
+    expect(code).toBe('no-error');
+  });
+});
