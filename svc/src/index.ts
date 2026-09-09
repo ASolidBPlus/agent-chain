@@ -9,6 +9,7 @@ import { Resolver } from './resolver.ts';
 import { loadPolicyDefaults } from './policy.ts';
 import { Spawner } from './spawn.ts';
 import { Store } from './store.ts';
+import { assertLedgerLifetimeIntact, gatherLifetimeFacts } from './migrate.ts';
 import { Treasury } from './treasury.ts';
 import { EventTail } from './events.ts';
 import { createChainSvcServer } from './server.ts';
@@ -25,6 +26,24 @@ async function main(): Promise<void> {
 
   const store = new Store(config.storePath);
   const keystore = new Keystore(config.keystoreDir, config.keystoreSecret);
+
+  // BEFORE the service accepts a single request. A store-only wipe leaves this
+  // process able to sign transfers for wallets whose consumed intent ids it has
+  // forgotten and whose freezes it has released, so the check has to be a
+  // precondition of starting rather than a warning printed beside it.
+  //
+  // `getCode` rather than the deployments file: the file says what was deployed
+  // once, and the question here is what is on the chain NOW. A file describing
+  // a chain that has been reset is exactly the stale artefact this control must
+  // not be fooled by.
+  assertLedgerLifetimeIntact(
+    await gatherLifetimeFacts({
+      store,
+      keystore,
+      getCode: () => chain.publicClient.getCode({ address: deployment.VEEBux }),
+      acknowledged: config.acknowledgeLedgerReset,
+    }),
+  );
   const resolver = new Resolver(chain);
   const services = {
     config,
@@ -64,6 +83,11 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  // A refusal carries a machine-readable code as well as its prose, so an
+  // operator or a log search can find the CAUSE without parsing a paragraph.
+  // "Refuse by name" is the requirement; the name has to reach the log.
+  const code = (err as { code?: unknown })?.code;
+  if (typeof code === 'string') console.error(`chain-svc: ${code}`);
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });

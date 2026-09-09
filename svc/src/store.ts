@@ -38,6 +38,8 @@ export type Reservation =
   | { outcome: 'over_stage_cap'; txHash: null }
   | { outcome: 'duplicate'; txHash: string | null };
 
+import { migrate } from './migrate.ts';
+
 export interface OutboundEvent {
   id: number;
   kind: string;
@@ -53,7 +55,8 @@ export class Store {
     this.db = new Database(path, { create: true });
     // WAL so a reader (/history) is never blocked by the events writer.
     this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec(`
+    // Ordering is migrate()'s to enforce, not this constructor's - see migrate.ts.
+    migrate(this.db, () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS memos (
         tx_hash       TEXT PRIMARY KEY,
         memo          TEXT,
@@ -148,7 +151,6 @@ export class Store {
         seen_at    INTEGER NOT NULL,
         PRIMARY KEY (topic, tx_hash)
       );
-      CREATE INDEX IF NOT EXISTS intents_topic ON intents (topic);
       CREATE TABLE IF NOT EXISTS stage_spend (
         agent_id TEXT NOT NULL,
         stage    TEXT NOT NULL,
@@ -173,7 +175,16 @@ export class Store {
         next_attempt_at INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL
       );
-    `);
+    `), () => this.db.exec(`
+      CREATE INDEX IF NOT EXISTS intents_topic ON intents (topic);
+    `));
+  }
+
+  /// Whether any intent id has ever been consumed. Read once at startup by the
+  /// ledger-lifetime control: an empty ledger beside a live game is the
+  /// signature of a store-only wipe. See migrate.ts.
+  intentsEmpty(): boolean {
+    return this.db.query(`SELECT 1 FROM intents LIMIT 1`).get() === null;
   }
 
   close(): void {

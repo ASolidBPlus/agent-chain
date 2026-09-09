@@ -1,0 +1,333 @@
+// Schema migration for the chain-svc store.
+//
+// WHY THIS EXISTS, and it is not a convenience. Before it, the store's schema
+// was ten `CREATE TABLE IF NOT EXISTS` statements and nothing else: no
+// `user_version`, no `ALTER TABLE`. IF NOT EXISTS creates a table that is
+// absent and is silent about one that is present but SHAPED DIFFERENTLY, so a
+// release that added a column started fine against a fresh volume and died on
+// a persisted one - at the first query to name the column, with
+// `no such column: topic`, long after startup succeeded.
+//
+// THE COST OF THAT WAS NOT AN OUTAGE. `intents` is the idempotency ledger: the
+// reservation is what makes a same-id retry answer `duplicate` instead of
+// sending a second transfer. The only remedy for the dead container was to
+// destroy the volume, and destroying it makes EVERY CONSUMED INTENT ID
+// RESERVABLE AGAIN - against wallets whose keys survive on the keystore volume
+// and whose balances survive on the chain's. So a missing migration was a
+// double-spend path wearing an ops costume, and the error message was the part
+// that chose the destructive remedy: it named the store, so the proportionate
+// response was to delete the store and nothing else.
+//
+// THE RULE THIS ENCODES: a program that meets a state it was not built for
+// REFUSES BY NAME AT THE BOUNDARY. It does not proceed and fail obscurely
+// later. This is the same discipline as `assert old in s` in a mutation script
+// - a rewrite that cannot find its anchor must stop rather than produce a file
+// nobody asked for - applied one layer up, to a store whose shape this binary
+// does not recognise. It is a designed refusal, not a defensive nicety, and it
+// should not be relaxed for convenience: widening the check to "carry on and
+// hope" restores exactly the failure it exists to prevent.
+
+import type { Database } from 'bun:sqlite';
+
+/// Bumped whenever the schema changes. A store stamped HIGHER than this was
+/// written by a newer binary and is refused - see `migrate`.
+export const SCHEMA_VERSION = 1;
+
+export class SchemaError extends Error {
+  constructor(
+    readonly code: 'store_schema_ahead' | 'store_schema_unmigratable',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SchemaError';
+  }
+}
+
+/// The columns present in the FIRST shipped schema, before `user_version`
+/// existed. FROZEN - never add to this list. A column that has always been
+/// there needs no migration; a column added from now on is an ADDITIVE entry,
+/// and putting it here instead would claim a history it does not have and
+/// break exactly the upgrade this module exists to make work.
+const ORIGINAL_COLUMNS: ReadonlyArray<[string, string]> = [
+  ['cursors', 'name'], ['cursors', 'value'],
+  ['frozen', 'agent_id'], ['frozen', 'frozen_at'],
+  ['intent_anomalies', 'topic'], ['intent_anomalies', 'tx_hash'],
+  ['intent_anomalies', 'from_addr'], ['intent_anomalies', 'seen_at'],
+  ['intents', 'intent_id'], ['intents', 'agent_id'], ['intents', 'stage'],
+  ['intents', 'amount'], ['intents', 'tx_hash'], ['intents', 'created_at'],
+  ['memos', 'tx_hash'], ['memos', 'memo'], ['memos', 'created_at'],
+  ['outbox', 'id'], ['outbox', 'kind'], ['outbox', 'payload'],
+  ['outbox', 'attempts'], ['outbox', 'next_attempt_at'], ['outbox', 'created_at'],
+  ['spawns', 'agent_id'], ['spawns', 'address'], ['spawns', 'created_at'],
+  ['stage_spend', 'agent_id'], ['stage_spend', 'stage'], ['stage_spend', 'spent'],
+  ['stage_state', 'id'], ['stage_state', 'stage'],
+  ['wallet_tokens', 'agent_id'], ['wallet_tokens', 'token_hash'], ['wallet_tokens', 'issued_at'],
+];
+
+/// Every column added after the first schema, with the DDL to add it.
+///
+/// SQLite's `ALTER TABLE ADD COLUMN` cannot add a PRIMARY KEY or a UNIQUE
+/// column, and a NOT NULL column must carry a DEFAULT - a constraint that is
+/// the reason to keep migrations ADDITIVE rather than rewriting tables. Every
+/// entry here is checked against the live schema by a test, so a column added
+/// to the DDL without an entry fails the suite rather than a customer's
+/// upgrade.
+export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; ddl: string }> = [
+  { table: 'intents', column: 'held_wei', ddl: `TEXT NOT NULL DEFAULT '0'` },
+  { table: 'intents', column: 'topic', ddl: 'TEXT' },
+  { table: 'intents', column: 'emissions', ddl: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'intents', column: 'first_tx', ddl: 'TEXT' },
+  { table: 'intents', column: 'first_from', ddl: 'TEXT' },
+  { table: 'intents', column: 'reserved_at_block', ddl: 'TEXT' },
+  { table: 'intents', column: 'id_source', ddl: 'TEXT' },
+  { table: 'memos', column: 'intent_id', ddl: 'TEXT' },
+  { table: 'memos', column: 'from_agent_id', ddl: 'TEXT' },
+];
+
+export function classifiedColumns(): Set<string> {
+  const all = new Set(ORIGINAL_COLUMNS.map(([t, c]) => `${t}.${c}`));
+  for (const a of ADDITIVE_COLUMNS) all.add(`${a.table}.${a.column}`);
+  return all;
+}
+
+function tableExists(db: Database, table: string): boolean {
+  return (
+    db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`).get(table) !== null
+  );
+}
+
+function columnsOf(db: Database, table: string): Set<string> {
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+/// Applied AFTER the `CREATE TABLE IF NOT EXISTS` block, so a wholly-missing
+/// table is already created at its current shape and only PRE-EXISTING tables
+/// need reconciling.
+/// `createSchema` is the `CREATE TABLE IF NOT EXISTS` block, taken as a thunk
+/// rather than run by the caller beforehand, so that the ahead-check below
+/// PROVABLY precedes every write to the file. A caller cannot get the order
+/// wrong, because the order is not theirs to choose.
+export function migrate(
+  db: Database,
+  createTables: () => void,
+  createIndexes: () => void,
+): void {
+  const version = (db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+
+  // Checked FIRST, before any write. An older binary against a newer store must
+  // not create, alter or stamp anything on its way to discovering it cannot
+  // read it - that is how a rollback corrupts quietly.
+  if (version > SCHEMA_VERSION) {
+    throw new SchemaError(
+      'store_schema_ahead',
+      `store schema v${version}, this binary expects v${SCHEMA_VERSION}. The store was ` +
+        `written by a NEWER chain-svc; this one cannot read it. Run the newer binary, or ` +
+        `restore a store from before the upgrade. DO NOT delete the store volume: ` +
+        `${LEDGER_RESET_NOTICE}`,
+    );
+  }
+
+  // Creates whatever is wholly absent - a fresh store, or a table added by a
+  // later release - at its current shape. Only PRE-EXISTING tables can then be
+  // the wrong shape, which is what the reconciliation below is for.
+  createTables();
+
+  // VERSION 0 IS AMBIGUOUS AND MUST NOT BE TREATED AS "THE ORIGINAL SCHEMA".
+  // Every store that predates this module is stamped 0, whatever shape it is
+  // in: `CREATE TABLE IF NOT EXISTS` silently varied with the code version and
+  // recorded nothing, so a v0 store may already have `topic` or may not,
+  // depending only on which build first created its volume. A numbered
+  // migration assuming v0 means pre-topic would fail on half of them. So the
+  // baseline INTROSPECTS and adds what is absent, rather than replaying a
+  // history the store never recorded.
+  if (version === 0) {
+    for (const { table, column, ddl } of ADDITIVE_COLUMNS) {
+      if (!tableExists(db, table)) continue;
+      if (columnsOf(db, table).has(column)) continue;
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    }
+  }
+
+  // AFTER the reconciliation, and this is why the indexes are a separate thunk
+  // rather than the tail of one DDL block: `intents_topic` indexes `topic`, a
+  // column the baseline above may have just added. Creating it alongside the
+  // tables made the migration die on the very store it exists to repair, with
+  // `no such column: topic` - the original failure, moved four lines. An index
+  // can depend on a migrated column, so it is built once the columns are
+  // settled and never before.
+  createIndexes();
+
+  // Numbered migrations for stamped stores go here, applied in order for
+  // version < SCHEMA_VERSION. There are none yet: v1 IS the baseline.
+
+  if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/// THE SENTENCE. Every path that destroys the svc store prints exactly this -
+/// the CLI wrappers, the arena UI's Reset log, and the refusals in this module
+/// - so that what a wipe costs is stated in one place and cannot drift between
+/// them into three descriptions of different severities.
+///
+/// IT NAMES BOTH COSTS, and that is load-bearing rather than thorough. It said
+/// only the idempotency half first, on the reasoning that an acknowledged reset
+/// is the fresh-game case where releasing freezes is intended. That reasoning
+/// was wrong (mesh-planner, 12:29): the acknowledged reset is ALSO the path a
+/// facilitator takes to recover from a failure mid-game - which is exactly when
+/// a freeze is load-bearing, since freezing is the prescribed response to a
+/// chain.anomaly and S3 made unfreezing deliberately hard. AN ACKNOWLEDGEMENT
+/// THAT NAMES HALF THE DESTRUCTION IS NOT INFORMED CONSENT.
+///
+/// It names CONSEQUENCES, never actions. "Resets the ledger" reads as
+/// housekeeping; "becomes reservable again" is the thing an operator has to
+/// weigh. Do not soften either clause, and do not use half of it.
+///
+/// ONE COMPLETE CONSTANT RATHER THAN TWO CO-EQUAL ONES, deliberately. Splitting
+/// it into a ledger sentence and a freeze sentence that every path must print
+/// TOGETHER reintroduces the exact failure the single string exists to prevent:
+/// a path that prints one of them understates the cost, and nothing catches it.
+/// The nuance that wanted its own constant is advice for AFTER the wipe, not a
+/// second half of the consent, so it lives in FREEZE_RECOVERY_ADVICE below -
+/// additive, and its absence understates nothing.
+export const LEDGER_RESET_NOTICE =
+  'this deletes the idempotency ledger and every freeze: every consumed intent id ' +
+  'becomes reservable again, and every frozen wallet may spend again';
+
+/// The state of the three volumes that share one lifetime, as observed at
+/// startup. Taken as plain facts rather than read in here, so the decision is
+/// testable without a keystore directory, a chain or a store on disk.
+export interface LifetimeFacts {
+  /// The intents table has no rows: no intent id has ever been consumed, or
+  /// none is remembered any more.
+  intentsEmpty: boolean;
+  /// How many agents the KEYSTORE holds keys for. Its own volume, untouched by
+  /// a store-only wipe.
+  keystoreAgents: number;
+  /// Whether the chain this service is pointed at has the game's contracts on
+  /// it. Its own volume too (anvil `--state`), so it also survives.
+  contractsDeployed: boolean;
+  /// The operator has stated they intend to end the game's idempotency
+  /// lifetime. The one legitimate reason for this state to exist.
+  acknowledged: boolean;
+}
+
+/// Gathers the three facts. A SEAM RATHER THAN INLINE CODE IN THE ENTRYPOINT,
+/// because a control can be correct, correctly fed and still DORMANT if the
+/// wiring hands it a constant - and the entrypoint is the one place a test
+/// never reaches. This module has already paid that price once: #34's sweep
+/// was reviewed, merged, and had no caller until #39.
+///
+/// Structural parameter types so a test can supply the three facts without a
+/// chain, a keystore directory or a store on disk. They are not a guard on the
+/// CALL SITE: they reject a literal where a function belongs and accept a
+/// plausible stub, and the dangerous edit is the one that typechecks. The call
+/// site is pinned structurally in migrate.test.ts instead.
+///
+/// ALL THREE FACTS FAIL CLOSED, and that is deliberate rather than incidental.
+/// None of these calls is wrapped: a chain that will not answer `getCode`, a
+/// store that will not open, and an UNREADABLE keystore all propagate and stop
+/// startup. `agentCount` used to be the exception - a bare catch returned 0 for
+/// every error, and 0 is precisely the value that switches this control off, so
+/// the one fact an operator could break by accident was the one that disabled
+/// the refusal silently. It now distinguishes ENOENT (no agent has ever been
+/// spawned) from unreadable (an answer we do not have).
+///
+/// The rule for anyone adding a fourth fact: A FACT THIS CONTROL CANNOT
+/// ESTABLISH MUST STOP STARTUP, NEVER DEFAULT TO THE PERMISSIVE VALUE. The
+/// incident that trips this control is an operator doing volume surgery, which
+/// is exactly when a neighbouring volume also fails to attach.
+export async function gatherLifetimeFacts(deps: {
+  store: { intentsEmpty(): boolean };
+  keystore: { agentCount(): Promise<number> };
+  /// `getCode` rather than the deployments file: the file records what was
+  /// deployed ONCE, and the question is what is on the chain NOW. A file
+  /// describing a chain that has since been reset is precisely the stale
+  /// artefact this control must not be fooled by.
+  getCode: () => Promise<string | undefined>;
+  acknowledged: boolean;
+}): Promise<LifetimeFacts> {
+  const code = await deps.getCode();
+  return {
+    intentsEmpty: deps.store.intentsEmpty(),
+    keystoreAgents: await deps.keystore.agentCount(),
+    contractsDeployed: code !== undefined && code !== '0x',
+    acknowledged: deps.acknowledged,
+  };
+}
+
+export class LedgerWipeError extends Error {
+  readonly code = 'ledger_wiped_beneath_live_game';
+  constructor(message: string) {
+    super(message);
+    this.name = 'LedgerWipeError';
+  }
+}
+
+/// THE ONE CONTROL THAT CATCHES A PATH NO WRAPPER CAN.
+///
+/// `docker volume rm <project>_svc-store` is not a compose invocation, so the
+/// CLI wrappers never see it - and it is the command the old
+/// `no such column: topic` steered an operator toward, because that message
+/// named the store, so the proportionate response was to delete the store and
+/// NOTHING ELSE. The blunt `down -v` is the survivable one: it takes the
+/// keystore and the chain state too, so no wallet and no balance outlives it
+/// and there is nothing left to replay. THE CAREFUL REMEDY IS THE DESTRUCTIVE
+/// ONE.
+///
+/// What survives a store-only wipe is the whole hazard: the keystore is
+/// file-per-agent, so a re-spawn returns THE SAME ADDRESS, and anvil persists,
+/// so that address still holds THE SAME BALANCE - beside a ledger that has
+/// forgotten every consumed intent id. Every id in the game becomes reservable
+/// again against still-funded wallets - and every freeze is released, because
+/// the `frozen` table lives in this store too and is the single source of
+/// truth for whether a wallet may spend. The wipe undoes containment and
+/// idempotency together, which is why the three volumes share one lifetime
+/// rather than merely being wiped in the same breath.
+///
+/// So the asymmetry is detected from INSIDE, where no wrapper is needed. An
+/// empty intents table beside a keystore that holds agent keys and a chain
+/// that has the contracts on it is reachable ONLY by a ledger wipe on a live
+/// game: a fresh install has no keystore files, and an honest full reset has
+/// neither keys nor contracts. It is not a heuristic - each conjunct rules out
+/// one legitimate way to arrive at an empty store.
+///
+/// It refuses rather than warns, and that is the ruling (powerout-planner,
+/// 11:57): the loud-but-continuing failure is precisely what routed someone to
+/// the wipe, and a warning at startup is read by nobody. The legitimate reset
+/// is not obstructed - it IS the acknowledgement flag, one documented step.
+export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
+  if (facts.acknowledged) return;
+  if (!facts.intentsEmpty) return;
+  if (facts.keystoreAgents === 0) return;
+  if (!facts.contractsDeployed) return;
+
+  throw new LedgerWipeError(
+    `refusing to start: the intents ledger is EMPTY, but this game is live - the keystore ` +
+      `holds ${facts.keystoreAgents} agent key(s) and the contracts are deployed on the ` +
+      `chain. That combination is only reachable by deleting the store volume on its own ` +
+      `(a fresh install has no keystore keys; a full reset has neither keys nor contracts).\n` +
+      `\n` +
+      `Those wallets still exist and still hold their balances, and ${LEDGER_RESET_NOTICE}. ` +
+      `An intent id that has already paid can pay a second time.\n` +
+      `\n` +
+      `The freeze half is the one to act on first: the frozen table is in this store, so ` +
+      `every freeze was released WITH NO RECORD THAT ONE EXISTED. Freezing is the prescribed ` +
+      `response to a chain.anomaly - a second chain-svc writing to this chain, or somebody ` +
+      `holding a wallet's key - which makes an incident exactly when a service gets restarted ` +
+      `and a store gets deleted. ${FREEZE_RECOVERY_ADVICE}.\n` +
+      `\n` +
+      `If a transfer was already made under an id a persona may retry, RESTORE THE STORE ` +
+      `rather than starting without it. If you meant to end this game, say so explicitly ` +
+      `and start again with --acknowledge-ledger-reset (or ` +
+      `CHAIN_SVC_ACKNOWLEDGE_LEDGER_RESET=1).`,
+  );
+}
+
+/// Additive advice for a facilitator who is mid-incident rather than starting a
+/// fresh game. NOT part of the consent sentence: the acknowledged reset is a
+/// legitimate recovery path, and re-freezing afterwards is the step that path
+/// silently loses. Printing it costs a fresh-game operator one line they can
+/// ignore; omitting it costs a recovering one the fact they needed.
+export const FREEZE_RECOVERY_ADVICE =
+  'if you are recovering from a failure mid-game rather than starting a fresh one, ' +
+  're-freeze anything that was frozen: the release leaves no record of what it was';

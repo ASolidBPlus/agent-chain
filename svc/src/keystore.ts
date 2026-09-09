@@ -12,7 +12,7 @@ import {
   createDecipheriv,
   type ScryptOptions,
 } from 'node:crypto';
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
@@ -52,6 +52,35 @@ export class Keystore {
 
   private path(agentId: string): string {
     return join(this.dir, keyFileName(agentId));
+  }
+
+  /// How many agents this keystore holds keys for. Read at startup by the
+  /// ledger-lifetime control: keys here beside an EMPTY intents ledger means
+  /// the store was deleted on its own, because a fresh install has neither.
+  /// Counts key files rather than trusting the store, which is the artefact
+  /// under suspicion.
+  async agentCount(): Promise<number> {
+    try {
+      const names = await readdir(this.dir);
+      return names.filter((n) => n.endsWith('.json')).length;
+    } catch (err) {
+      // ONLY a missing directory means "no agent has ever been spawned". Every
+      // other failure - permissions, I/O, a volume that did not mount - MUST
+      // PROPAGATE.
+      //
+      // 0 is not a neutral answer here: it is the exact value that switches the
+      // ledger-wipe control off (see assertLedgerLifetimeIntact). A bare catch
+      // made this fact FAIL OPEN while its two siblings fail closed, and the
+      // asymmetry pointed the wrong way - the scenario that trips the control
+      // is an operator doing VOLUME SURGERY, which is precisely when a
+      // NEIGHBOURING VOLUME can also fail to attach. The control's precondition
+      // broke in the same incident it exists to detect.
+      //
+      // The old comment named one CAUSE where the code caught an error CLASS;
+      // an unreadable keystore is not an empty one.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 0;
+      throw err;
+    }
   }
 
   async has(agentId: string): Promise<boolean> {
