@@ -10,7 +10,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { randomUUID } from 'node:crypto';
 import { VEEBuxAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
-import { asChainError } from './chain.ts';
+import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Keystore } from './keystore.ts';
@@ -221,6 +221,7 @@ export class Treasury {
         abi: VEEBuxAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
+        ...ZERO_FEES,
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       this.store.recordMemo({
@@ -381,6 +382,7 @@ export class Treasury {
         chain: this.chain.viemChain,
         to: this.chain.deployment.VEEBux,
         data,
+        ...ZERO_FEES,
       });
       const serialized = await wallet.signTransaction(request as never);
       const hash = await wallet.sendRawTransaction({ serializedTransaction: serialized });
@@ -642,6 +644,7 @@ export class Treasury {
         chain: this.chain.viemChain,
         to: this.chain.deployment.VEEBux,
         data,
+        ...ZERO_FEES,
       });
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {

@@ -12,7 +12,7 @@ import { writeFile, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NameRegistryAbi, VEEBuxAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
-import { asChainError } from './chain.ts';
+import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Keystore } from './keystore.ts';
@@ -196,6 +196,7 @@ export class Spawner {
         chain: this.chain.viemChain,
         to: address,
         value: GAS_ENDOWMENT - balance,
+        ...ZERO_FEES,
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
     } catch (err) {
@@ -222,6 +223,7 @@ export class Spawner {
         abi: VEEBuxAbi,
         functionName: 'transfer',
         args: [address, amount - balance],
+        ...ZERO_FEES,
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
     } catch (err) {
@@ -253,6 +255,7 @@ export class Spawner {
         abi: NameRegistryAbi,
         functionName,
         args: args as never,
+        ...ZERO_FEES,
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       return hash;

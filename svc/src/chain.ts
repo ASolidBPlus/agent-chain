@@ -71,6 +71,30 @@ export function loadDeployment(deploymentsDir: string): Deployment {
   };
 }
 
+/// EVERY transaction chain-svc sends carries these, and the reason is that
+/// OMITTING them is what made the zero-gas claim false.
+///
+/// The chain is configured correctly - `anvil --gas-price 0 --base-fee 0`, so
+/// the base fee IS zero. But viem fills an absent `maxPriorityFeePerGas` with
+/// its own 1 gwei default, and the effective price is baseFee(0) + tip(1 gwei).
+/// So chain-svc was overriding a correctly-configured zero-fee chain, at every
+/// site, BY OMISSION. THE FIX IS TO STOP OMITTING, NOT TO LOWER ANYTHING.
+///
+/// ONE CONSTANT, SPREAD AT ALL SIX SEND SITES, rather than six literal pairs:
+/// six copies of a value that must agree is the shape that put four copies of
+/// the wallet-kind list in this codebase, and the failure there was a message
+/// that drifted from the condition it explained. A site that forgets these is
+/// invisible - the transaction still succeeds, it just is not free - so the
+/// only defence is that there is nothing per-site to get right.
+///
+/// Sizing, so nobody plans around this being urgent: at a 1 gwei tip against
+/// the 1 ETH endowment it is ~19,600 ERC-20 transfers before a wallet is
+/// spent, so no wallet ran out during a game. The defect is that §2's zero-gas
+/// claim was FALSE and visibly so - a student inspecting any transaction sees a
+/// non-zero fee, in a game whose framing asks them to trust that the money is
+/// play money.
+export const ZERO_FEES = { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n } as const;
+
 export class Chain {
   readonly publicClient: PublicClient;
   readonly walletClient: WalletClient;
