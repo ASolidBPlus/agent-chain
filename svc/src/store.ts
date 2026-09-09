@@ -112,7 +112,39 @@ export class Store {
         -- to the intent that authorised it, and so the derivation lives in ONE
         -- place (Treasury.intentTopic) rather than being repeated here.
         topic      TEXT,
+        -- COUNT, DON'T ACCUMULATE. The number of IntentTransfer emissions the
+        -- tail has seen for this intent, with the first one recorded inline.
+        --
+        -- A table of every emission would be keyed on CHAIN HISTORY and grow
+        -- forever, and no retention window is safe for it: a second emission
+        -- can arrive arbitrarily late, and that lateness IS the detector's
+        -- premise. A counter is bounded by this table - growth already
+        -- accepted - and has no window to get wrong.
+        emissions  INTEGER NOT NULL DEFAULT 0,
+        first_tx   TEXT,
+        first_from TEXT,
+        -- The chain head observed BEFORE the reservation, as a lower bound on
+        -- where the transfer can be. The reservation strictly precedes the
+        -- broadcast, so tx_block >= head-at-reserve. Without it 'no emission'
+        -- cannot be told from 'the tail has not reached it yet', and an
+        -- unbounded absence is not evidence.
+        reserved_at_block TEXT,
+        -- Whether the intent id was CALLER-SUPPLIED or SERVER-GENERATED.
+        -- Recorded because the anomaly needs it: a foreign emission under a
+        -- model-chosen id is a guessable id being guessed, and under a
+        -- a chain-svc:<uuid> it is not - different stories, and a facilitator
+        -- should not need a second lookup to tell them apart.
+        id_source  TEXT,
         created_at INTEGER NOT NULL
+      );
+      -- Only ever holds the SECOND and later emissions for one intent, so it is
+      -- small by construction rather than by pruning.
+      CREATE TABLE IF NOT EXISTS intent_anomalies (
+        topic      TEXT NOT NULL,
+        tx_hash    TEXT NOT NULL,
+        from_addr  TEXT,
+        seen_at    INTEGER NOT NULL,
+        PRIMARY KEY (topic, tx_hash)
       );
       CREATE INDEX IF NOT EXISTS intents_topic ON intents (topic);
       CREATE TABLE IF NOT EXISTS stage_spend (
@@ -290,6 +322,10 @@ export class Store {
     intentId: string;
     /// keccak256 of the intent id, as the chain logs it. See the `topic` column.
     topic?: string;
+    /// The chain head observed BEFORE this reservation. See the column.
+    reservedAtBlock?: bigint;
+    /// 'caller' or 'server'. See the `id_source` column.
+    idSource?: 'caller' | 'server';
     agentId: string;
     stage: string;
     amount: bigint;
@@ -305,7 +341,7 @@ export class Store {
     /// transaction and the call site has to say which it wants.
     capWei: bigint | null;
   }): Reservation {
-    const { intentId, topic, agentId, stage, amount, capWei } = args;
+    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei } = args;
 
     // ONE transaction covering BOTH the intent and the cap, because they are
     // one decision: "may this send happen". Two transactions would admit a
@@ -325,8 +361,9 @@ export class Store {
 
       this.db
         .query(
-          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
+          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic,
+                                reserved_at_block, id_source, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
         )
         .run(
           intentId,
@@ -335,6 +372,8 @@ export class Store {
           amount.toString(),
           capWei === null ? '0' : amount.toString(),
           topic ?? null,
+          reservedAtBlock === undefined ? null : reservedAtBlock.toString(),
+          idSource ?? null,
           Date.now(),
         );
       if (capWei !== null) {
@@ -349,6 +388,22 @@ export class Store {
     });
     return attempt();
   }
+
+  /// A FAILED INTENT MUST TOMBSTONE, NEVER DELETE - a standing invariant, not a
+  /// note about the method that used to be here.
+  ///
+  /// There was a `failIntent` that called `release`, and `release` deletes the
+  /// row. So marking an intent failed FREED ITS IDEMPOTENCY KEY, and the
+  /// caller's correct retry under that id broadcast a second transfer. That is
+  /// the double-charge this whole mechanism exists to prevent, and it was
+  /// independent of the bug that triggered it: any future path that concludes
+  /// "this did not land" and deletes the row reintroduces it.
+  ///
+  /// THE IDEMPOTENCY KEY'S LIFETIME IS THE GAME'S, REGARDLESS OF OUTCOME. A
+  /// failed intent must keep its row and its id, give back only the HOLD, and
+  /// answer a retry with a refusal. `release` is for the pre-broadcast case
+  /// alone, where deleting is correct BECAUSE nothing was sent - the id was
+  /// never spent against, so it is free to reuse.
 
   /// Records the result of a send against the intent that authorised it, so a
   /// retry can be answered with the original transaction rather than a second
@@ -387,11 +442,171 @@ export class Store {
   /// UTC; the contract change rides the post-#14 PR.
 
   /// The whole reservation row, for reconciliation (spec S4 "Intents").
-  intentRecord(intentId: string): { agentId: string; txHash: string | null } | null {
+  intentRecord(intentId: string): {
+    agentId: string;
+    txHash: string | null;
+    emissions: number;
+    firstTx: string | null;
+    firstFrom: string | null;
+  } | null {
     const row = this.db
-      .query(`SELECT agent_id, tx_hash FROM intents WHERE intent_id = ?`)
-      .get(intentId) as { agent_id: string; tx_hash: string | null } | null;
-    return row ? { agentId: row.agent_id, txHash: row.tx_hash } : null;
+      .query(`SELECT agent_id, tx_hash, emissions, first_tx, first_from FROM intents WHERE intent_id = ?`)
+      .get(intentId) as
+      | { agent_id: string; tx_hash: string | null; emissions: number; first_tx: string | null; first_from: string | null }
+      | null;
+    return row
+      ? {
+          agentId: row.agent_id,
+          txHash: row.tx_hash,
+          emissions: row.emissions,
+          firstTx: row.first_tx,
+          firstFrom: row.first_from,
+        }
+      : null;
+  }
+
+  /// Records one IntentTransfer against the intent that authorised it, and
+  /// answers whether THIS emission makes the intent anomalous.
+  ///
+  /// Only emissions matching an intent WE RESERVED are counted (ruled 09:41).
+  /// An id nobody here reserved is another party's traffic on a shared chain,
+  /// or a direct caller moving their own funds under a self-chosen id - neither
+  /// is the game's double-spend, which is reusing a RESERVED allotment to land
+  /// the same authorised spend twice. The split-brain case stays inside the
+  /// scope: a retry carries the idempotency key, so BOTH stores reserve the
+  /// same intent id and each one's count reaches two.
+  ///
+  /// Idempotent on (topic, txHash): the tail can re-see a block without
+  /// double-counting, which matters because the cursor is only advanced after
+  /// a successful pass.
+  recordEmission(args: {
+    topic: string;
+    txHash: string;
+    from: string | null;
+  }): {
+    anomalous: boolean;
+    /// `repeat_emission` - two or more for one intent; `foreign_sender` - an
+    /// emission under our intent id from an address that is not the reserving
+    /// wallet. Different causes, different instructions to the facilitator.
+    reason: 'repeat_emission' | 'foreign_sender';
+    agentId: string;
+    /// 'caller', 'server', or null for a row written before the column existed.
+    idSource: string | null;
+    emissions: number;
+    transfers: Array<{ txHash: string; from: string | null }>;
+  } | null {
+    const { topic, txHash, from } = args;
+    const apply = this.db.transaction(() => {
+      const intent = this.db
+        .query(`SELECT intent_id, agent_id, emissions, first_tx, first_from, id_source FROM intents WHERE topic = ?`)
+        .get(topic) as
+        | {
+            intent_id: string;
+            agent_id: string;
+            emissions: number;
+            first_tx: string | null;
+            first_from: string | null;
+            id_source: string | null;
+          }
+        | null;
+      if (!intent) return null; // not an intent this store reserved
+
+      // Already counted this exact emission.
+      if (intent.first_tx === txHash) return null;
+      const already = this.db
+        .query(`SELECT 1 AS present FROM intent_anomalies WHERE topic = ? AND tx_hash = ?`)
+        .get(topic, txHash);
+      if (already) return null;
+
+      if (intent.emissions === 0) {
+        this.db
+          .query(`UPDATE intents SET emissions = 1, first_tx = ?, first_from = ? WHERE topic = ?`)
+          .run(txHash, from, topic);
+
+        // A FIRST emission is normal - unless it came from somewhere else.
+        // `transferWithIntent` is permissionless, so an IntentTransfer under
+        // our id from an address that is not the reserving wallet is somebody
+        // spending against our intent, not our transfer landing. That is an
+        // anomaly on the first emission, and it is why the positive branch of
+        // the sweep must constrain the sender as well as the id.
+        const wallet = this.spawnedAddress(intent.agent_id);
+        if (wallet && from && from.toLowerCase() !== wallet.toLowerCase()) {
+          return {
+            anomalous: true,
+            reason: 'foreign_sender' as const,
+            agentId: intent.agent_id,
+            idSource: intent.id_source,
+            emissions: 1,
+            transfers: [{ txHash, from }],
+          };
+        }
+        return null;
+      }
+
+      this.db
+        .query(`INSERT INTO intent_anomalies (topic, tx_hash, from_addr, seen_at) VALUES (?, ?, ?, ?)`)
+        .run(topic, txHash, from, Date.now());
+      const emissions = intent.emissions + 1;
+      this.db.query(`UPDATE intents SET emissions = ? WHERE topic = ?`).run(emissions, topic);
+
+      const extras = this.db
+        .query(`SELECT tx_hash, from_addr FROM intent_anomalies WHERE topic = ? ORDER BY seen_at`)
+        .all(topic) as Array<{ tx_hash: string; from_addr: string | null }>;
+
+      return {
+        anomalous: true,
+        reason: 'repeat_emission' as const,
+        agentId: intent.agent_id,
+        idSource: intent.id_source,
+        emissions,
+        transfers: [
+          { txHash: intent.first_tx ?? '', from: intent.first_from },
+          ...extras.map((e) => ({ txHash: e.tx_hash, from: e.from_addr })),
+        ],
+      };
+    });
+    return apply();
+  }
+
+  /// Intents this store reserved that have no recorded transaction, with the
+  /// chain head observed before each reservation. The sweep's input.
+  ///
+  /// `reservedAtBlock` is the lower bound that makes absence evidence: the
+  /// reservation strictly precedes the broadcast, so a transfer for this intent
+  /// cannot be below it. Null for rows written before the column existed, which
+  /// the sweep must treat as "cannot bound" rather than as zero.
+  unresolvedIntents(): Array<{
+    intentId: string;
+    topic: string | null;
+    agentId: string;
+    emissions: number;
+    firstTx: string | null;
+    firstFrom: string | null;
+    reservedAtBlock: bigint | null;
+  }> {
+    const rows = this.db
+      .query(
+        `SELECT intent_id, topic, agent_id, emissions, first_tx, first_from, reserved_at_block
+         FROM intents WHERE tx_hash IS NULL`,
+      )
+      .all() as Array<{
+      intent_id: string;
+      topic: string | null;
+      agent_id: string;
+      emissions: number;
+      first_tx: string | null;
+      first_from: string | null;
+      reserved_at_block: string | null;
+    }>;
+    return rows.map((r) => ({
+      intentId: r.intent_id,
+      topic: r.topic,
+      agentId: r.agent_id,
+      emissions: r.emissions,
+      firstTx: r.first_tx,
+      firstFrom: r.first_from,
+      reservedAtBlock: r.reserved_at_block === null ? null : BigInt(r.reserved_at_block),
+    }));
   }
 
   /// Which wallet reserved the intent the chain logged under this topic, for
@@ -451,6 +666,12 @@ export class Store {
         .get(intentId) as { agent_id: string; stage: string; held_wei: string } | null;
       if (!row) return;
 
+      // The `tx_hash IS NULL` here is REDUNDANT with the SELECT above, which
+      // already returned for a completed intent - deliberately kept, because it
+      // is the statement that would do the damage if the guard above ever moved
+      // or changed shape. A mutation that removes it survives, and that is
+      // correct rather than a coverage gap: it describes a change the code
+      // cannot express while the early return stands.
       this.db.query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`).run(intentId);
 
       const held = BigInt(row.held_wei);
@@ -491,6 +712,25 @@ export class Store {
   }
 
   // --- cursors ------------------------------------------------------------
+
+  /// The highest chain head the tail has OBSERVED, distinct from the cursor.
+  ///
+  /// The cursor says how far the tail has PROCESSED; this says how far it has
+  /// LOOKED. Only the second is a sound lower bound for a reservation, and the
+  /// difference is exactly the window a transfer lands in:
+  ///
+  ///     tx_block >= head at broadcast >= head at reserve >= observed head
+  ///
+  /// `cursor_now > cursor_at_reserve` does NOT imply the tail passed the
+  /// transaction's block. `cursor_now >= observed_head_at_reserve` does.
+  observedHead(): bigint | null {
+    return this.getCursor('chain-observed-head');
+  }
+
+  setObservedHead(block: bigint): void {
+    const current = this.observedHead();
+    if (current === null || block > current) this.setCursor('chain-observed-head', block);
+  }
 
   getCursor(name: string): bigint | null {
     const row = this.db.query(`SELECT value FROM cursors WHERE name = ?`).get(name) as { value: string } | null;

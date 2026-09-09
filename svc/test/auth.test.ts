@@ -332,6 +332,29 @@ describe('policy enforcement', () => {
 
     // Both halves of `release` are gated on the SAME fact - did the DELETE
     // remove a row - because they were not, and the refund ran regardless.
+    // The lower bound that makes absence evidence. Without it, "no emission"
+    // cannot be told from "the tail has not reached it yet".
+    it('records the chain head observed before the reservation', () => {
+      const store = new Store(':memory:');
+      store.reserve({
+        intentId: 'bounded', agentId: 'orch:a', stage: 's1',
+        amount: vee(1), capWei: cap, reservedAtBlock: 4242n,
+      });
+      const [row] = store.unresolvedIntents();
+      expect(row!.reservedAtBlock).toBe(4242n);
+      store.close();
+    });
+
+    // Rows written before the column existed read as null, which the sweep must
+    // treat as "cannot bound" rather than as block zero - zero would make every
+    // absence look like evidence.
+    it('reports a missing bound as null, not as zero', () => {
+      const store = new Store(':memory:');
+      store.reserve({ intentId: 'unbounded', agentId: 'orch:a', stage: 's1', amount: vee(1), capWei: cap });
+      expect(store.unresolvedIntents()[0]!.reservedAtBlock).toBeNull();
+      store.close();
+    });
+
     // A1. `reserve` grew a no-hold mode, so "an intent row exists" and "a hold
     // was taken" became independent facts - and the refund was keyed on the
     // first. Releasing a no-hold reservation refunded budget never taken, and

@@ -141,3 +141,24 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
     expect(() => mergePolicy('nope', DEF)).toThrow(/must be an object/);
   });
 });
+// The boundary must not depend on wallet-mcp's check. `parseVee` accepts "0"
+// deliberately - it is a parser - and wallet-mcp refuses `vee <= 0` for the
+// model. A direct caller with a wallet token bypasses wallet-mcp entirely.
+describe('a zero-VEE transfer is refused at the boundary', () => {
+  const P: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*'], deny: [] };
+
+  it('refuses zero', () => {
+    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.vee', amount: 0n }))).toBe('invalid_amount');
+  });
+
+  it('still admits the smallest real amount', () => {
+    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.vee', amount: 1n }))).toBe('no-error');
+  });
+
+  // Refused BEFORE the cap check, so the reason a caller sees is the true one
+  // rather than whichever check happens to run first.
+  it('reports the amount, not the cap, for a zero over an exhausted policy', () => {
+    const tiny: AgentPolicy = { ...P, max_per_tx: 1 };
+    expect(codeOf(() => enforcePolicy({ policy: tiny, to: 'a.vee', amount: 0n }))).toBe('invalid_amount');
+  });
+});

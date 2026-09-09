@@ -53,6 +53,10 @@ export class EventTail {
 
   private async poll(): Promise<number> {
     const latest = await this.chain.publicClient.getBlockNumber();
+    // Recorded whether or not this pass finds anything: a reservation taken
+    // between polls needs a lower bound, and this is the freshest head anyone
+    // here has seen without spending an RPC call on the money path.
+    this.store.setObservedHead(latest);
     const from = (this.store.getCursor(CURSOR) ?? -1n) + 1n;
     if (from > latest) return 0;
 
@@ -97,50 +101,56 @@ export class EventTail {
     // not a race to be retried. chain-svc broadcasts at most once per
     // reservation - one reservation, one signature, one nonce - and a
     // re-broadcast of that same signed transaction can be included only once.
-    // So a second event means something bypassed the reservation: in practice a
-    // second chain-svc with its own store writing to this chain, since
-    // reservation uniqueness is scoped to one database and not to the chain, or
-    // an out-of-band transfer reusing an id.
+    // So a second emission means something bypassed the reservation.
     //
-    // Never reconciled silently (ruled 03:12): the intent is marked CONFIRMED
-    // because the money did move, the hold is KEPT, and a facilitator is told.
-    // Grouped WITH THE SENDER, not just the hash. `IntentTransfer` indexes
-    // `from` and it is in hand here; dropping it left the payload unable to
-    // answer the question its own detail string tells the operator to ask.
+    // COUNTED IN THE STORE, NOT GROUPED IN THIS FUNCTION. Grouping here saw
+    // only ONE POLL'S WINDOW, so two emissions seconds apart - the realistic
+    // shape, since two chain-svc instances do not coordinate their timing -
+    // were each a group of one and nothing was raised. Every test built both
+    // emissions inside a single pollOnce against a stub whose head never moved,
+    // so the boundary was not a variable in any of them.
     //
-    // It matters more than a missing field: `transferWithIntent` is
-    // PERMISSIONLESS, so anyone with chain access can emit an IntentTransfer
-    // under any id - and a party like that existing is the PREMISE of this
-    // alert. The sender is what separates "a second chain-svc with its own
-    // store" from "an id collision" from "somebody spamming the event". Without
-    // it the alert names a wallet to freeze and cannot say who moved against it.
-    const byIntent = new Map<string, Array<{ txHash: string; from: string | null }>>();
+    // Never reconciled silently (ruled 03:12): the money moved, so the intent
+    // is confirmed and the hold KEPT, and a facilitator is told.
     for (const log of intents) {
       const args = log.args as { intentId?: string; from?: string };
-      // A missing `from` does NOT drop the log: the COUNT is the anomaly
-      // signal, so discarding a malformed emission could hide the second
-      // transfer that makes this an anomaly at all - failing open on exactly
-      // the case the alert exists for. It is recorded with a null sender
-      // instead, which is honest about what is known and still counts.
       if (!args.intentId || !log.transactionHash) continue;
-      byIntent.set(args.intentId, [
-        ...(byIntent.get(args.intentId) ?? []),
-        { txHash: log.transactionHash, from: args.from ?? null },
-      ]);
-    }
-    for (const [intentTopic, emissions] of byIntent) {
-      if (emissions.length < 2) continue;
+
+      const anomaly = this.store.recordEmission({
+        topic: args.intentId,
+        txHash: log.transactionHash,
+        from: args.from ?? null,
+      });
+      if (!anomaly) continue;
+
+      const senders = anomaly.transfers.map((t) => t.from ?? 'unknown').join(', ');
       this.enqueue('chain.anomaly', {
         kind: 'chain.anomaly',
-        intentId: intentTopic,
-        agentId: this.store.agentForIntentTopic(intentTopic),
-        transfers: emissions,
+        intentId: args.intentId,
+        agentId: anomaly.agentId,
+        reason: anomaly.reason,
+        // Whether the intent id was the CALLER'S or ours. The spec's question
+        // for a foreign sender is intent-id PREDICTABILITY, and a facilitator
+        // should not need a second lookup to answer it: a model-chosen id being
+        // quoted by a stranger is a guessable id being guessed, and a
+        // chain-svc:<uuid> being quoted is a different story entirely.
+        idSource: anomaly.idSource,
+        transfers: anomaly.transfers,
         detail:
-          `${emissions.length} IntentTransfer events for one intent id. chain-svc broadcasts at ` +
-          `most once per reservation, so this means the reservation was bypassed - most likely a ` +
-          `second chain-svc with a separate store writing to this chain, or an out-of-band ` +
-          `transfer reusing the id. The money moved; freeze the named wallet and inspect the ` +
-          `other sender. Senders: ${emissions.map((e) => e.from ?? 'unknown').join(', ')}.`,
+          anomaly.reason === 'foreign_sender'
+            ? `An IntentTransfer for this wallet's intent id was sent by ${senders}, which is ` +
+              `not the wallet that reserved it. transferWithIntent is permissionless, so this is ` +
+              `somebody spending THEIR OWN funds while quoting our intent id - it says nothing ` +
+              `about this wallet's key, and the reservation is NOT resolved by it. Inspect that ` +
+              `sender. The id was ${anomaly.idSource ?? 'of unrecorded origin'}` +
+              (anomaly.idSource === 'caller'
+                ? ', so it was chosen by the caller and may be guessable - that is the question to ask.'
+                : ', so it was generated here and is not guessable, which makes how they learned it the question.')
+            : `${anomaly.emissions} IntentTransfer events for one intent id. chain-svc broadcasts ` +
+              `at most once per reservation, so this means the reservation was bypassed - most ` +
+              `likely a second chain-svc with a separate store writing to this chain, or an ` +
+              `out-of-band transfer reusing the id. The money moved; freeze the named wallet and ` +
+              `inspect the other sender. Senders: ${senders}.`,
       });
       enqueued++;
     }
@@ -175,6 +185,70 @@ export class EventTail {
           `(${this.droppedTotal} total). hub-core has not accepted events for some time.`,
       );
     }
+  }
+
+  /// Resolves reservations the chain has already answered (spec S4).
+  ///
+  /// RESOLVE AND DETECT, NEVER RELEASE (ruled 10:40). There is one branch and
+  /// it only ever moves an intent from unresolved to CONFIRMED:
+  ///
+  ///   an IntentTransfer for this intent FROM THE RESERVING WALLET means it
+  ///   landed, so the intent is completed with that hash and the hold is KEPT,
+  ///   because the money moved. The sender constraint is not optional -
+  ///   `transferWithIntent` is permissionless, so an emission under our id
+  ///   proves an event EXISTS, not that chain-svc made it.
+  ///
+  /// THERE IS DELIBERATELY NO NEGATIVE BRANCH, and the reason is worth more
+  /// than the code it replaces. A first version failed intents when the cursor
+  /// had passed the block recorded at reservation. That block is a LOWER bound
+  /// - a transfer cannot be BELOW it - and the branch needed an UPPER one.
+  /// Knowing the cursor is past the same floor says nothing about whether it is
+  /// past the transaction. Worse, `cursor == bound` is the ORDINARY post-poll
+  /// state, because a poll sets the observed head and the cursor to the same
+  /// number, so a reservation taken just after a poll was failed by the very
+  /// next sweep - refunding a hold for money that had moved and, because the
+  /// fail path deleted the row, FREEING THE IDEMPOTENCY KEY. The retry then
+  /// broadcast a second transfer: the double-charge, through the component
+  /// added to prevent it.
+  ///
+  /// "Provably did not land" is not something scanning can establish at all: a
+  /// signed transaction can sit in the mempool arbitrarily long, so absence is
+  /// never proof of never. `held` is the terminal pessimistic state for a
+  /// post-broadcast unknown, and it is not permanent - stage spend is keyed by
+  /// (agent, stage), so a stuck hold clears at stage rollover. Pre-broadcast
+  /// failures already release at send time, where the failure IS provable.
+  ///
+  /// WHAT A REAL NEGATIVE BRANCH WOULD NEED, recorded so the next person does
+  /// not re-derive the lower-bound reasoning: the TRANSACTION NONCE on the row,
+  /// plus proof that a DIFFERENT transaction consumed it - a nonce consumed by
+  /// something else makes ours unlandable, which is the only true proof
+  /// available. A nonce alone is NOT enough: an advanced nonce cannot separate
+  /// "another transaction took ours" from "OURS landed and the emission is not
+  /// indexed yet". Distinguishing them needs the head observed at the moment
+  /// the nonce was seen to have advanced, and then waiting for the cursor to
+  /// pass THAT. Two phases, two columns, and a money-surface PR of its own.
+  async sweepOnce(): Promise<{ confirmed: number; held: number }> {
+    let confirmed = 0;
+    let held = 0;
+
+    for (const intent of this.store.unresolvedIntents()) {
+      const wallet = this.store.spawnedAddress(intent.agentId);
+      const landed =
+        intent.emissions > 0 &&
+        intent.firstTx !== null &&
+        wallet !== null &&
+        intent.firstFrom !== null &&
+        intent.firstFrom.toLowerCase() === wallet.toLowerCase();
+
+      if (landed) {
+        this.store.completeIntent(intent.intentId, intent.firstTx!);
+        confirmed++;
+        continue;
+      }
+      held++;
+    }
+
+    return { confirmed, held };
   }
 
   /// Drains the outbox. Returns what happened, so a test can assert delivery

@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkLocally, normaliseVee, veeToWei, matchesPattern, readPolicy, type WalletPolicy } from '../src/policy.ts';
+import { WalletStore } from '../src/store.ts';
 
 const POLICY: WalletPolicy = {
   agentId: 'orch:shadowbroker',
@@ -159,5 +160,35 @@ describe('reading the policy chain-svc actually writes', () => {
       JSON.stringify({ agentId: 'orch:a', max_per_tx: 25, max_per_stage: 100, allow: ['*.vee'], deny: [], frozen: false }),
     );
     expect(checkLocally(readPolicy(file), 'bob.vee', '26')).toBe('over_max_per_tx');
+  });
+});
+
+// Rider 1 (10:41): the tombstone invariant is chain-svc's AND this ledger's.
+// A persona re-sending under a used id must meet the ORIGINAL outcome, and an
+// entry that can disappear is one that stops answering.
+describe('the intent ledger never forgets', () => {
+  it('keeps an intent across later writes and a reload from disk', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-'));
+    const file = join(dir, 'state.json');
+
+    const first = new WalletStore(file);
+    first.remember('a', { txHash: '0xaaa', vee: '10', to: 'bob.vee', at: 1 });
+    first.remember('b', { txHash: '0xbbb', vee: '20', to: 'carol.vee', at: 2 });
+
+    // Still there after another intent was written...
+    expect(first.recall('a')?.txHash).toBe('0xaaa');
+    // ...and after a restart, which is the case that matters: the process that
+    // wrote it is gone and the persona retries against a fresh one.
+    expect(new WalletStore(file).recall('a')?.txHash).toBe('0xaaa');
+  });
+
+  // The property stated as a shape rather than a behaviour, because the risk is
+  // somebody ADDING a way to forget. If this fails, a delete/prune/expire has
+  // been introduced and the invariant above needs re-reading first.
+  it('exposes no way to remove an intent', () => {
+    const store = new WalletStore(join(mkdtempSync(join(tmpdir(), 'ledger-')), 's.json'));
+    for (const name of ['delete', 'remove', 'forget', 'prune', 'expire', 'clear']) {
+      expect((store as unknown as Record<string, unknown>)[name]).toBeUndefined();
+    }
   });
 });
