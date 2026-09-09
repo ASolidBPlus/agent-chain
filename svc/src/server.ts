@@ -188,6 +188,22 @@ async function postWallets({ services, body, principal }: RouteContext): Promise
   return services.spawner.spawn(body);
 }
 
+/// Set a wallet's balance to exactly `vee` (arena spec S3). Platform scope: it
+/// can move money OUT of an agent's wallet, which no other endpoint can, and
+/// the containment is that its destination is the treasury and is not a
+/// parameter. See Treasury.sweepToTreasury.
+async function postBalance({ services, body, param, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /wallets/:agentId/balance');
+  return services.treasury.setBalance(assertCanonicalAgentId(param), body);
+}
+
+/// Partial policy update, and the only way back from frozen. DELETE /wallets
+/// still means retirement and stays irreversible.
+async function patchPolicy({ services, body, param, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'PATCH /wallets/:agentId/policy');
+  return services.spawner.patchPolicy(assertCanonicalAgentId(param), body);
+}
+
 async function postAliases({ services, body, principal }: RouteContext): Promise<unknown> {
   requirePlatform(principal, 'POST /aliases');
   return services.spawner.addAlias(body);
@@ -233,6 +249,8 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/intents/', prefix: true, scope: 'any', handler: getIntent },
   { method: 'POST', path: '/wallets', prefix: false, scope: 'platform', handler: postWallets },
   { method: 'POST', path: '/wallets/', prefix: true, suffix: '/rotate', scope: 'platform', handler: postRotate },
+  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/balance', scope: 'platform', handler: postBalance },
+  { method: 'PATCH', path: '/wallets/', prefix: true, suffix: '/policy', scope: 'platform', handler: patchPolicy },
   { method: 'POST', path: '/aliases', prefix: false, scope: 'platform', handler: postAliases },
   { method: 'POST', path: '/fund', prefix: false, scope: 'platform', handler: postFund },
   { method: 'POST', path: '/stage', prefix: false, scope: 'platform', handler: postStage },

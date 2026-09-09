@@ -3,12 +3,14 @@
 // telling you an argument check moved after a side effect.
 
 import { describe, it, expect } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { decodeFunctionData } from 'viem';
+import { VEEBuxAbi } from '../src/abi.ts';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { loadPolicyDefaults } from '../src/policy.ts';
+import { loadPolicyDefaults, capToWei } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
@@ -171,7 +173,14 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
 
     const resolver = {
       // Both names already registered to this wallet by the attempt that died.
-      lookup: async () => ({ address, canonical: 'orch:shadowbroker' }),
+      // Name-aware rather than answering the same wallet for everything: the
+      // default deny list contains `treasury.vee`, and a stub claiming that
+      // resolves to THIS wallet makes it look like a vanity alias, which the
+      // canonical-deny check then correctly refuses.
+      lookup: async (name: string) =>
+        name === 'treasury.vee'
+          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.vee' }
+          : { address, canonical: 'orch:shadowbroker' },
     } as unknown as Resolver;
 
     const s = new Spawner(
@@ -239,8 +248,13 @@ describe('POST /sign-transfer validation', () => {
 describe('policy defaults', () => {
   it('has an entry for every wallet kind', () => {
     for (const kind of ['org', 'agent', 'burner'] as const) {
-      expect(DEFAULTS[kind].max_per_tx).toBeGreaterThan(0);
-      expect(DEFAULTS[kind].max_per_stage).toBeGreaterThanOrEqual(DEFAULTS[kind].max_per_tx);
+      // Compared in WEI, not as numbers: a cap may be a decimal string, and
+      // comparing those numerically is the imprecision the string form exists
+      // to prevent.
+      expect(capToWei(DEFAULTS[kind].max_per_tx)).toBeGreaterThan(0n);
+      expect(capToWei(DEFAULTS[kind].max_per_stage)).toBeGreaterThanOrEqual(
+        capToWei(DEFAULTS[kind].max_per_tx),
+      );
       expect(DEFAULTS[kind].deny).toContain('treasury.vee');
     }
   });
@@ -266,12 +280,56 @@ describe('policy defaults', () => {
     expect(() => loadPolicyDefaults(negative)).toThrow(/no valid "agent"/);
   });
 
+  // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an
+  // amount, and a caller sending 25.5 has made an amount mistake rather than a
+  // malformed-request one (ruled 07:58).
   it('rejects a caller-supplied policy of the wrong shape', async () => {
     const { spawner: s } = spawner();
-    expect(await codeOf(() => s.spawn({ agentId: 'orch:x', policy: { max_per_tx: 0 } }))).toBe('invalid_request');
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:x', policy: { max_per_tx: 0 } }))).toBe('invalid_amount');
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:x', policy: { max_per_tx: 25.5 } }))).toBe(
+      'invalid_amount',
+    );
     expect(
       await codeOf(() => s.spawn({ agentId: 'orch:x', policy: { ...DEFAULTS.agent, allow: [1] } })),
     ).toBe('invalid_request');
+  });
+
+  // A3, the spawn side. The canonical-deny rule was enforced on the PATCH path
+  // only, so `POST /wallets` accepted a vanity-alias deny that PATCH refused -
+  // the same document, two rule sets, in the other direction.
+  it('refuses a vanity-alias deny at spawn, as PATCH does', async () => {
+    const store = new Store(':memory:');
+    const s = new Spawner(
+      { ...config, policyDir: mkdtempSync(join(tmpdir(), 'policies-')) } as Config,
+      exploding('chain') as Chain,
+      exploding('keystore') as Keystore,
+      store,
+      {
+        lookup: async (name: string) =>
+          name === 'mark.vee'
+            ? { address: '0x000000000000000000000000000000000000dEaD', canonical: 'orch:mark' }
+            : null,
+      } as unknown as Resolver,
+      DEFAULTS,
+    );
+
+    const code = await codeOf(() =>
+      s.spawn({ agentId: 'orch:x', kind: 'agent', policy: { deny: ['mark.vee'] } }),
+    );
+    expect(code).toBe('invalid_request');
+  });
+
+  // The shape the arena sends, at the endpoint rather than at the merge helper:
+  // this is the call that returned 400 against a live stack.
+  it('accepts a partial policy at spawn, the arena shape', async () => {
+    const { spawner: s } = spawner();
+    const code = await codeOf(() =>
+      s.spawn({ agentId: 'orch:x', policy: { allow: ['arena:*'], deny: ['treasury.vee'] } }),
+    );
+    // Reaches the chain rather than being refused on the policy - the exploding
+    // stub is how we know it got past validation.
+    expect(code).not.toBe('invalid_request');
+    expect(code).not.toBe('invalid_amount');
   });
 });
 
@@ -713,5 +771,297 @@ describe('concurrent signTransfer against a stage cap', () => {
     const t = await treasuryWithStageCap(100);
     await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '100', intentId: 'solo' });
     expect(t.broadcasts).toBe(1);
+  }, 20_000);
+});
+
+// Arena spec S3. Set-balance is the one endpoint that can move money OUT of an
+// agent's wallet, so the tests are about what it CANNOT do as much as what it can.
+describe('POST /wallets/:agentId/balance', () => {
+  const WALLET = '0x000000000000000000000000000000000000bEEF';
+  const TREASURY = '0x0000000000000000000000000000000000007777';
+  const vee = (n: number) => BigInt(n) * 10n ** 18n;
+
+  /// Records every transfer the chain was asked to make, so a test can assert
+  /// the DESTINATION and not just the resulting balance.
+  class RecordingTreasury extends Treasury {
+    sent: Array<{ to: string; amount: bigint }> = [];
+    balance = 0n;
+    /// Decodes the calldata and MOVES THE BALANCE, so the re-read at the end of
+    /// setBalance sees what a real chain would. A fake that accepted the
+    /// transfer without applying it would make the outcome-vs-intention test
+    /// pass for the wrong reason - it would be reading a number that never
+    /// changed, which is the defect the re-read exists to catch.
+    protected signerFor(): Signer {
+      let pending = 0n;
+      return {
+        prepareTransactionRequest: async (req: Record<string, unknown>) => {
+          const { args } = decodeFunctionData({ abi: VEEBuxAbi, data: req.data as `0x${string}` });
+          pending = (args as readonly [string, bigint])[1];
+          return req;
+        },
+        signTransaction: async () => '0xsigned' as const,
+        sendRawTransaction: async () => {
+          this.balance -= pending;
+          this.sent.push({ to: TREASURY, amount: pending });
+          return '0xswept' as `0x${string}`;
+        },
+      };
+    }
+  }
+
+  function treasuryAt(balance: bigint, frozen = false): { t: RecordingTreasury; store: Store } {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', WALLET);
+    if (frozen) store.freeze('orch:a');
+    const t = new RecordingTreasury(
+      { ...config, policyDir: '/tmp/none' } as Config,
+      {
+        viemChain: {},
+        deployment: { VEEBux: '0xvee', treasury: TREASURY },
+        publicClient: {
+          readContract: async () => t.balance,
+          waitForTransactionReceipt: async () => ({}),
+        },
+        walletClient: {
+          account: {},
+          writeContract: async ({ args }: { args: [string, bigint] }) => {
+            t.sent.push({ to: args[0], amount: args[1] });
+            t.balance += args[1];
+            return '0xfunded' as `0x${string}`;
+          },
+        },
+      } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: WALLET }) } as unknown as Keystore,
+      store,
+      { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async () => null } as unknown as Resolver,
+      DEFAULTS,
+    );
+    t.balance = balance;
+    return { t, store };
+  }
+
+  it('funds the difference when the balance is below target', async () => {
+    const { t } = treasuryAt(vee(10));
+    const res = await t.setBalance('orch:a', { vee: '100', intentId: 'b-1' });
+    expect(res.balance).toBe('100');
+    expect(t.sent).toEqual([{ to: WALLET, amount: vee(90) }]);
+  }, 20_000);
+
+  it('sweeps the difference to the TREASURY when above target', async () => {
+    const { t } = treasuryAt(vee(100));
+    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-2' });
+    expect(res.balance).toBe('40');
+    expect(res.txHash).toBe('0xswept');
+  }, 20_000);
+
+  // A4. The reply used to be `formatVee(target)` at both exits - the INTENTION,
+  // not the outcome, since `current` was read several awaits before the
+  // transfer landed. It is what the arena's Wallets panel shows.
+  it('reports the MEASURED balance, not the one it intended to set', async () => {
+    const { t } = treasuryAt(vee(100));
+
+    // The chain applies only part of the sweep - a partial fill, a fee, any
+    // reason the outcome differs from the intention.
+    const realSigner = (t as unknown as { signerFor: () => Signer }).signerFor.bind(t);
+    (t as unknown as { signerFor: () => Signer }).signerFor = () => {
+      const s = realSigner();
+      return { ...s, sendRawTransaction: async () => { t.balance = vee(42); return '0xpartial' as `0x${string}`; } };
+    };
+
+    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-measured' });
+
+    // 42, what the chain holds - not 40, what we asked for.
+    expect(res.balance).toBe('42');
+  }, 20_000);
+
+  it('does nothing at all when the balance is already correct', async () => {
+    const { t } = treasuryAt(vee(50));
+    const res = await t.setBalance('orch:a', { vee: '50', intentId: 'b-3' });
+    expect(res).toEqual({ balance: '50' });
+    expect(res.txHash).toBeUndefined();
+    expect(t.sent).toHaveLength(0);
+  }, 20_000);
+
+  // An operator resetting is not an agent spending, so the freeze does not stop
+  // it. This is the invariant sweepToTreasury changes, asserted rather than
+  // described.
+  it('sets the balance of a FROZEN wallet', async () => {
+    const { t } = treasuryAt(vee(100), true);
+    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-4' });
+    expect(res.balance).toBe('40');
+  }, 20_000);
+
+  // THE CONTAINMENT. Not "a `to` field is ignored" - a body carrying one is
+  // REFUSED, because an ignored field is one somebody wires up later.
+  it('refuses a body that tries to name a destination', async () => {
+    const { t } = treasuryAt(vee(100));
+    const code = await codeOf(() =>
+      t.setBalance('orch:a', { vee: '40', to: '0xattacker', intentId: 'b-5' }),
+    );
+    expect(code).toBe('invalid_request');
+    expect(t.sent).toHaveLength(0);
+  }, 20_000);
+
+  // Idempotency has two halves here and they are different mechanisms.
+  //
+  // The cheap half: once the balance IS the target, a repeat is a no-op before
+  // any reservation is consulted, because "already correct" is the answer.
+  it('a repeat after success moves nothing, because the balance is already right', async () => {
+    const { t } = treasuryAt(vee(10));
+    await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const before = t.sent.length;
+
+    const again = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+
+    expect(again).toEqual({ balance: '100' });
+    expect(t.sent).toHaveLength(before);
+  }, 20_000);
+
+  // The half that matters: the caller RETRIES because it never saw the
+  // response, so from its side nothing happened - and here the balance has not
+  // settled either. Only the intent reservation can tell these apart, and it
+  // answers with the original transaction instead of funding a second time.
+  it('replays the original transaction when the caller retries a lost response', async () => {
+    const { t } = treasuryAt(vee(10));
+    const first = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const before = t.sent.length;
+
+    t.balance = vee(10); // the retry sees the pre-transfer state
+
+    const second = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+
+    expect(second.txHash).toBe(first.txHash);
+    expect(t.sent).toHaveLength(before); // and did NOT fund again
+  }, 20_000);
+
+  // Platform scope has no stage cap, so a large reset is not refused as
+  // over_stage_cap - the null cap hold, asserted through the endpoint.
+  it('is not subject to the stage cap', async () => {
+    const { t, store } = treasuryAt(vee(0));
+    const res = await t.setBalance('orch:a', { vee: '100000', intentId: 'b-6' });
+    expect(res.balance).toBe('100000');
+    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(0n);
+  }, 20_000);
+});
+
+// Arena spec S3. The only way back from frozen; DELETE /wallets keeps meaning
+// retirement and stays irreversible.
+describe('PATCH /wallets/:agentId/policy', () => {
+  function spawnerWith(canonicalOf: Record<string, string> = {}): { s: Spawner; store: Store; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF');
+    const s = new Spawner(
+      { ...config, policyDir: dir } as Config,
+      exploding('chain') as Chain,
+      exploding('keystore') as Keystore,
+      store,
+      {
+        lookup: async (n: string) =>
+          canonicalOf[n] ? { address: '0x000000000000000000000000000000000000dEaD', canonical: canonicalOf[n] } : null,
+      } as unknown as Resolver,
+      DEFAULTS,
+    );
+    return { s, store, dir };
+  }
+
+  const read = (dir: string) =>
+    JSON.parse(readFileSync(join(dir, 'orch%3Aa.json'), 'utf8')) as Record<string, unknown>;
+
+  // Every field, both directions: the one supplied changes and EVERY omitted
+  // one survives. Asserting only the supplied field would leave the fallbacks
+  // untested - a patch that quietly reset an omitted cap to a default would
+  // pass, and that is a cap silently lowered or raised on a live wallet.
+  it('updates only the fields present, leaving every other one alone', async () => {
+    const { s, dir } = spawnerWith();
+
+    await s.patchPolicy('orch:a', { max_per_stage: 4242 });
+
+    const p = read(dir);
+    expect(p.max_per_stage).toBe(4242);
+    expect(p.max_per_tx).toBe(DEFAULTS.agent.max_per_tx);
+    expect(p.allow).toEqual(DEFAULTS.agent.allow);
+    expect(p.deny).toEqual(DEFAULTS.agent.deny);
+  }, 20_000);
+
+  it('preserves an earlier patch when a later one touches a different field', async () => {
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { max_per_tx: 250 });
+    await s.patchPolicy('orch:a', { max_per_stage: 999 });
+    const p = read(dir);
+    expect(p.max_per_tx).toBe(250); // not reset by the second patch
+    expect(p.max_per_stage).toBe(999);
+  }, 20_000);
+
+  it('flips frozen both ways, and the store agrees with the file', async () => {
+    const { s, store, dir } = spawnerWith();
+
+    await s.patchPolicy('orch:a', { frozen: true });
+    expect(store.isFrozen('orch:a')).toBe(true);
+    expect(read(dir).frozen).toBe(true);
+
+    await s.patchPolicy('orch:a', { frozen: false });
+    expect(store.isFrozen('orch:a')).toBe(false);
+    expect(read(dir).frozen).toBe(false);
+  }, 20_000);
+
+  // The store is what /sign-transfer consults, so this is the property that
+  // actually stops and restarts spending - the file is wallet-mcp's copy.
+  it('the freeze the next /sign-transfer honours is the STORE, not the file', async () => {
+    const { s, store } = spawnerWith();
+    await s.patchPolicy('orch:a', { frozen: true });
+    expect(store.isFrozen('orch:a')).toBe(true);
+    await s.patchPolicy('orch:a', { frozen: false });
+    expect(store.isFrozen('orch:a')).toBe(false);
+  }, 20_000);
+
+  // §5's durable rule: a deny entry names a canonical id or a platform name.
+  // The two are indistinguishable by shape, so the registry decides.
+  it('refuses a deny entry that is a vanity alias', async () => {
+    const { s } = spawnerWith({ 'mark.vee': 'orch:mark' });
+    const code = await codeOf(() => s.patchPolicy('orch:a', { deny: ['mark.vee'] }));
+    expect(code).toBe('invalid_request');
+  }, 20_000);
+
+  it('accepts a deny entry that IS the canonical name for its address', async () => {
+    const { s, dir } = spawnerWith({ 'treasury.vee': 'treasury.vee' });
+    await s.patchPolicy('orch:a', { deny: ['treasury.vee'] });
+    expect(read(dir).deny).toEqual(['treasury.vee']);
+  }, 20_000);
+
+  // Accepted on purpose: it names no identity today, and refusing it would make
+  // a policy un-writable until the wallet it names exists - inverting the spawn
+  // order the arena needs.
+  it('accepts a deny entry that resolves to nothing yet', async () => {
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { deny: ['orch:notyet'] });
+    expect(read(dir).deny).toEqual(['orch:notyet']);
+  }, 20_000);
+
+  it('refuses a malformed pattern in either list', async () => {
+    const { s } = spawnerWith();
+    expect(await codeOf(() => s.patchPolicy('orch:a', { deny: ['a*b'] }))).toBe('invalid_request');
+    expect(await codeOf(() => s.patchPolicy('orch:a', { allow: ['a*b'] }))).toBe('invalid_request');
+  }, 20_000);
+
+  // Same codes as POST /wallets now, because it is the same validator: a bad
+  // CAP is invalid_amount, a bad LIST is invalid_request.
+  it('refuses a cap that is not an amount, with the same code POST uses', async () => {
+    const { s } = spawnerWith();
+    for (const bad of [0, -5, 1.5, '', 'lots', null]) {
+      expect(await codeOf(() => s.patchPolicy('orch:a', { max_per_tx: bad }))).toBe('invalid_amount');
+    }
+  }, 20_000);
+
+  // A2/A3: a wallet must be patchable in the form it was spawned with.
+  it('accepts a STRING cap, the form POST /wallets accepts', async () => {
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { max_per_tx: '25' });
+    expect(read(dir).max_per_tx).toBe('25');
+  }, 20_000);
+
+  it('refuses to patch a wallet that does not exist', async () => {
+    const { s } = spawnerWith();
+    expect(await codeOf(() => s.patchPolicy('orch:nobody', { frozen: true }))).toBe('wallet_not_found');
   }, 20_000);
 });

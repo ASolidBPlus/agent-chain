@@ -24,7 +24,7 @@ import {
   type AgentPolicy,
   type PolicyDefaults,
 } from './policy.ts';
-import { assertLookupName, formatVee, parseVee } from './validate.ts';
+import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from './validate.ts';
 
 /// Which path a spend arrived by, for the `agent.spend` event.
 ///
@@ -202,6 +202,159 @@ export class Treasury {
     }
   }
 
+  /// Set a wallet's balance to EXACTLY `vee` (arena spec S3). Platform scope.
+  ///
+  /// Below target it funds the difference from the treasury. Above target it
+  /// SWEEPS the difference back, signed from that wallet's own key. Equal is a
+  /// no-op with no transaction and no txHash - "already correct" is a result,
+  /// not something to spend gas proving.
+  ///
+  /// A FROZEN WALLET CAN STILL BE SET, deliberately: an operator resetting a
+  /// balance is not an agent spending. See sweepToTreasury for what that costs.
+  async setBalance(
+    agentId: string,
+    body: { vee?: unknown; intentId?: unknown; reason?: unknown; to?: unknown },
+  ): Promise<{ balance: string; txHash?: string; intentId?: string }> {
+    assertCanonicalAgentId(agentId);
+    // `to` IS NOT A PARAMETER OF THIS ENDPOINT and never becomes one by
+    // accident: a body carrying it is refused rather than ignored. An ignored
+    // field is one somebody wires up later; a refused one cannot be. The sweep
+    // destination is the treasury and is read from the deployment.
+    if (body.to !== undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'this endpoint has no destination: a sweep always returns to the treasury',
+      );
+    }
+
+    const target = parseVee(body.vee, 'vee');
+    const wallet = await this.resolver.require(agentId);
+    const current = (await this.chain.publicClient.readContract({
+      address: this.chain.deployment.VEEBux,
+      abi: VEEBuxAbi,
+      functionName: 'balanceOf',
+      args: [wallet.address],
+    })) as bigint;
+
+    if (current === target) return { balance: formatVee(current) };
+
+    const reason = typeof body.reason === 'string' ? body.reason : null;
+    const intentId =
+      typeof body.intentId === 'string' && body.intentId !== ''
+        ? body.intentId
+        : `chain-svc:${randomUUID()}`;
+
+    // IDEMPOTENT ON THE CALLER'S intentId, through the same reservation the
+    // agent path uses - with NO CAP HOLD, because this is platform scope and
+    // the treasury has no stage cap. A replay returns the original transaction
+    // rather than moving money a second time.
+    //
+    // The ON-CHAIN half of the intent story (transferWithIntent /
+    // IntentTransfer) is not on this branch: it is the contract PR, which now
+    // sequences AFTER this one. So these transfers are recorded as intents in
+    // the store and emit the ordinary Transfer, and the contract PR switches
+    // this call site along with fund's and sign-transfer's. Flagged rather than
+    // silently deferred, because "every chain-svc transfer emits an
+    // IntentTransfer" is the premise the sweep's negative branch rests on, and
+    // it is not true until that PR lands.
+    const reservation = this.store.reserve({
+      intentId,
+      agentId,
+      stage: await this.currentStage(),
+      amount: current < target ? target - current : current - target,
+      capWei: null,
+    });
+    if (reservation.outcome === 'duplicate') {
+      // Also measured rather than assumed: a replay reports what the wallet
+      // holds now, which is the point of asking again.
+      if (reservation.txHash) return { balance: formatVee(current), txHash: reservation.txHash, intentId };
+      throw new HttpError(
+        'intent_unresolved',
+        `intent ${intentId} is reserved with no recorded transaction; reconcile before retrying`,
+      );
+    }
+
+    const result =
+      current < target
+        ? await this.fund({ to: agentId, vee: formatVee(target - current), reason })
+        : await this.sweepToTreasury(agentId, current - target, reason, intentId);
+
+    this.store.completeIntent(intentId, result.txHash);
+
+    // RE-READ. The reply reported `target` at both exits, which is the
+    // INTENTION and not the OUTCOME: `current` was read several awaits before
+    // the transfer landed, so the number was never measured after the fact. It
+    // is what the arena's Wallets panel shows, and a panel showing a number
+    // nobody observed is the observer reporting its own state as the subject's.
+    const settled = (await this.chain.publicClient.readContract({
+      address: this.chain.deployment.VEEBux,
+      abi: VEEBuxAbi,
+      functionName: 'balanceOf',
+      args: [wallet.address],
+    })) as bigint;
+
+    return { balance: formatVee(settled), txHash: result.txHash, intentId };
+  }
+
+  /// Wallet -> treasury, signed by chain-svc from that wallet's key under
+  /// PLATFORM scope. This is a new power and worth being explicit about.
+  ///
+  /// Until this existed, `walletPrincipal` was the whole story: signing needed
+  /// a WALLET credential whose id was the source, and platform scope could not
+  /// spend from anybody. This can, and its containment is structural rather
+  /// than intentional:
+  ///
+  ///   - THE DESTINATION IS NOT A PARAMETER. It is read from
+  ///     `chain.deployment.treasury`. There is no code path here that accepts
+  ///     one, so this cannot be turned into a transfer to a third party by a
+  ///     caller, only by an edit to this function.
+  ///   - No cap hold. The treasury has no stage cap and an operator reset
+  ///     refused as `over_stage_cap` mid-game would be a bad failure.
+  ///   - The intent record IS taken, so `fund` and this and `/sign-transfer`
+  ///     all emit an IntentTransfer and absence of one keeps meaning something.
+  ///
+  /// AND ONE INVARIANT IT CHANGES, stated because a reviewer should meet it
+  /// here rather than discover it: this does NOT go through `signTransfer`, so
+  /// it skips the `isFrozen` check. `isFrozen` therefore stops being the single
+  /// gate every outbound transfer passes. That is intended - freezing stops an
+  /// AGENT spending, not an operator resetting - but it is no longer true that
+  /// "nothing leaves a frozen wallet".
+  private async sweepToTreasury(
+    agentId: string,
+    amount: bigint,
+    reason: string | null,
+    intentId: string,
+  ): Promise<{ txHash: string }> {
+    const { privateKey } = await this.keystore.load(agentId);
+    const account = privateKeyToAccount(privateKey);
+    const wallet = this.signerFor(account);
+
+    try {
+      // Plain `transfer` for now: `transferWithIntent` arrives with the
+      // contract PR, which sequences after this one. The intent is recorded in
+      // the store either way, so idempotency here does not wait on it.
+      const data = encodeFunctionData({
+        abi: VEEBuxAbi,
+        functionName: 'transfer',
+        args: [this.chain.deployment.treasury, amount],
+      });
+      const request = await wallet.prepareTransactionRequest({
+        account,
+        chain: this.chain.viemChain,
+        to: this.chain.deployment.VEEBux,
+        data,
+      });
+      const serialized = await wallet.signTransaction(request as never);
+      const hash = await wallet.sendRawTransaction({ serializedTransaction: serialized });
+      await this.chain.publicClient.waitForTransactionReceipt({ hash });
+
+      this.store.recordMemo({ txHash: hash, memo: reason, intentId, fromAgentId: agentId });
+      return { txHash: hash };
+    } catch (err) {
+      throw asChainError(err);
+    }
+  }
+
   /// Used only by wallet-mcp and org-core (spec S4). chain-svc holds the key;
   /// the caller never sees it.
   async signTransfer(
@@ -318,7 +471,7 @@ export class Treasury {
       });
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {
-      this.store.release(intentId, fromAgentId, stage, amount);
+      this.store.release(intentId);
       throw asChainError(err);
     }
 
