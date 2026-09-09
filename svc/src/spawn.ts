@@ -19,7 +19,8 @@ import type { Keystore } from './keystore.ts';
 import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
-import { mergePolicy, loadPolicyDefaults, readPolicyFile, type AgentPolicy, type PolicyDefaults, type WalletKind,
+import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
+  type AgentPolicy, type PolicyDefaults, type WalletKind,
   assertPatternsUsable,
 } from './policy.ts';
 import {
@@ -179,8 +180,11 @@ export class Spawner {
 
   private parseKind(value: unknown): WalletKind {
     if (value === undefined || value === null) return 'agent';
-    if (value === 'org' || value === 'agent' || value === 'burner') return value;
-    throw new HttpError('invalid_request', 'kind must be one of org, agent, burner');
+    if (isWalletKind(value)) return value;
+    // Built FROM the constant, so the message cannot drift from the condition
+    // it explains: a kind added to WALLET_KINDS is accepted here and named here
+    // in the same edit, and there is no second list to forget.
+    throw new HttpError('invalid_request', `kind must be one of ${WALLET_KINDS.join(', ')}`);
   }
 
   private async endowGas(address: Address): Promise<void> {
