@@ -1,0 +1,167 @@
+// viem clients and the deployed addresses. One place that knows how to reach
+// the chain, so nothing else has to care where the treasury key comes from.
+
+import { createPublicClient, createWalletClient, http, getAddress, type Address, type PublicClient, type WalletClient } from 'viem';
+import { mnemonicToAccount } from 'viem/accounts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Config } from './config.ts';
+import { HttpError } from './errors.ts';
+
+/// Chain ids conventionally reserved for LOCAL DEVELOPMENT chains: Anvil and
+/// Hardhat use 31337, Ganache 1337. chain-svc refuses to start against anything
+/// else, and that refusal is the point.
+///
+/// PowerOUT's money is play money because the chain is a private Anvil with zero
+/// gas and a treasury that mints from nothing (confirmed by the game owner,
+/// 2026-09-08). Left as configuration, that stays true only as long as nobody
+/// repoints RPC_URL - and the personas holding these wallets are DELIBERATELY
+/// socially-engineerable, so the day someone points this service at a real
+/// network the tools that spend are already wired up and nobody re-asks a
+/// question that was answered once. Making it a startup assertion turns "we
+/// deployed it safely" into "it cannot run otherwise".
+///
+/// There is deliberately NO bridge, withdrawal or export primitive anywhere in
+/// this service - not an unused one, none. Do not add one; a disabled path is
+/// an enabled path with a flag in front of it.
+///
+/// Ruled 20:12 UTC (spec S4, "Play money is structural, not configured").
+const PRIVATE_CHAIN_ID = 31337;
+
+export interface Deployment {
+  chainId: number;
+  VEEBux: Address;
+  NameRegistry: Address;
+  treasury: Address;
+}
+
+export function loadDeployment(deploymentsDir: string): Deployment {
+  const path = join(deploymentsDir, 'local.json');
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    throw new Error(
+      `chain-svc: no deployment at ${path}. Run Deploy.s.sol first - ` +
+        `compose does this before starting the service (spec S7).`,
+    );
+  }
+  const parsed = JSON.parse(raw) as Partial<Deployment>;
+  if (!parsed.VEEBux || !parsed.NameRegistry || !parsed.treasury) {
+    throw new Error(`chain-svc: ${path} is missing VEEBux / NameRegistry / treasury`);
+  }
+  return {
+    chainId: Number(parsed.chainId),
+    VEEBux: getAddress(parsed.VEEBux),
+    NameRegistry: getAddress(parsed.NameRegistry),
+    treasury: getAddress(parsed.treasury),
+  };
+}
+
+export class Chain {
+  readonly publicClient: PublicClient;
+  readonly walletClient: WalletClient;
+  readonly deployment: Deployment;
+  readonly treasury: Address;
+
+  constructor(config: Config, deployment: Deployment) {
+    this.deployment = deployment;
+    // Account 0 of the chain's own mnemonic is the deployer and the treasury
+    // (spec S2). Derived in memory; never written to the keystore volume.
+    const account = mnemonicToAccount(config.anvilMnemonic);
+    this.treasury = account.address;
+
+    if (account.address.toLowerCase() !== deployment.treasury.toLowerCase()) {
+      // Silently signing as the wrong account would mint from an address with
+      // no MINTER_ROLE and fail deep inside a transfer, so say it at startup.
+      throw new Error(
+        `chain-svc: ANVIL_MNEMONIC derives ${account.address} but the deployment ` +
+          `names ${deployment.treasury} as treasury - wrong mnemonic for this chain`,
+      );
+    }
+
+    const transport = http(config.rpcUrl);
+    this.publicClient = createPublicClient({ transport }) as PublicClient;
+    this.walletClient = createWalletClient({ account, transport });
+  }
+}
+
+/// Refuses any RPC host that could be a public endpoint. Checked BEFORE the
+/// chain id, because the chain-id check requires actually talking to the host,
+/// and this service should never emit a request to a public node at all.
+///
+/// The rule is deliberately strict rather than clever: loopback, RFC 1918 /
+/// unique-local addresses, or a bare hostname (a Compose service name such as
+/// `chain`). A dotted name is refused even if it might be internal - the cost
+/// of that is one deliberate edit here, and the cost of being wrong the other
+/// way is a socially-engineerable persona holding a wallet on a real network.
+export function assertPrivateRpcUrl(rpcUrl: string): void {
+  const refuse = (why: string): never => {
+    throw new Error(
+      `chain-svc: refusing_public_rpc - RPC_URL ${rpcUrl} ${why}. This service only ever ` +
+        `talks to the game's private chain; see PRIVATE_CHAIN_ID in chain.ts.`,
+    );
+  };
+
+  let host: string;
+  try {
+    host = new URL(rpcUrl).hostname;
+  } catch {
+    return refuse('is not a valid URL');
+  }
+
+  // new URL keeps IPv6 literals in brackets.
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  const lower = bare.toLowerCase();
+
+  if (lower === 'localhost' || lower.endsWith('.localhost')) return;
+
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(lower);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    const isPrivate =
+      a === 127 || // loopback
+      a === 10 || // RFC 1918
+      (a === 172 && b >= 16 && b <= 31) || // RFC 1918
+      (a === 192 && b === 168) || // RFC 1918
+      (a === 169 && b === 254); // link-local
+    return isPrivate ? undefined : refuse('is a public IPv4 address');
+  }
+
+  if (lower.includes(':')) {
+    const isPrivate = lower === '::1' || /^f[cd][0-9a-f]{2}:/.test(lower); // loopback or unique-local
+    return isPrivate ? undefined : refuse('is a public IPv6 address');
+  }
+
+  // A bare hostname is a Compose service name (`chain`). A dotted one is a
+  // domain, and this service has no business resolving one.
+  if (lower.includes('.')) return refuse('is a dotted hostname, not a Compose service name');
+}
+
+/// Verified at startup, before the service accepts a single request.
+export async function assertPrivateChain(chain: Chain): Promise<void> {
+  const chainId = await chain.publicClient.getChainId();
+
+  if (chainId !== PRIVATE_CHAIN_ID) {
+    throw new Error(
+      `chain-svc: wrong_chain_id - RPC reports chain id ${chainId}, expected ${PRIVATE_CHAIN_ID}. ` +
+        `This service mints and spends on behalf of personas that are designed to be manipulated, ` +
+        `and only ever runs against the game's private chain.`,
+    );
+  }
+  if (chainId !== chain.deployment.chainId) {
+    throw new Error(
+      `chain-svc: wrong_chain_id - RPC reports ${chainId} but the deployment in local.json was ` +
+        `made on ${chain.deployment.chainId}`,
+    );
+  }
+}
+
+/// Turns a viem failure into the right wire error: a node that is unreachable
+/// is a 503 the caller can retry, a revert is a 502 they cannot (spec S4).
+export function asChainError(err: unknown): HttpError {
+  const message = err instanceof Error ? err.message : String(err);
+  const unreachable =
+    /fetch failed|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|HttpRequestError/i.test(message);
+  return new HttpError(unreachable ? 'chain_unreachable' : 'chain_error', message.split('\n')[0]);
+}
