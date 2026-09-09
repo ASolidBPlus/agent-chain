@@ -5,7 +5,7 @@
 // whole of the addressing rule (spec S0/S5) and it lives here because this is
 // the file that can move funds.
 
-import { createWalletClient, encodeFunctionData, http, type Address } from 'viem';
+import { createWalletClient, encodeFunctionData, http, keccak256, toBytes, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { randomUUID } from 'node:crypto';
 import { VEEBuxAbi } from './abi.ts';
@@ -47,6 +47,17 @@ export function spendVia(marker?: string): 'mcp' | 'direct' {
 /// The three operations signTransfer needs from a wallet client, named so the
 /// prepare/sign/send split - which is where "provably before the broadcast"
 /// stops being a phrase and becomes a boundary - is visible in the type.
+/// THE ONE DERIVATION of a string intent id to the bytes32 the contract logs.
+///
+/// Used identically in three places - when chain-svc reserves the intent, when
+/// it calls transferWithIntent, and when the sweep scans IntentTransfer for it.
+/// Three derivations would give three answers to "did this land?", which is the
+/// only question the event exists to answer, so this is deliberately the single
+/// function and not an inline keccak at each site.
+export function intentTopic(intentId: string): `0x${string}` {
+  return keccak256(toBytes(intentId));
+}
+
 export interface Signer {
   prepareTransactionRequest: (a: Record<string, unknown>) => Promise<unknown>;
   signTransaction: (r: never) => Promise<`0x${string}`>;
@@ -175,10 +186,31 @@ export class Treasury {
   }
 
   /// Treasury -> wallet. Facilitator top-ups and bounty payouts (spec S4).
-  async fund(body: { to?: unknown; vee?: unknown; reason?: unknown }): Promise<{ txHash: string }> {
+  ///
+  /// Goes through the INTENT PATH like every other chain-svc transfer, with a
+  /// server-generated id when the caller supplies none. Not tidiness: the
+  /// sweep's negative branch reads "no IntentTransfer for this id therefore it
+  /// did not land", and that inference is only sound if EMISSION IS UNIVERSAL.
+  /// One silent transfer path and absence stops meaning anything, so the sweep
+  /// could only ever confirm and never release, and holds would accumulate.
+  ///
+  /// It takes NO CAP HOLD (ruled 04:05): the treasury has no stage cap, and a
+  /// facilitator top-up refused as over_stage_cap mid-game would be a bad
+  /// failure. This is the one place the reservation's two halves come apart -
+  /// the intent record is taken, the budget is not.
+  async fund(body: {
+    to?: unknown;
+    vee?: unknown;
+    reason?: unknown;
+    intentId?: unknown;
+  }): Promise<{ txHash: string; intentId: string }> {
     const name = assertLookupName(body.to);
     const amount = parseVee(body.vee, 'vee');
     const target = await this.resolver.require(name);
+    const intentId =
+      typeof body.intentId === 'string' && body.intentId !== ''
+        ? body.intentId
+        : `chain-svc:${randomUUID()}`;
 
     try {
       const hash = await this.chain.walletClient.writeContract({
@@ -186,17 +218,17 @@ export class Treasury {
         chain: this.chain.viemChain,
         address: this.chain.deployment.VEEBux,
         abi: VEEBuxAbi,
-        functionName: 'transfer',
-        args: [target.address, amount],
+        functionName: 'transferWithIntent',
+        args: [target.address, amount, intentTopic(intentId)],
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       this.store.recordMemo({
         txHash: hash,
         memo: typeof body.reason === 'string' ? body.reason : null,
-        intentId: null,
+        intentId,
         fromAgentId: 'treasury',
       });
-      return { txHash: hash };
+      return { txHash: hash, intentId };
     } catch (err) {
       throw asChainError(err);
     }
@@ -276,7 +308,13 @@ export class Treasury {
 
     const result =
       current < target
-        ? await this.fund({ to: agentId, vee: formatVee(target - current), reason })
+        // THE INTENT ID GOES THROUGH. `fund` gained the parameter in this PR
+        // and `setBalance` is its only caller here; without this line a top-up
+        // would record `intentId: null` while the sweep recorded the id - so a
+        // top-up would be the one money movement whose intent cannot be joined
+        // from /history, and BOTH SIDES WOULD COMPILE. Seat 2 recorded the
+        // asymmetry against the pre-merge trees; this is where it dissolves.
+        ? await this.fund({ to: agentId, vee: formatVee(target - current), reason, intentId })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId);
 
     this.store.completeIntent(intentId, result.txHash);
@@ -421,6 +459,7 @@ export class Treasury {
     // and a second identical transfer is a valid second transfer).
     const reservation = this.store.reserve({
       intentId,
+      topic: intentTopic(intentId),
       agentId: fromAgentId,
       stage,
       amount,
@@ -460,8 +499,8 @@ export class Treasury {
       wallet = this.signerFor(account);
       const data = encodeFunctionData({
         abi: VEEBuxAbi,
-        functionName: 'transfer',
-        args: [target.address, amount],
+        functionName: 'transferWithIntent',
+        args: [target.address, amount, intentTopic(intentId)],
       });
       const request = await wallet.prepareTransactionRequest({
         account,

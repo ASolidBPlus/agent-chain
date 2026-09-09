@@ -71,4 +71,82 @@ contract VEEBuxTest is Test {
 
         assertEq(vee.balanceOf(darknetclient), 5 ether);
     }
+
+    // ---- transferWithIntent -------------------------------------------------
+
+    event IntentTransfer(bytes32 indexed intentId, address indexed from, address indexed to, uint256 amount);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    function _fund(address who, uint256 amount) internal {
+        vm.prank(treasury);
+        vee.mint(who, amount);
+    }
+
+    function test_TransferWithIntentMovesTheMoneyAndEmitsBothEvents() public {
+        _fund(shadowbroker, 100e18);
+        bytes32 intent = keccak256(bytes("orch:shadowbroker:pay-1"));
+
+        // ALONGSIDE, not instead of: anything reading Transfer is unaffected.
+        vm.expectEmit(true, true, false, true);
+        emit Transfer(shadowbroker, darknetclient, 40e18);
+        vm.expectEmit(true, true, true, true);
+        emit IntentTransfer(intent, shadowbroker, darknetclient, 40e18);
+
+        vm.prank(shadowbroker);
+        vee.transferWithIntent(darknetclient, 40e18, intent);
+
+        assertEq(vee.balanceOf(darknetclient), 40e18);
+        assertEq(vee.balanceOf(shadowbroker), 60e18);
+    }
+
+    /// The mover is msg.sender and there is no `from` parameter, so this cannot
+    /// be used to move someone else's balance even with an allowance in place.
+    function test_TransferWithIntentCannotSpendSomeoneElsesBalance() public {
+        _fund(shadowbroker, 100e18);
+        vm.prank(shadowbroker);
+        vee.approve(darknetclient, 100e18);
+
+        // darknetclient holds an allowance over shadowbroker, and it buys
+        // nothing here: it can only move its own (zero) balance.
+        vm.prank(darknetclient);
+        vm.expectRevert();
+        vee.transferWithIntent(treasury, 1e18, keccak256(bytes("theft")));
+
+        assertEq(vee.balanceOf(shadowbroker), 100e18);
+    }
+
+    /// THE DESIGN, asserted so nobody "hardens" it into a uniqueness constraint
+    /// without deleting this test first. Two sends under one intent id BOTH
+    /// succeed and BOTH emit - the event proves a transfer happened, never that
+    /// it happened once. That is what makes a second event detectable as an
+    /// anomaly instead of silently reverting.
+    function test_TheContractDoesNotDeduplicateIntents() public {
+        _fund(shadowbroker, 100e18);
+        bytes32 intent = keccak256(bytes("reused"));
+
+        vm.prank(shadowbroker);
+        vee.transferWithIntent(darknetclient, 10e18, intent);
+        vm.prank(shadowbroker);
+        vee.transferWithIntent(darknetclient, 10e18, intent);
+
+        assertEq(vee.balanceOf(darknetclient), 20e18);
+    }
+
+    function test_TransferWithIntentRespectsBalance() public {
+        _fund(shadowbroker, 5e18);
+        vm.prank(shadowbroker);
+        vm.expectRevert();
+        vee.transferWithIntent(darknetclient, 6e18, keccak256(bytes("too-much")));
+    }
+
+    /// The id is opaque to the contract: a zero id is a caller error, not a
+    /// contract concern, and refusing it here would add a rule chain-svc would
+    /// then have to mirror.
+    function testFuzz_AnyIntentIdIsCarriedThrough(bytes32 intent) public {
+        _fund(shadowbroker, 10e18);
+        vm.expectEmit(true, true, true, true);
+        emit IntentTransfer(intent, shadowbroker, darknetclient, 1e18);
+        vm.prank(shadowbroker);
+        vee.transferWithIntent(darknetclient, 1e18, intent);
+    }
 }

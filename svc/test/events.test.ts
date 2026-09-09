@@ -209,3 +209,107 @@ describe('a hung sink cannot exhaust the service', () => {
     store.close();
   }, 20_000);
 });
+// >=2 IntentTransfer events for one intent id is an INVARIANT VIOLATION, not a
+// race. chain-svc broadcasts at most once per reservation - one reservation,
+// one signature, one nonce - and re-broadcasting that same signed transaction
+// can be included only once. A second event means the reservation was bypassed.
+describe('the intent anomaly', () => {
+  const TOPIC = `0x${'ab'.repeat(32)}`;
+
+  function chainWith(
+    intentLogs: Array<{ args: { intentId: string; from: string }; transactionHash: string }>,
+  ): Chain {
+    return {
+      deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+      publicClient: {
+        getBlockNumber: async () => 1n,
+        getContractEvents: async ({ eventName }: { eventName: string }) =>
+          eventName === 'IntentTransfer' ? intentLogs : [],
+      },
+    } as unknown as Chain;
+  }
+
+  it('raises chain.anomaly when one intent id has two transfers', async () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-anom', topic: TOPIC, agentId: 'orch:mark',
+      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+    });
+    const tail = new EventTail({ token: 'tok' } as Config, chainWith([
+      { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
+      { args: { intentId: TOPIC, from: '0xBBB2' }, transactionHash: '0xbbb' },
+    ]), store);
+
+    await tail.pollOnce();
+
+    const events = store.dueEvents(20).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+    const anomaly = events.find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly).toBeDefined();
+    // Names the wallet THIS store knows reserved it, and carries every transfer
+    // WITH ITS SENDER. transferWithIntent is permissionless, so the sender is
+    // what separates a second chain-svc from an id collision from a spammer -
+    // and the detail string tells the operator to inspect exactly that.
+    expect(anomaly!.agentId).toBe('orch:mark');
+    expect(anomaly!.transfers).toEqual([
+      { txHash: '0xaaa', from: '0xAAA1' },
+      { txHash: '0xbbb', from: '0xBBB2' },
+    ]);
+    expect(anomaly!.detail).toContain('0xAAA1');
+    expect(anomaly!.detail).toContain('0xBBB2');
+    store.close();
+  });
+
+  // A malformed emission must still COUNT. The count is the anomaly signal, so
+  // dropping a log because one field is missing could hide the second transfer
+  // that makes it an anomaly - failing open on exactly the case this exists for.
+  it('counts an emission with no sender, recording the sender as null', async () => {
+    const store = new Store(':memory:');
+    const tail = new EventTail({ token: 'tok' } as Config, chainWith([
+      { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
+      { args: { intentId: TOPIC }, transactionHash: '0xbbb' } as never,
+    ]), store);
+
+    await tail.pollOnce();
+
+    const anomaly = store.dueEvents(20)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly).toBeDefined(); // still raised - the count is 2
+    expect(anomaly!.transfers).toEqual([
+      { txHash: '0xaaa', from: '0xAAA1' },
+      { txHash: '0xbbb', from: null },
+    ]);
+    store.close();
+  });
+
+  it('raises nothing for the normal case of one transfer per intent', async () => {
+    const store = new Store(':memory:');
+    const tail = new EventTail({ token: 'tok' } as Config, chainWith([
+      { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
+    ]), store);
+
+    await tail.pollOnce();
+
+    const kinds = store.dueEvents(20).map((e) => e.kind);
+    expect(kinds).not.toContain('chain.anomaly');
+    store.close();
+  });
+
+  // The transfer came from a store that has never seen this intent - which is
+  // the split-brain case, and the null is the signal rather than a gap.
+  it('reports a null agent when no local reservation matches the topic', async () => {
+    const store = new Store(':memory:');
+    const tail = new EventTail({ token: 'tok' } as Config, chainWith([
+      { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
+      { args: { intentId: TOPIC, from: '0xBBB2' }, transactionHash: '0xbbb' },
+    ]), store);
+
+    await tail.pollOnce();
+
+    const anomaly = store.dueEvents(20)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'chain.anomaly');
+    expect(anomaly!.agentId).toBeNull();
+    store.close();
+  });
+});

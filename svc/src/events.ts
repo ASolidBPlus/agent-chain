@@ -56,7 +56,7 @@ export class EventTail {
     const from = (this.store.getCursor(CURSOR) ?? -1n) + 1n;
     if (from > latest) return 0;
 
-    const [transfers, registrations] = await Promise.all([
+    const [transfers, registrations, intents] = await Promise.all([
       this.chain.publicClient.getContractEvents({
         address: this.chain.deployment.VEEBux,
         abi: VEEBuxAbi,
@@ -68,6 +68,13 @@ export class EventTail {
         address: this.chain.deployment.NameRegistry,
         abi: NameRegistryAbi,
         eventName: 'Registered',
+        fromBlock: from,
+        toBlock: latest,
+      }),
+      this.chain.publicClient.getContractEvents({
+        address: this.chain.deployment.VEEBux,
+        abi: VEEBuxAbi,
+        eventName: 'IntentTransfer',
         fromBlock: from,
         toBlock: latest,
       }),
@@ -86,6 +93,58 @@ export class EventTail {
       });
       enqueued++;
     }
+    // TWO OR MORE IntentTransfers for ONE intent id is an INVARIANT VIOLATION,
+    // not a race to be retried. chain-svc broadcasts at most once per
+    // reservation - one reservation, one signature, one nonce - and a
+    // re-broadcast of that same signed transaction can be included only once.
+    // So a second event means something bypassed the reservation: in practice a
+    // second chain-svc with its own store writing to this chain, since
+    // reservation uniqueness is scoped to one database and not to the chain, or
+    // an out-of-band transfer reusing an id.
+    //
+    // Never reconciled silently (ruled 03:12): the intent is marked CONFIRMED
+    // because the money did move, the hold is KEPT, and a facilitator is told.
+    // Grouped WITH THE SENDER, not just the hash. `IntentTransfer` indexes
+    // `from` and it is in hand here; dropping it left the payload unable to
+    // answer the question its own detail string tells the operator to ask.
+    //
+    // It matters more than a missing field: `transferWithIntent` is
+    // PERMISSIONLESS, so anyone with chain access can emit an IntentTransfer
+    // under any id - and a party like that existing is the PREMISE of this
+    // alert. The sender is what separates "a second chain-svc with its own
+    // store" from "an id collision" from "somebody spamming the event". Without
+    // it the alert names a wallet to freeze and cannot say who moved against it.
+    const byIntent = new Map<string, Array<{ txHash: string; from: string | null }>>();
+    for (const log of intents) {
+      const args = log.args as { intentId?: string; from?: string };
+      // A missing `from` does NOT drop the log: the COUNT is the anomaly
+      // signal, so discarding a malformed emission could hide the second
+      // transfer that makes this an anomaly at all - failing open on exactly
+      // the case the alert exists for. It is recorded with a null sender
+      // instead, which is honest about what is known and still counts.
+      if (!args.intentId || !log.transactionHash) continue;
+      byIntent.set(args.intentId, [
+        ...(byIntent.get(args.intentId) ?? []),
+        { txHash: log.transactionHash, from: args.from ?? null },
+      ]);
+    }
+    for (const [intentTopic, emissions] of byIntent) {
+      if (emissions.length < 2) continue;
+      this.enqueue('chain.anomaly', {
+        kind: 'chain.anomaly',
+        intentId: intentTopic,
+        agentId: this.store.agentForIntentTopic(intentTopic),
+        transfers: emissions,
+        detail:
+          `${emissions.length} IntentTransfer events for one intent id. chain-svc broadcasts at ` +
+          `most once per reservation, so this means the reservation was bypassed - most likely a ` +
+          `second chain-svc with a separate store writing to this chain, or an out-of-band ` +
+          `transfer reusing the id. The money moved; freeze the named wallet and inspect the ` +
+          `other sender. Senders: ${emissions.map((e) => e.from ?? 'unknown').join(', ')}.`,
+      });
+      enqueued++;
+    }
+
     for (const log of registrations) {
       const args = log.args as { name?: string; owner?: string; target?: string };
       if (!args.name) continue;
