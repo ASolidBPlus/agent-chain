@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export class SchemaError extends Error {
   constructor(
@@ -87,10 +87,35 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; dd
   // at zero rather than null - a null counter would have to be treated as
   // "unknown", and the detector's whole job is to be readable at a glance.
   { table: 'spawns', column: 'bare_id_count', ddl: 'INTEGER NOT NULL DEFAULT 0' },
+
+];
+
+/// Columns that arrived with a TABLE created after the first schema.
+///
+/// A third bucket rather than a stretch of either existing one, because both
+/// would have been a lie. ORIGINAL_COLUMNS is frozen and claims the column was
+/// there from the start; ADDITIVE_COLUMNS carries the DDL to ALTER a column IN,
+/// and `deployment.id` is a PRIMARY KEY, which ALTER TABLE cannot add at all -
+/// so its entry there would be a statement that is false and, if the
+/// reconciliation ever reached it, would fail.
+///
+/// It never does reach these: the reconciliation only visits tables that
+/// already exist, and `createTables` makes a new table complete. So these need
+/// no DDL - they need only to be CLASSIFIED, so the exhaustiveness test stays
+/// exhaustive without anyone having to lie to it.
+const NEW_TABLE_COLUMNS: ReadonlyArray<[string, string]> = [
+  // v3, §4: which chain this store belongs to.
+  ['deployment', 'id'],
+  ['deployment', 'chain_id'],
+  ['deployment', 'veebux'],
+  ['deployment', 'name_registry'],
+  ['deployment', 'recorded_at'],
 ];
 
 export function classifiedColumns(): Set<string> {
-  const all = new Set(ORIGINAL_COLUMNS.map(([t, c]) => `${t}.${c}`));
+  const all = new Set(
+    [...ORIGINAL_COLUMNS, ...NEW_TABLE_COLUMNS].map(([t, c]) => `${t}.${c}`),
+  );
   for (const a of ADDITIVE_COLUMNS) all.add(`${a.table}.${a.column}`);
   return all;
 }

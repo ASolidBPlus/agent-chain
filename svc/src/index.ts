@@ -10,6 +10,7 @@ import { loadPolicyDefaults } from './policy.ts';
 import { Spawner } from './spawn.ts';
 import { Store } from './store.ts';
 import { assertLedgerLifetimeIntact, gatherLifetimeFacts } from './migrate.ts';
+import { assertDeploymentUnchanged } from './deployment.ts';
 import { Treasury } from './treasury.ts';
 import { EventTail } from './events.ts';
 import { createChainSvcServer } from './server.ts';
@@ -36,6 +37,22 @@ async function main(): Promise<void> {
   // once, and the question here is what is on the chain NOW. A file describing
   // a chain that has been reset is exactly the stale artefact this control must
   // not be fooled by.
+  // BEFORE the ledger check and before anything serves: a store pointed at a
+  // chain it was not written against cannot resolve any name it recorded, so
+  // every later check would be reasoning about a pairing that is already wrong.
+  //
+  // Recorded on a store that has never seen a deployment; compared on every
+  // boot after. An acknowledgement permits the boot and does NOT update the
+  // record - see deployment.ts.
+  const liveDeployment = {
+    chainId: String(deployment.chainId),
+    veeBux: deployment.VEEBux,
+    nameRegistry: deployment.NameRegistry,
+  };
+  const recordedDeployment = store.recordedDeployment();
+  assertDeploymentUnchanged(recordedDeployment, liveDeployment, config.acknowledgeChainReset);
+  if (recordedDeployment === null) store.recordDeployment(liveDeployment);
+
   assertLedgerLifetimeIntact(
     await gatherLifetimeFacts({
       store,
