@@ -10,8 +10,16 @@ export type ErrorCode =
   | 'invalid_amount'
   | 'invalid_request'
   | 'unauthorized'
+  | 'principal_mismatch'
+  | 'not_your_wallet'
+  | 'wrong_scope'
   | 'unknown_name'
+  | 'unknown_intent'
   | 'wallet_frozen'
+  | 'over_max_per_tx'
+  | 'over_stage_cap'
+  | 'intent_unresolved'
+  | 'counterparty_denied'
   | 'wallet_not_found'
   | 'chain_error'
   | 'chain_unreachable'
@@ -23,9 +31,27 @@ const STATUS: Record<ErrorCode, number> = {
   invalid_amount: 400,
   invalid_request: 400,
   unauthorized: 401,
+  // 403, not 401: the caller IS authenticated, it just is not this wallet.
+  // Collapsing the two would tell a prober that a token is invalid when the
+  // truth is that it belongs to somebody else.
+  principal_mismatch: 403,
+  not_your_wallet: 403,
+  wrong_scope: 403,
   unknown_name: 404,
+  // Deliberately indistinguishable from an intent that belongs to another
+  // wallet: see getIntent. A 403 there would confirm the id exists.
+  unknown_intent: 404,
   wallet_not_found: 404,
   wallet_frozen: 409,
+  // Policy refusals share 409 with `frozen`: the request was well formed and
+  // authorised, and the wallet's own policy is what stopped it (spec S5).
+  over_max_per_tx: 409,
+  over_stage_cap: 409,
+  // The intent was reserved and never completed: the first attempt reached the
+  // broadcast with an unknown outcome. 409 because retrying UNCHANGED cannot
+  // help - it needs reconciliation, not a backoff, so it must not read as 5xx.
+  intent_unresolved: 409,
+  counterparty_denied: 409,
   chain_error: 502,
   chain_unreachable: 503,
   internal_error: 500,

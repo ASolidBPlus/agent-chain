@@ -1,0 +1,371 @@
+// Money movement: treasury top-ups, agent-signed transfers, and history.
+//
+// Every destination is a NAME resolved through the registry - never an address
+// a caller handed in, and never an id scraped off a mesh message. That is the
+// whole of the addressing rule (spec S0/S5) and it lives here because this is
+// the file that can move funds.
+
+import { createWalletClient, encodeFunctionData, http, type Address } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { randomUUID } from 'node:crypto';
+import { VEEBuxAbi } from './abi.ts';
+import type { Chain } from './chain.ts';
+import { asChainError } from './chain.ts';
+import type { Config } from './config.ts';
+import { HttpError } from './errors.ts';
+import type { Keystore } from './keystore.ts';
+import type { Resolver } from './resolver.ts';
+import type { Store } from './store.ts';
+import { walletPrincipal, type Principal } from './auth.ts';
+import {
+  enforcePolicy,
+  readPolicyFile,
+  stageCapWei,
+  type AgentPolicy,
+  type PolicyDefaults,
+} from './policy.ts';
+import { assertLookupName, formatVee, parseVee } from './validate.ts';
+
+
+/// The three operations signTransfer needs from a wallet client, named so the
+/// prepare/sign/send split - which is where "provably before the broadcast"
+/// stops being a phrase and becomes a boundary - is visible in the type.
+export interface Signer {
+  prepareTransactionRequest: (a: Record<string, unknown>) => Promise<unknown>;
+  signTransaction: (r: never) => Promise<`0x${string}`>;
+  sendRawTransaction: (a: { serializedTransaction: `0x${string}` }) => Promise<`0x${string}`>;
+}
+
+export interface HistoryEntry {
+  txHash: string;
+  from: string;
+  to: string;
+  vee: string;
+  blockNumber: string;
+  memo?: string;
+}
+
+export class Treasury {
+  /// hub-core's stage, cached briefly (spec S5). Only consulted when
+  /// HUB_CORE_URL is configured; in the testbed the stage is chain-svc's own,
+  /// set by platform-scope POST /stage, so the cap is testable before C5.
+  private stageCache: { value: string; at: number } | null = null;
+
+  constructor(
+    private readonly config: Config,
+    private readonly chain: Chain,
+    private readonly keystore: Keystore,
+    private readonly store: Store,
+    private readonly resolver: Resolver,
+    private readonly policyDefaults: PolicyDefaults,
+  ) {}
+
+  async currentStage(): Promise<string> {
+    if (!this.config.hubCoreUrl) return this.store.currentStage();
+
+    const fresh = this.stageCache && Date.now() - this.stageCache.at < 5_000;
+    if (fresh) return this.stageCache!.value;
+
+    try {
+      const res = await fetch(new URL('/session', this.config.hubCoreUrl), {
+        headers: { authorization: `Bearer ${this.config.token}` },
+      });
+      const body = (await res.json()) as { stage?: unknown };
+      if (typeof body.stage === 'string' && body.stage !== '') {
+        this.stageCache = { value: body.stage, at: Date.now() };
+        return body.stage;
+      }
+    } catch {
+      // hub-core being unreachable must not stop the game's money moving; the
+      // locally-held stage is the fallback, and the cap still applies.
+    }
+    return this.store.currentStage();
+  }
+
+  /// The policy chain-svc ENFORCES is the same file it wrote for wallet-mcp to
+  /// read, so the boundary and the model-facing fast path cannot drift apart.
+  private async policyFor(agentId: string): Promise<AgentPolicy> {
+    return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
+  }
+
+  /// Treasury -> wallet. Facilitator top-ups and bounty payouts (spec S4).
+  async fund(body: { to?: unknown; vee?: unknown; reason?: unknown }): Promise<{ txHash: string }> {
+    const name = assertLookupName(body.to);
+    const amount = parseVee(body.vee, 'vee');
+    const target = await this.resolver.require(name);
+
+    try {
+      const hash = await this.chain.walletClient.writeContract({
+        account: this.chain.walletClient.account!,
+        chain: this.chain.viemChain,
+        address: this.chain.deployment.VEEBux,
+        abi: VEEBuxAbi,
+        functionName: 'transfer',
+        args: [target.address, amount],
+      });
+      await this.chain.publicClient.waitForTransactionReceipt({ hash });
+      this.store.recordMemo({
+        txHash: hash,
+        memo: typeof body.reason === 'string' ? body.reason : null,
+        intentId: null,
+        fromAgentId: 'treasury',
+      });
+      return { txHash: hash };
+    } catch (err) {
+      throw asChainError(err);
+    }
+  }
+
+  /// Used only by wallet-mcp and org-core (spec S4). chain-svc holds the key;
+  /// the caller never sees it.
+  async signTransfer(
+    principal: Principal,
+    body: {
+      fromAgentId?: unknown;
+      to?: unknown;
+      vee?: unknown;
+      memo?: unknown;
+      intentId?: unknown;
+    },
+    /// The X-Wallet-Client header, when the caller sent one.
+  ): Promise<{ txHash: string; intentId: string; intentIdSource: 'caller' | 'server' }> {
+    // The source is DERIVED from the credential, never read from the body. A
+    // body fromAgentId is tolerated only when it agrees; disagreeing is a 403
+    // rather than a silent override, so a caller that lies is told so.
+    const fromAgentId = walletPrincipal(principal, body.fromAgentId);
+    const name = assertLookupName(body.to);
+    const amount = parseVee(body.vee, 'vee');
+
+    // The store is the single truth for frozen (spec S4); the per-agent policy
+    // file is only wallet-mcp's local fast-path copy, and loses any disagreement.
+    if (this.store.isFrozen(fromAgentId)) {
+      throw new HttpError('wallet_frozen', `${fromAgentId} is frozen`);
+    }
+
+    // Caps are a BOUNDARY here, not just game balance (ruled 20:57). The same
+    // checks exist in wallet-mcp for the model-facing message, but wallet-mcp
+    // runs inside a persona designed to be socially engineered, so a check that
+    // lives only there is bypassed by calling this endpoint directly.
+    const stage = await this.currentStage();
+    const policy = await this.policyFor(fromAgentId);
+    enforcePolicy({ policy, to: name, amount });
+
+    const target = await this.resolver.require(name);
+    const { privateKey } = await this.keystore.load(fromAgentId);
+
+    // A caller that supplies no intent id gets a fresh one rather than a
+    // different code path: every send is reserved the same way, and a caller
+    // that wants its retry deduped is the one that has to name it.
+    //
+    // But a caller that simply FORGOT the field would otherwise lose
+    // idempotency silently, so the generated id is returned to it and logged.
+    // A degradation nobody can see is one nobody fixes.
+    const supplied = typeof body.intentId === 'string' && body.intentId !== '';
+    const source = supplied ? ('caller' as const) : ('server' as const);
+    const intentId = supplied ? (body.intentId as string) : `chain-svc:${randomUUID()}`;
+    if (!supplied) {
+      console.warn(
+        `[chain-svc] sign-transfer for ${fromAgentId} carried no intentId; generated ${intentId}. ` +
+          `This send is NOT deduplicated against a retry - supply intentId to make it so.`,
+      );
+    }
+
+    // ONE reservation covering BOTH the stage cap and the intent, taken BEFORE
+    // the money moves. These used to be separate and both wrong in the same
+    // way - a decision and its durable record were not one operation - so the
+    // cap was check-then-act (concurrent sends all read the same pre-spend
+    // total) and the intent was act-then-record (a dropped response made the
+    // correct retry a second real transfer, because VEEBux is a plain ERC-20
+    // and a second identical transfer is a valid second transfer).
+    const reservation = this.store.reserve({
+      intentId,
+      agentId: fromAgentId,
+      stage,
+      amount,
+      capWei: stageCapWei(policy),
+    });
+
+    if (reservation.outcome === 'over_stage_cap') {
+      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} VEE for this stage`);
+    }
+    if (reservation.outcome === 'duplicate') {
+      // The promise wallet-mcp makes to the model: a replay of the same send
+      // returns the ORIGINAL result. Answering with the recorded hash is what
+      // makes a retry safe.
+      if (reservation.txHash) return { txHash: reservation.txHash, intentId, intentIdSource: source };
+      // Reserved but never completed: the first attempt reached the broadcast
+      // and we do not know its outcome. Re-sending here is precisely the
+      // double-charge, so this refuses and says why. It is an operator's job
+      // to reconcile against the chain, not this handler's to guess.
+      throw new HttpError(
+        'intent_unresolved',
+        `intent ${intentId} is reserved with no recorded transaction: an earlier attempt reached ` +
+          `the broadcast and its outcome is unknown. Reconcile against the chain using THIS intent ` +
+          `id - never retry with a fresh one, which would send a second time.`,
+      );
+    }
+
+    // --- PROVABLY BEFORE THE BROADCAST ------------------------------------
+    // Building the client is local, and prepare (nonce, fees) reads while sign
+    // is local; none of them can put a transaction on the wire. A failure here
+    // therefore provably precedes the broadcast, and this is the ONLY thing in
+    // this method that may release. It sits AFTER the reservation so that a
+    // replay is answered without loading a key or opening a connection.
+    let serializedTransaction: `0x${string}`;
+    let wallet: Signer;
+    try {
+      const account = privateKeyToAccount(privateKey);
+      wallet = this.signerFor(account);
+      const data = encodeFunctionData({
+        abi: VEEBuxAbi,
+        functionName: 'transfer',
+        args: [target.address, amount],
+      });
+      const request = await wallet.prepareTransactionRequest({
+        account,
+        chain: this.chain.viemChain,
+        to: this.chain.deployment.VEEBux,
+        data,
+      });
+      serializedTransaction = await wallet.signTransaction(request as never);
+    } catch (err) {
+      this.store.release(intentId, fromAgentId, stage, amount);
+      throw asChainError(err);
+    }
+
+    // --- AT OR AFTER THE BROADCAST ----------------------------------------
+    // From here the reservation STANDS whatever happens, including a timeout,
+    // a dropped response, or this process dying: none of those distinguish
+    // "it never landed" from "it landed and we did not hear". Keeping the
+    // reservation makes the retry idempotent and leaves an operator a row to
+    // reconcile; releasing it would hand back a budget that may already be
+    // spent and re-authorise a transfer that already happened.
+    const sent = await this.broadcast({
+      wallet,
+      serializedTransaction,
+      intentId,
+      fromAgentId,
+      to: name,
+      amount,
+      memo: body.memo,
+    });
+    return { ...sent, intentId, intentIdSource: source };
+  }
+
+  /// The wallet client, as a seam. Overridable ONLY so a test can drive the
+  /// whole of signTransfer without a chain - which matters because the defect
+  /// this method's ordering exists to prevent was never in the reservation
+  /// primitive, it was in the ORDER here, and a test that drives the primitive
+  /// directly stays green when the order changes.
+  protected signerFor(account: ReturnType<typeof privateKeyToAccount>): Signer {
+    // Same 50ms polling as the shared clients: viem's 4s default turns an
+    // instant-mined transfer into a four-second request. See chain.ts.
+    return createWalletClient({
+      account,
+      chain: this.chain.viemChain,
+      transport: http(this.config.rpcUrl),
+      pollingInterval: 50,
+    }) as unknown as Signer;
+  }
+
+  /// The post-broadcast tail, extracted so that the release rule above has
+  /// exactly one catch to live in and this one cannot quietly grow a second.
+  private async broadcast(args: {
+    wallet: Pick<Signer, 'sendRawTransaction'>;
+    serializedTransaction: `0x${string}`;
+    intentId: string;
+    fromAgentId: string;
+    to: string;
+    amount: bigint;
+    memo: unknown;
+  }): Promise<{ txHash: string }> {
+    try {
+      const hash = await args.wallet.sendRawTransaction({
+        serializedTransaction: args.serializedTransaction,
+      });
+      // Recorded as soon as there IS a hash, before the receipt: a crash while
+      // waiting must still leave the retry able to find the original send.
+      this.store.completeIntent(args.intentId, hash);
+      await this.chain.publicClient.waitForTransactionReceipt({ hash });
+
+      // The memo has no on-chain home - ERC-20 transfer carries none - so it is
+      // joined back on by txHash in /history (spec S4).
+      this.store.recordMemo({
+        txHash: hash,
+        memo: typeof args.memo === 'string' ? args.memo : null,
+        intentId: args.intentId,
+        fromAgentId: args.fromAgentId,
+      });
+      // The stage budget was consumed by the RESERVATION, before the send --
+      // it is not added here. It used to be, and that was the defect: a
+      // decision recorded after the act it authorised.
+
+      return { txHash: hash };
+    } catch (err) {
+      // Deliberately NOT a release. See the rule above.
+      throw asChainError(err);
+    }
+  }
+
+  /// Transfer logs touching this wallet, newest first, names resolved where
+  /// known (spec S4).
+  async history(name: string, limit: number): Promise<HistoryEntry[]> {
+    const who = await this.resolver.require(assertLookupName(name));
+
+    let logs;
+    try {
+      const [sent, received] = await Promise.all([
+        this.chain.publicClient.getContractEvents({
+          address: this.chain.deployment.VEEBux,
+          abi: VEEBuxAbi,
+          eventName: 'Transfer',
+          args: { from: who.address },
+          fromBlock: 0n,
+          toBlock: 'latest',
+        }),
+        this.chain.publicClient.getContractEvents({
+          address: this.chain.deployment.VEEBux,
+          abi: VEEBuxAbi,
+          eventName: 'Transfer',
+          args: { to: who.address },
+          fromBlock: 0n,
+          toBlock: 'latest',
+        }),
+      ]);
+      logs = [...sent, ...received];
+    } catch (err) {
+      throw asChainError(err);
+    }
+
+    logs.sort((a, b) => Number((b.blockNumber ?? 0n) - (a.blockNumber ?? 0n)));
+    const window = logs.slice(0, limit);
+
+    const memos = this.store.memosFor(window.map((l) => l.transactionHash ?? ''));
+    const nameCache = new Map<string, string>();
+    const nameFor = async (address: Address): Promise<string> => {
+      const key = address.toLowerCase();
+      const cached = nameCache.get(key);
+      if (cached !== undefined) return cached;
+      const canonical = (await this.resolver.reverseOf(address)) ?? address;
+      nameCache.set(key, canonical);
+      return canonical;
+    };
+
+    const out: HistoryEntry[] = [];
+    for (const log of window) {
+      const args = log.args as { from?: Address; to?: Address; value?: bigint };
+      if (!args.from || !args.to || args.value === undefined) continue;
+      const txHash = log.transactionHash ?? '';
+      const memo = memos.get(txHash.toLowerCase())?.memo ?? undefined;
+      out.push({
+        txHash,
+        from: await nameFor(args.from),
+        to: await nameFor(args.to),
+        vee: formatVee(args.value),
+        blockNumber: String(log.blockNumber ?? 0n),
+        ...(memo ? { memo } : {}),
+      });
+    }
+    return out;
+  }
+}

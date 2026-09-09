@@ -4,8 +4,12 @@
 
 import { loadConfig } from './config.ts';
 import { Chain, assertPrivateChain, assertPrivateRpcUrl, loadDeployment } from './chain.ts';
+import { Keystore } from './keystore.ts';
 import { Resolver } from './resolver.ts';
+import { loadPolicyDefaults } from './policy.ts';
+import { Spawner } from './spawn.ts';
 import { Store } from './store.ts';
+import { Treasury } from './treasury.ts';
 import { createChainSvcServer } from './server.ts';
 
 async function main(): Promise<void> {
@@ -19,7 +23,17 @@ async function main(): Promise<void> {
   await assertPrivateChain(chain);
 
   const store = new Store(config.storePath);
-  const services = { config, chain, resolver: new Resolver(chain), store };
+  const keystore = new Keystore(config.keystoreDir, config.keystoreSecret);
+  const resolver = new Resolver(chain);
+  const services = {
+    config,
+    chain,
+    resolver,
+    store,
+    keystore,
+    spawner: new Spawner(config, chain, keystore, store, resolver),
+    treasury: new Treasury(config, chain, keystore, store, resolver, loadPolicyDefaults(config.policyDefaultsPath)),
+  };
 
   const server = createChainSvcServer(services);
   server.listen(config.port, '0.0.0.0', () => {

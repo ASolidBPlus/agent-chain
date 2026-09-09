@@ -33,6 +33,11 @@ export interface MemoRecord {
   fromAgentId: string | null;
 }
 
+export type Reservation =
+  | { outcome: 'reserved'; txHash: null }
+  | { outcome: 'over_stage_cap'; txHash: null }
+  | { outcome: 'duplicate'; txHash: string | null };
+
 export interface OutboundEvent {
   id: number;
   kind: string;
@@ -52,13 +57,64 @@ export class Store {
       CREATE TABLE IF NOT EXISTS memos (
         tx_hash       TEXT PRIMARY KEY,
         memo          TEXT,
+        -- Denormalised for /history only. This column is NOT the dedupe key and
+        -- never was: it is written AFTER the transfer, so a crash between the
+        -- two loses it, and it is the 'intents' table below - written BEFORE -
+        -- that decides whether a send may happen at all.
         intent_id     TEXT,
         from_agent_id TEXT,
         created_at    INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS spawns (
+        agent_id   TEXT PRIMARY KEY,
+        address    TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS frozen (
         agent_id  TEXT PRIMARY KEY,
         frozen_at INTEGER NOT NULL
+      );
+      -- One live credential per wallet. Rotation REPLACES the row, which is
+      -- what revokes the old token: there is no list of valid-but-superseded
+      -- tokens to forget to clean up.
+      CREATE TABLE IF NOT EXISTS wallet_tokens (
+        agent_id   TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL,
+        issued_at  INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS wallet_tokens_hash ON wallet_tokens (token_hash);
+      -- The stage cap resets when the stage changes, so spend is tracked PER
+      -- stage rather than being zeroed on transition: a late-arriving transfer
+      -- from the previous stage cannot then overdraw the new one.
+      -- An intent is RESERVED before the money moves and is never deleted.
+      -- intent_id is the PRIMARY KEY, so a second attempt under the same id
+      -- cannot insert: that is the idempotency guarantee, and it lives on the
+      -- side that cannot forget rather than in the persona's JSON ledger, which
+      -- is only written after a successful response and so is empty in exactly
+      -- the case it exists for.
+      CREATE TABLE IF NOT EXISTS intents (
+        intent_id  TEXT PRIMARY KEY,
+        agent_id   TEXT NOT NULL,
+        stage      TEXT NOT NULL,
+        amount     TEXT NOT NULL,
+        tx_hash    TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS stage_spend (
+        agent_id TEXT NOT NULL,
+        stage    TEXT NOT NULL,
+        spent    TEXT NOT NULL,
+        PRIMARY KEY (agent_id, stage)
+      );
+      CREATE TABLE IF NOT EXISTS stage_state (
+        id    INTEGER PRIMARY KEY CHECK (id = 1),
+        stage TEXT NOT NULL
+      );
+      -- How far the log tail has read. Persisted so a restart resumes rather
+      -- than replaying every Transfer since genesis into the outbox.
+      CREATE TABLE IF NOT EXISTS cursors (
+        name  TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS outbox (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +167,25 @@ export class Store {
     return out;
   }
 
+  // --- spawns ------------------------------------------------------------
+  // Written only once every step of a spawn has succeeded. A key file alone is
+  // NOT proof of a finished spawn: if the process dies between writing the key
+  // and funding the wallet, a retry that trusted the key file would return a
+  // wallet with no money and no name, reporting success.
+
+  markSpawned(agentId: string, address: string): void {
+    this.db
+      .query(`INSERT INTO spawns (agent_id, address, created_at) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO NOTHING`)
+      .run(agentId, address, Date.now());
+  }
+
+  spawnedAddress(agentId: string): string | null {
+    const row = this.db.query(`SELECT address FROM spawns WHERE agent_id = ?`).get(agentId) as
+      | { address: string }
+      | null;
+    return row?.address ?? null;
+  }
+
   // --- frozen ------------------------------------------------------------
 
   freeze(agentId: string): void {
@@ -121,6 +196,235 @@ export class Store {
 
   isFrozen(agentId: string): boolean {
     return this.db.query(`SELECT 1 AS present FROM frozen WHERE agent_id = ?`).get(agentId) != null;
+  }
+
+  // --- wallet credentials -------------------------------------------------
+
+  setWalletTokenHash(agentId: string, tokenHash: string): void {
+    this.db
+      .query(
+        `INSERT INTO wallet_tokens (agent_id, token_hash, issued_at) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, issued_at = excluded.issued_at`,
+      )
+      .run(agentId, tokenHash, Date.now());
+  }
+
+  hasWalletToken(agentId: string): boolean {
+    return this.db.query(`SELECT 1 FROM wallet_tokens WHERE agent_id = ?`).get(agentId) != null;
+  }
+
+  /// The principal a wallet token identifies, or null if it is not a live one.
+  agentForTokenHash(tokenHash: string): string | null {
+    const row = this.db.query(`SELECT agent_id FROM wallet_tokens WHERE token_hash = ?`).get(tokenHash) as
+      | { agent_id: string }
+      | null;
+    return row?.agent_id ?? null;
+  }
+
+  // --- stage and per-stage spend ------------------------------------------
+
+  currentStage(): string {
+    const row = this.db.query(`SELECT stage FROM stage_state WHERE id = 1`).get() as { stage: string } | null;
+    return row?.stage ?? 'default';
+  }
+
+  setStage(stage: string): void {
+    this.db
+      .query(`INSERT INTO stage_state (id, stage) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET stage = excluded.stage`)
+      .run(stage);
+  }
+
+  spentThisStage(agentId: string, stage: string): bigint {
+    const row = this.db.query(`SELECT spent FROM stage_spend WHERE agent_id = ? AND stage = ?`).get(agentId, stage) as
+      | { spent: string }
+      | null;
+    return row ? BigInt(row.spent) : 0n;
+  }
+
+  /// What a reservation attempt did.
+  ///
+  ///   reserved       - the caller owns this intent and may broadcast.
+  ///   over_stage_cap - the cap would be exceeded; NOTHING was written.
+  ///   duplicate      - this intent id was already reserved. `txHash` is the
+  ///                    result of the original send if it completed, and null
+  ///                    if it did not - which is not a failure to retry but a
+  ///                    reconciliation: the first attempt may have broadcast.
+  ///
+  /// Atomically RESERVE `amount` against the stage cap.
+  ///
+  /// The check and the record are one step on purpose. They used to be two: the
+  /// caller read the running total, did four awaits (name resolution, a scrypt
+  /// keystore load, the chain write, the receipt wait) and then wrote the new
+  /// total. Every concurrent send therefore read the same pre-spend figure and
+  /// every one passed the cap - measured by sec-reviewer-2 at three concurrent
+  /// 100-VEE sends against a 100/stage cap: three accepted, 300 recorded, three
+  /// on chain, while the sequential fourth correctly refused. A cap enforced by
+  /// a check-then-act is not a cap, it is a race the honest caller loses.
+  ///
+  /// @returns false if the reservation would exceed the cap, in which case
+  /// nothing was written.
+  reserve(args: {
+    intentId: string;
+    agentId: string;
+    stage: string;
+    amount: bigint;
+    capWei: bigint;
+  }): Reservation {
+    const { intentId, agentId, stage, amount, capWei } = args;
+
+    // ONE transaction covering BOTH the intent and the cap, because they are
+    // one decision: "may this send happen". Two transactions would admit a
+    // window where the intent is taken and the budget is not, or the reverse.
+    const attempt = this.db.transaction((): Reservation => {
+      const existing = this.db
+        .query(`SELECT tx_hash FROM intents WHERE intent_id = ?`)
+        .get(intentId) as { tx_hash: string | null } | null;
+      if (existing) return { outcome: 'duplicate', txHash: existing.tx_hash };
+
+      // Re-read INSIDE the transaction: a value read before it began is the
+      // same stale figure the check-then-act acted on.
+      const current = this.spentThisStage(agentId, stage);
+      if (current + amount > capWei) return { outcome: 'over_stage_cap', txHash: null };
+
+      this.db
+        .query(
+          `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?)`,
+        )
+        .run(intentId, agentId, stage, amount.toString(), Date.now());
+      this.db
+        .query(
+          `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
+           ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
+        )
+        .run(agentId, stage, (current + amount).toString());
+      return { outcome: 'reserved', txHash: null };
+    });
+    return attempt();
+  }
+
+  /// Records the result of a send against the intent that authorised it, so a
+  /// retry can be answered with the original transaction rather than a second
+  /// one.
+  completeIntent(intentId: string, txHash: string): void {
+    this.db.query(`UPDATE intents SET tx_hash = ? WHERE intent_id = ?`).run(txHash, intentId);
+  }
+
+  /// THERE IS DELIBERATELY NO TIMED SWEEP OF STALE HOLDS, and this is the
+  /// second time that idea has been proposed and withdrawn - so here is why, to
+  /// stop it being reinvented.
+  ///
+  /// A crash between the reservation and the recorded hash leaves an intent
+  /// `reserved` with its stage budget held, and releasing that hold after a
+  /// timeout looks like obvious hygiene. It is a CAP BYPASS. A `reserved`
+  /// intent may have LANDED with its hash lost; releasing its hold hands back
+  /// budget that was really spent, and lets the wallet spend it again. That is
+  /// the one direction a cap must never err in.
+  ///
+  /// It is also the exact rule this file already enforces one screen up:
+  /// release only on a failure that PROVABLY precedes the broadcast. A
+  /// `reserved` intent is by definition not that. A sweep would have been the
+  /// second release path the release rule exists to forbid, wearing a timer
+  /// instead of a catch.
+  ///
+  /// So the hold is KEPT until the stage rolls over, which frees it because
+  /// spend is keyed by (agent, stage). The wallet over-counts for a
+  /// maybe-landed transfer. That is the conservative direction and it is the
+  /// correct one.
+  ///
+  /// This becomes answerable, not merely conservative, once VEEBux emits
+  /// IntentTransfer: the sweep can then resolve each reserved intent by event
+  /// scan - landed means confirm and KEEP the hold, provably not landed means
+  /// fail and release - so hold release and intent resolution become one
+  /// decision, because "did the transfer land?" is one question. Ruled 02:44
+  /// UTC; the contract change rides the post-#14 PR.
+
+  /// The whole reservation row, for reconciliation (spec S4 "Intents").
+  intentRecord(intentId: string): { agentId: string; txHash: string | null } | null {
+    const row = this.db
+      .query(`SELECT agent_id, tx_hash FROM intents WHERE intent_id = ?`)
+      .get(intentId) as { agent_id: string; tx_hash: string | null } | null;
+    return row ? { agentId: row.agent_id, txHash: row.tx_hash } : null;
+  }
+
+  intentTxHash(intentId: string): string | null {
+    const row = this.db.query(`SELECT tx_hash FROM intents WHERE intent_id = ?`).get(intentId) as
+      | { tx_hash: string | null }
+      | null;
+    return row?.tx_hash ?? null;
+  }
+
+  /// Give a reservation back — BOTH halves — when the send it was taken for
+  /// PROVABLY did not happen.
+  ///
+  /// THE RELEASE RULE, and it is one rule for both halves on purpose: release
+  /// only on a failure that provably PRECEDES the broadcast. Anything at or
+  /// after it keeps the reservation and needs reconciliation against the chain.
+  ///
+  /// Reasoning about the two halves separately gives opposite answers, which is
+  /// how this goes wrong: for the stage cap "release on error" reads obviously
+  /// right, while for the intent releasing on error IS the double-spend —
+  /// because "error" includes "it landed and the response was lost", which is
+  /// the exact case an idempotency key exists for. The single rule is also the
+  /// conservative direction for the cap: on an ambiguous outcome, keeping risks
+  /// under-spending and releasing risks exceeding a boundary.
+  ///
+  /// If you find yourself writing a second release path that reasons about the
+  /// intent separately from the cap, stop — that is the tell.
+  release(intentId: string, agentId: string, stage: string, amount: bigint): void {
+    const undo = this.db.transaction((): void => {
+      // BOTH HALVES ARE GATED ON THE SAME FACT, and they were not: the DELETE
+      // was conditional on `tx_hash IS NULL` while the refund ran regardless,
+      // so releasing a COMPLETED intent left the intent correctly intact and
+      // handed its stage budget back anyway - measured, a second 100-VEE send
+      // was then admitted under a 100-VEE cap.
+      //
+      // Latent today, because release is only reached pre-broadcast. Not latent
+      // for the scan-gated sweep described above, which will call release on
+      // intents that turn out to HAVE LANDED: that is the withdrawn timer
+      // sweep's defect wearing a different hat, and this is where it would have
+      // arrived. The DELETE's own `changes` count is the authority - if it
+      // removed nothing, there was nothing to give back.
+      const removed = this.db
+        .query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`)
+        .run(intentId).changes;
+      if (removed === 1) this.releaseStageSpend(agentId, stage, amount);
+    });
+    undo();
+  }
+
+  /// PRIVATE, and that is load-bearing rather than tidiness. `release` is the
+  /// one door the release rule guards, and `treasury.ts` has a test asserting
+  /// exactly one `.release(` call outside the pre-broadcast branch. That guard
+  /// cannot see `.releaseStageSpend(` - `.release(` is not a substring of it -
+  /// so while this was public a second post-broadcast refund path could be
+  /// added and the structural test would stay green. One door, one guard.
+  private releaseStageSpend(agentId: string, stage: string, amount: bigint): void {
+    const release = this.db.transaction((): void => {
+      const current = this.spentThisStage(agentId, stage);
+      // Clamped at zero: a double release must not manufacture budget.
+      const next = current > amount ? current - amount : 0n;
+      this.db
+        .query(
+          `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
+           ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
+        )
+        .run(agentId, stage, next.toString());
+    });
+    release();
+  }
+
+  // --- cursors ------------------------------------------------------------
+
+  getCursor(name: string): bigint | null {
+    const row = this.db.query(`SELECT value FROM cursors WHERE name = ?`).get(name) as { value: string } | null;
+    return row ? BigInt(row.value) : null;
+  }
+
+  setCursor(name: string, value: bigint): void {
+    this.db
+      .query(`INSERT INTO cursors (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value`)
+      .run(name, value.toString());
   }
 
   // --- outbox ------------------------------------------------------------

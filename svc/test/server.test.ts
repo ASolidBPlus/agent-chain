@@ -5,11 +5,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import type { Server } from 'node:http';
 import { createChainSvcServer, type Services } from '../src/server.ts';
-import { assertAuthorized } from '../src/config.ts';
+import { authenticate, hashToken } from '../src/auth.ts';
+import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
 
 const TOKEN = 'correct-horse-battery-staple';
+const WALLET_TOKEN = 'a-wallet-credential';
 const WALLET = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+
+// A real store, so the credential lookup under test is the real one rather
+// than a stub that agrees with whatever the code does.
+const store = new Store(':memory:');
+store.setWalletTokenHash('alpha:darknetclient', hashToken(WALLET_TOKEN));
 
 let server: Server;
 let base: string;
@@ -19,6 +26,7 @@ let base: string;
 // against a real Anvil - a mocked chain would only prove the mock works.
 const services = {
   config: { token: TOKEN },
+  store,
   resolver: {
     lookup: async (name: string) => (name === 'alpha.vee' ? { address: WALLET, canonical: 'alpha:darknetclient' } : null),
     require: async (name: string) => {
@@ -72,9 +80,59 @@ describe('authentication', () => {
   });
 
   it('compares tokens without leaking length through an exception', () => {
-    expect(() => assertAuthorized(`Bearer ${TOKEN}`, TOKEN)).not.toThrow();
-    expect(() => assertAuthorized('Bearer short', TOKEN)).toThrow(HttpError);
-    expect(() => assertAuthorized(undefined, TOKEN)).toThrow(HttpError);
+    expect(authenticate(`Bearer ${TOKEN}`, TOKEN, store)).toEqual({ scope: 'platform' });
+    expect(() => authenticate('Bearer short', TOKEN, store)).toThrow(HttpError);
+    expect(() => authenticate(undefined, TOKEN, store)).toThrow(HttpError);
+  });
+
+  it('recognises a wallet credential as its own principal', () => {
+    expect(authenticate(`Bearer ${WALLET_TOKEN}`, TOKEN, store)).toEqual({
+      scope: 'wallet',
+      agentId: 'alpha:darknetclient',
+    });
+  });
+});
+
+// Criterion 11, at the routing layer. The exploit these close was demonstrated
+// live before they existed: one shared token let any persona sign from any
+// wallet and mint itself an org-class wallet from the treasury.
+describe('credential scopes', () => {
+  const wallet = { authorization: `Bearer ${WALLET_TOKEN}` };
+
+  it('refuses POST /wallets under a wallet credential', async () => {
+    const res = await fetch(`${base}/wallets`, {
+      method: 'POST',
+      headers: { ...wallet, 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'orch:selfminted', fundVee: 9999, kind: 'org' }),
+    });
+    expect(res.status).toBe(403);
+    expect((await body(res)).error).toBe('wrong_scope');
+  });
+
+  it('refuses /sign-transfer under the platform credential - it has no wallet identity', async () => {
+    const res = await fetch(`${base}/sign-transfer`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'alpha.vee', vee: 1 }),
+    });
+    expect(res.status).toBe(403);
+    expect((await body(res)).error).toBe('wrong_scope');
+  });
+
+  it('lets a wallet read itself and refuses another wallet', async () => {
+    const mine = await fetch(`${base}/balance/alpha.vee`, { headers: wallet });
+    // Reaches the handler, which then needs a chain the stub does not provide -
+    // the point is that authorisation did not refuse it.
+    expect(mine.status).not.toBe(403);
+
+    const theirs = await fetch(`${base}/history/${encodeURIComponent('orch:someone-else')}`, { headers: wallet });
+    expect(theirs.status).toBe(404); // unknown name resolves first
+  });
+
+  it('refuses /supply under a wallet credential', async () => {
+    const res = await fetch(`${base}/supply`, { headers: wallet });
+    expect(res.status).toBe(403);
+    expect((await body(res)).error).toBe('wrong_scope');
   });
 });
 
@@ -178,5 +236,56 @@ describe('the alias index', () => {
     expect(aliases).not.toContain('strangers-label.vee'); // owned by someone else
     expect(aliases).not.toContain('orch:me'); // the canonical, not an alias
     expect(aliases).not.toContain('elsewhere.vee'); // points at another wallet
+  });
+});
+
+// Ruled 02:03 UTC. GET /intents/:id must not become an existence oracle: if
+// somebody else's real intent answered differently from a made-up one, guessing
+// ids would confirm another wallet's activity.
+describe('an intent is not an existence oracle', () => {
+  const walletAuth = { authorization: `Bearer ${WALLET_TOKEN}` };
+
+  beforeAll(() => {
+    // A real reservation owned by a DIFFERENT wallet.
+    store.reserve({
+      intentId: 'belongs-to-beta',
+      agentId: 'beta:someoneelse',
+      stage: store.currentStage(),
+      amount: 1n,
+      capWei: 10n ** 21n,
+    });
+  });
+
+  it("answers another wallet's real intent exactly as it answers a random one", async () => {
+    const real = await fetch(`${base}/intents/belongs-to-beta`, { headers: walletAuth });
+    const fake = await fetch(`${base}/intents/no-such-intent-at-all`, { headers: walletAuth });
+
+    const realText = await real.text();
+    const fakeText = await fake.text();
+
+    expect(real.status).toBe(404);
+    expect(fake.status).toBe(404);
+    // Byte-identical once the echoed id is normalised, not merely both-404: a
+    // differing detail string is the leak.
+    expect(realText).toBe(fakeText.replace('no-such-intent-at-all', 'belongs-to-beta'));
+    expect((JSON.parse(realText) as { error?: string }).error).toBe('unknown_intent');
+  });
+
+  it('lets the owning wallet read its own', async () => {
+    store.reserve({
+      intentId: 'mine-alpha',
+      agentId: 'alpha:darknetclient',
+      stage: store.currentStage(),
+      amount: 1n,
+      capWei: 10n ** 21n,
+    });
+    const res = await fetch(`${base}/intents/mine-alpha`, { headers: walletAuth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ intentId: 'mine-alpha', status: 'reserved' });
+  });
+
+  it('lets platform scope read any', async () => {
+    const res = await fetch(`${base}/intents/belongs-to-beta`, { headers: auth });
+    expect(res.status).toBe(200);
   });
 });

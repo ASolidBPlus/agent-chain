@@ -8,21 +8,37 @@ import { formatEther, isAddress, getAddress } from 'viem';
 import { VEEBuxAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
+import { assertMayRead, authenticate, requirePlatform, type Principal } from './auth.ts';
 import type { Config } from './config.ts';
-import { assertAuthorized } from './config.ts';
 import { HttpError, errorBody, toHttpError } from './errors.ts';
 import type { Resolver } from './resolver.ts';
+import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
-import { assertLookupName, formatVee } from './validate.ts';
+import type { Treasury } from './treasury.ts';
+import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
 
 export interface Services {
   config: Config;
   chain: Chain;
   resolver: Resolver;
   store: Store;
+  spawner: Spawner;
+  treasury: Treasury;
 }
 
+/// Bodies are small JSON objects. The cap is here so a caller cannot make this
+/// process hold an unbounded buffer - it holds every wallet key in the game and
+/// is not a place to discover a memory limit.
+const MAX_BODY_BYTES = 64 * 1024;
+
 type Handler = (ctx: RouteContext) => Promise<unknown>;
+
+/// Which credential a route requires (spec S4 Authorisation).
+///   platform - hub-core, facilitator, setup script. Mints and moves treasury.
+///   wallet   - one agent's own credential; spends from itself only.
+///   any      - either; a registry lookup reveals nothing a caller could not
+///              learn by watching the chain.
+type Scope = 'platform' | 'wallet' | 'any';
 
 interface RouteContext {
   services: Services;
@@ -30,21 +46,28 @@ interface RouteContext {
   /// which is legal in a path segment but arrives encoded from most clients.
   param: string;
   url: URL;
+  /// Parsed JSON body, {} for a request that carried none.
+  body: Record<string, unknown>;
+  principal: Principal;
 }
 
-interface Route {
+export interface Route {
   method: string;
   /// Either an exact path, or a prefix ending in '/' that captures one segment.
   path: string;
   prefix: boolean;
   handler: Handler;
+  scope: Scope;
+  /// For routes shaped /prefix/<param>/suffix, e.g. /wallets/<id>/rotate.
+  suffix?: string;
 }
 
 // --- handlers ------------------------------------------------------------
 // Named functions, referenced directly in the table below, so the call graph
 // stays legible rather than hiding behind string lookups.
 
-async function getSupply({ services }: RouteContext): Promise<unknown> {
+async function getSupply({ services, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'GET /supply');
   const { chain } = services;
   try {
     const [total, treasury] = (await Promise.all([
@@ -82,9 +105,56 @@ async function getReverse({ services, param }: RouteContext): Promise<unknown> {
   return { canonical, aliases: await services.resolver.aliasesOf(address) };
 }
 
-async function getBalance({ services, param }: RouteContext): Promise<unknown> {
+/// Reconciliation for `409 intent_unresolved` (spec S4 "Intents"). Answered
+/// from the store plus a chain lookup, so a caller can find out what actually
+/// happened WITHOUT re-sending - which is the whole point: the alternative is a
+/// caller guessing, and the wrong guess is a double charge.
+///
+///   reserved  - taken, no tx hash recorded. Either it never reached the wire
+///               or it did and the answer was lost. The store cannot tell
+///               these apart and neither can the chain, because nothing on
+///               chain carries the intent id. A human reconciles this one.
+///   broadcast - a hash exists; the chain has not confirmed it yet.
+///   confirmed - the receipt says success.
+///   failed    - the receipt says reverted. The money did NOT move.
+async function getIntent({ services, param, principal }: RouteContext): Promise<unknown> {
+  const intentId = decodeURIComponent(param ?? '');
+  if (intentId === '') throw new HttpError('invalid_request', 'intent id is required');
+
+  // "Self" is the principal behind the token, never anything the caller sent -
+  // the same invariant /sign-transfer holds (ruled 02:03 UTC).
+  //
+  // ONE refusal for both "no such intent" and "not yours", with an IDENTICAL
+  // body. Splitting them - a 404 here and a 403 for somebody else's - would
+  // make the error an existence oracle: guess ids until one answers 403 and you
+  // have confirmed another wallet's intent. This is why the ownership check
+  // does not get to throw its own error.
+  const record = services.store.intentRecord(intentId);
+  const mine =
+    record !== null && (principal.scope === 'platform' || principal.agentId === record.agentId);
+  if (!mine) throw new HttpError('unknown_intent', `no intent ${intentId}`);
+
+  if (!record.txHash) return { intentId, status: 'reserved' };
+
+  try {
+    const receipt = await services.chain.publicClient.getTransactionReceipt({
+      hash: record.txHash as `0x${string}`,
+    });
+    return {
+      intentId,
+      status: receipt.status === 'success' ? 'confirmed' : 'failed',
+      txHash: record.txHash,
+    };
+  } catch {
+    // No receipt yet - it is in the mempool, not missing.
+    return { intentId, status: 'broadcast', txHash: record.txHash };
+  }
+}
+
+async function getBalance({ services, param, principal }: RouteContext): Promise<unknown> {
   const name = assertLookupName(param);
   const found = await services.resolver.require(name);
+  assertMayRead(principal, found.canonical);
   try {
     const [vee, eth] = await Promise.all([
       services.chain.publicClient.readContract({
@@ -101,11 +171,71 @@ async function getBalance({ services, param }: RouteContext): Promise<unknown> {
   }
 }
 
+async function getHistory({ services, param, url, principal }: RouteContext): Promise<unknown> {
+  assertMayRead(principal, (await services.resolver.require(assertLookupName(param))).canonical);
+  const raw = url.searchParams.get('limit');
+  const limit = raw === null ? 50 : Number(raw);
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
+    throw new HttpError('invalid_request', 'limit must be an integer between 1 and 1000');
+  }
+  return services.treasury.history(param, limit);
+}
+
+async function postWallets({ services, body, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /wallets');
+  return services.spawner.spawn(body);
+}
+
+async function postAliases({ services, body, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /aliases');
+  return services.spawner.addAlias(body);
+}
+
+async function postFund({ services, body, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /fund');
+  return services.treasury.fund(body);
+}
+
+async function postSignTransfer({ services, body, principal }: RouteContext): Promise<unknown> {
+  return services.treasury.signTransfer(principal, body);
+}
+
+async function deleteWallet({ services, param, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'DELETE /wallets');
+  return services.spawner.retire(assertCanonicalAgentId(param));
+}
+
+async function postRotate({ services, param, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /wallets/:agentId/rotate');
+  return services.spawner.rotateToken(param);
+}
+
+async function postStage({ services, body, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /stage');
+  const stage = body.stage;
+  if (typeof stage !== 'string' || stage.trim() === '') {
+    throw new HttpError('invalid_request', 'stage must be a non-empty string');
+  }
+  services.store.setStage(stage.trim());
+  return { stage: stage.trim() };
+}
+
 export const ROUTES: Route[] = [
-  { method: 'GET', path: '/supply', prefix: false, handler: getSupply },
-  { method: 'GET', path: '/resolve/', prefix: true, handler: getResolve },
-  { method: 'GET', path: '/reverse/', prefix: true, handler: getReverse },
-  { method: 'GET', path: '/balance/', prefix: true, handler: getBalance },
+  { method: 'GET', path: '/supply', prefix: false, scope: 'platform', handler: getSupply },
+  { method: 'GET', path: '/resolve/', prefix: true, scope: 'any', handler: getResolve },
+  { method: 'GET', path: '/reverse/', prefix: true, scope: 'any', handler: getReverse },
+  // 'any' at the router, then self-only inside: the handler has to resolve the
+  // name before it can know whose wallet it is.
+  { method: 'GET', path: '/balance/', prefix: true, scope: 'any', handler: getBalance },
+  { method: 'GET', path: '/history/', prefix: true, scope: 'any', handler: getHistory },
+  { method: 'GET', path: '/intents/', prefix: true, scope: 'any', handler: getIntent },
+  { method: 'POST', path: '/wallets', prefix: false, scope: 'platform', handler: postWallets },
+  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/rotate', scope: 'platform', handler: postRotate },
+  { method: 'POST', path: '/aliases', prefix: false, scope: 'platform', handler: postAliases },
+  { method: 'POST', path: '/fund', prefix: false, scope: 'platform', handler: postFund },
+  { method: 'POST', path: '/stage', prefix: false, scope: 'platform', handler: postStage },
+  { method: 'POST', path: '/sign-transfer', prefix: false, scope: 'wallet', handler: postSignTransfer },
+  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet },
 ];
 
 /// @throws HttpError for a malformed percent-escape - a caller error, not a
@@ -118,7 +248,11 @@ function match(method: string, pathname: string): { route: Route; param: string 
       continue;
     }
     if (pathname.startsWith(route.path)) {
-      const rest = pathname.slice(route.path.length);
+      let rest = pathname.slice(route.path.length);
+      if (route.suffix) {
+        if (!rest.endsWith(route.suffix)) continue;
+        rest = rest.slice(0, -route.suffix.length);
+      }
       if (rest.length === 0) continue;
 
       // Decode FIRST, then check for a separator. The check used to run on the
@@ -144,6 +278,47 @@ function match(method: string, pathname: string): { route: Route; param: string 
   return null;
 }
 
+async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new HttpError('invalid_request', 'request body too large');
+    chunks.push(chunk as Buffer);
+  }
+  const text = Buffer.concat(chunks).toString('utf8').trim();
+  if (text === '') return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HttpError('invalid_request', 'body is not valid JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new HttpError('invalid_request', 'body must be a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/// The router-level scope check, kept as a named function so it can be tested
+/// on its own.
+///
+/// It is deliberately REDUNDANT with the requirePlatform call inside each
+/// platform handler, and that redundancy is why it needs its own test: with
+/// both in place, deleting either leaves the end-to-end suite green (verified
+/// by mutation). This one exists for the route somebody adds later and forgets
+/// to guard - so it is tested here rather than through a route, because every
+/// current route is also covered by its handler.
+export function assertRouteScope(route: Route, principal: Principal, what: string): void {
+  if (route.scope === 'platform' && principal.scope !== 'platform') {
+    throw new HttpError('wrong_scope', `${what} requires the platform credential`);
+  }
+  if (route.scope === 'wallet' && principal.scope !== 'wallet') {
+    throw new HttpError('wrong_scope', `${what} requires a wallet credential`);
+  }
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
@@ -159,13 +334,24 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
       return send(res, 200, { ok: true });
     }
 
-    assertAuthorized(req.headers.authorization, services.config.token);
+    const principal = authenticate(req.headers.authorization, services.config.token, services.store);
 
     const found = match(req.method ?? 'GET', url.pathname);
     if (!found) throw new HttpError('invalid_request', `no route for ${req.method} ${url.pathname}`);
 
-    const body = await found.route.handler({ services, param: found.param, url });
-    return send(res, 200, body);
+    assertRouteScope(found.route, principal, `${req.method} ${url.pathname}`);
+
+    const method = req.method ?? 'GET';
+    const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
+
+    const result = await found.route.handler({
+      services,
+      param: found.param,
+      url,
+      body,
+      principal,
+    });
+    return send(res, 200, result);
   } catch (err) {
     const httpError = toHttpError(err);
     if (httpError.code === 'internal_error') {

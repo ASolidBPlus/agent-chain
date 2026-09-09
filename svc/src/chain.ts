@@ -1,7 +1,17 @@
 // viem clients and the deployed addresses. One place that knows how to reach
 // the chain, so nothing else has to care where the treasury key comes from.
 
-import { createPublicClient, createWalletClient, http, getAddress, type Address, type PublicClient, type WalletClient } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  defineChain,
+  http,
+  getAddress,
+  type Address,
+  type Chain as ViemChain,
+  type PublicClient,
+  type WalletClient,
+} from 'viem';
 import { mnemonicToAccount } from 'viem/accounts';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -63,6 +73,7 @@ export class Chain {
   readonly walletClient: WalletClient;
   readonly deployment: Deployment;
   readonly treasury: Address;
+  readonly viemChain: ViemChain;
 
   constructor(config: Config, deployment: Deployment) {
     this.deployment = deployment;
@@ -80,9 +91,26 @@ export class Chain {
       );
     }
 
+    // viem needs a chain object to send a transaction at all. Defined here
+    // rather than imported from viem/chains so the id is the one this service
+    // asserts on at boot, not whatever a library constant happens to say.
+    this.viemChain = defineChain({
+      id: PRIVATE_CHAIN_ID,
+      name: 'PowerOUT private chain',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      rpcUrls: { default: { http: [config.rpcUrl] } },
+    });
+
     const transport = http(config.rpcUrl);
-    this.publicClient = createPublicClient({ transport }) as PublicClient;
-    this.walletClient = createWalletClient({ account, transport });
+    // viem polls every 4 SECONDS by default, which is sensible for a public
+    // network and absurd for an instant-mining local chain: it made a spawn
+    // that does the work in ~200ms take 4.2s, because waitForTransactionReceipt
+    // missed on its first check and then slept a full interval. That was
+    // measured, not guessed - and it is why spawn timings read 277ms one run
+    // and 4297ms the next. Anvil mines on submission, so poll fast.
+    const pollingInterval = 50;
+    this.publicClient = createPublicClient({ chain: this.viemChain, transport, pollingInterval }) as PublicClient;
+    this.walletClient = createWalletClient({ account, chain: this.viemChain, transport, pollingInterval });
   }
 }
 
