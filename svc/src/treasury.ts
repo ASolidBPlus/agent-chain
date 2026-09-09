@@ -99,6 +99,75 @@ export class Treasury {
     return this.store.currentStage();
   }
 
+  /// The name-based check in `enforcePolicy` closes the common case - a deny
+  /// naming the canonical, reached through an alias. It cannot close a deny
+  /// naming ONE alias while the caller uses ANOTHER, because neither string
+  /// matches the entry. This closes that by comparing IDENTITIES: each literal
+  /// deny entry is resolved once and compared to the target's address.
+  ///
+  /// Resolving the DENY LIST rather than the target's aliases is deliberate.
+  /// `resolver.aliasesOf` scans every `Registered` event from block 0, which
+  /// would put a full log scan on every transfer and grow with the game. The
+  /// deny list is one or two static entries, so this is O(deny) cached reads.
+  ///
+  /// Wildcard entries stay name-only - there is no address to resolve for
+  /// `*.evil` - which is why the name check above is kept rather than replaced.
+  private async assertNotDeniedByIdentity(
+    policy: AgentPolicy,
+    targetAddress: string,
+    requested: string,
+  ): Promise<void> {
+    for (const entry of policy.deny) {
+      if (entry.includes('*')) continue; // a pattern, already handled by name
+
+      // RESOLVED EVERY TIME, NOT CACHED, and the cache this replaces was wrong
+      // in a way my own comment two lines down used to argue against.
+      //
+      // It cached the not-found result permanently, reasoning that an
+      // unregistered deny entry names no identity so the lookup need not be
+      // repeated. But "not registered" is exactly as TRANSIENT as "read
+      // failed": names get registered - that is what the game does. Deny a
+      // counterparty by canonical id BEFORE that agent is spawned, spawn it,
+      // and the null cached on the first send un-denies its aliases for the
+      // life of the process. Ordinary sequencing, not an attack. The
+      // distinction the cache drew was between two ERROR SHAPES, not between
+      // two LIFETIMES.
+      //
+      // Caching the positive result is no safer: `setTargetFor` re-points a
+      // name and retirement clears it, so a resolved address can go stale in
+      // the other direction. THE PROPERTY IS THAT A DENY ENTRY'S RESOLUTION
+      // MUST NOT OUTLIVE THE CONDITION IT WAS RESOLVED UNDER, and no TTL
+      // expresses that - a TTL picks a window in which it may.
+      //
+      // The cost is one registry read per literal deny entry per send. Bounded
+      // by the deny list, which is one or two entries, on a path that already
+      // reads the registry for `to`. `policyFor` re-reads the policy file every
+      // send for the same reason; a live policy over a frozen resolution was
+      // the asymmetry that made this wrong.
+      let address: string | null;
+      try {
+        address = (await this.resolver.lookup(entry))?.address.toLowerCase() ?? null;
+      } catch (err) {
+        // FAILS CLOSED on a transport error (ruled 05:29). NOT FOUND is an
+        // answer - there is no such denied identity - and it is handled by
+        // `address` being null below. READ FAILED is not an answer: admitting a
+        // transfer we could not evaluate the deny list against errs in the one
+        // direction a cap must never err in.
+        //
+        // This costs nothing in availability: `to` is always a NAME
+        // (assertLookupName admits only a canonical id or an alias) and
+        // `resolver.require` reads the registry for it earlier in this same
+        // method, so a registry too broken to resolve a deny entry has already
+        // refused the transfer.
+        throw asChainError(err);
+      }
+
+      if (address && address === targetAddress.toLowerCase()) {
+        throw new HttpError('counterparty_denied', `${requested} is not an allowed counterparty`);
+      }
+    }
+  }
+
   /// The policy chain-svc ENFORCES is the same file it wrote for wallet-mcp to
   /// read, so the boundary and the model-facing fast path cannot drift apart.
   private async policyFor(agentId: string): Promise<AgentPolicy> {
@@ -166,9 +235,11 @@ export class Treasury {
     // lives only there is bypassed by calling this endpoint directly.
     const stage = await this.currentStage();
     const policy = await this.policyFor(fromAgentId);
-    enforcePolicy({ policy, to: name, amount });
-
+    // RESOLVE FIRST. The policy check needs the registry's primary name for the
+    // address, not just the string the caller typed - see enforcePolicy.
     const target = await this.resolver.require(name);
+    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount });
+    await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
 
     // A caller that supplies no intent id gets a fresh one rather than a
