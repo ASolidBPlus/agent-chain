@@ -13,7 +13,29 @@ import { join } from 'node:path';
 import { HttpError } from './errors.ts';
 import { keyFileName } from './validate.ts';
 
-export type WalletKind = 'org' | 'agent' | 'burner';
+/// THE ONE PLACE THE WALLET KINDS ARE LISTED.
+///
+/// It used to be four: this union, the array `loadPolicyDefaults` iterates, the
+/// three-way equality in `Spawner.parseKind`, and the PROSE of parseKind's
+/// rejection message. Adding a kind meant finding all four, and the fourth is
+/// prose - so the natural failure was a validator that accepted the new kind
+/// beside a message still telling callers it was invalid. A message that
+/// disagrees with the condition it explains is worse than no message: it sends
+/// the caller to fix input that was already correct.
+///
+/// Everything downstream derives from this array, including the message, so a
+/// kind is added in ONE edit and the code cannot disagree with itself about
+/// what it accepts.
+export const WALLET_KINDS = ['org', 'agent', 'burner'] as const;
+
+export type WalletKind = (typeof WALLET_KINDS)[number];
+
+/// A type guard rather than an equality chain, so the CHECK and the LIST cannot
+/// drift apart. Widening `unknown` here is deliberate: the caller has parsed
+/// JSON and holds no type at all yet.
+export function isWalletKind(value: unknown): value is WalletKind {
+  return (WALLET_KINDS as readonly unknown[]).includes(value);
+}
 
 /// The caps written into an agent's policy file at spawn, which wallet-mcp
 /// enforces (spec S5).
@@ -49,7 +71,7 @@ export function loadPolicyDefaults(path: string): PolicyDefaults {
     throw new Error(`chain-svc: cannot read policy defaults at ${path}: ${(err as Error).message}`);
   }
   const out = {} as PolicyDefaults;
-  for (const kind of ['org', 'agent', 'burner'] as const) {
+  for (const kind of WALLET_KINDS) {
     const entry = (parsed as Record<string, unknown>)?.[kind];
     if (!isPolicy(entry)) {
       throw new Error(`chain-svc: policy defaults at ${path} have no valid "${kind}" entry`);

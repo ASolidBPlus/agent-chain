@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { loadPolicyDefaults, capToWei } from '../src/policy.ts';
+import { loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
@@ -98,6 +98,76 @@ describe('POST /wallets validation', () => {
     const { spawner: s } = spawner();
     expect(await codeOf(() => s.spawn({ agentId: 'orch:x', kind: 'wizard' }))).toBe('invalid_request');
   });
+
+  // The condition and the message used to be separate lists, and the message
+  // was PROSE - so the natural drift was a validator accepting a new kind
+  // beside a message still calling it invalid, which sends the caller to fix
+  // input that was already correct. Asserting the message against the CONSTANT
+  // rather than against a fixed string means it stays true when the list grows,
+  // without anyone remembering to update this test either.
+  it('names every valid kind in the rejection message', async () => {
+    const { spawner: s } = spawner();
+    const err = await s.spawn({ agentId: 'orch:x', kind: 'wizard' }).catch((e: Error) => e);
+    for (const kind of WALLET_KINDS) {
+      expect((err as Error).message).toContain(kind);
+    }
+  });
+
+  // STRUCTURAL, because a behavioural test CANNOT tell derivation from
+  // coincidence here: with today's three kinds `WALLET_KINDS.join(', ')` is
+  // byte-identical to the literal it replaced, so a test asserting the message
+  // names each kind passes just as well on a hard-coded string. The drift only
+  // becomes visible when the list changes - which is exactly when nobody is
+  // running this test against the old message.
+  //
+  // Measured: re-hardcoding the message survived every behavioural test in this
+  // file. So the thing to assert is the DERIVATION, not the output.
+  // SCOPED TO parseKind's BODY, not to the file. A whole-file `toContain` is
+  // satisfied by the join text appearing ANYWHERE - measured: hardcoding the
+  // message while leaving `WALLET_KINDS.join` in a comment survived it. The
+  // realistic version is not a planted comment but a SECOND site that
+  // legitimately builds a message from the join, after which parseKind can be
+  // hardcoded freely and this guard still passes.
+  //
+  // A source grep cannot tell you WHERE it matched, so the fix is to grep a
+  // smaller thing: extract the function's own braces and look only in there.
+  it('builds the rejection message FROM the constant, inside parseKind itself', async () => {
+    const src = await Bun.file(new URL('../src/spawn.ts', import.meta.url)).text();
+    const at = src.indexOf('private parseKind(');
+    // Compare to a VALUE: indexOf returns -1 when the function is renamed, and
+    // slicing from -1 would silently search the whole file backwards.
+    expect(at).toBeGreaterThan(-1);
+    const open = src.indexOf('{', at);
+    let depth = 0;
+    let end = open;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    const body = src.slice(open, end + 1);
+    expect(body).toContain("WALLET_KINDS.join(', ')");
+    // A narrow regression guard against the exact literal that was here before -
+    // documented as narrow, not read as a general ban on the words.
+    expect(body).not.toContain("'kind must be one of org, agent, burner'");
+  });
+
+  // The constant drives BEHAVIOUR, not only the message: every kind it lists
+  // must get PAST validation, or the list is documentation the validator
+  // happens to agree with today.
+  //
+  // Scoped to exactly that claim. This fixture's resolver explodes on contact,
+  // so reaching it PROVES validation passed the kind through and proves nothing
+  // else - which is the whole of what WALLET_KINDS governs. A full spawn would
+  // exercise funding, registration and the chain, and pass or fail for reasons
+  // that have nothing to do with this constant.
+  it('lets every kind the constant lists through validation', async () => {
+    for (const kind of WALLET_KINDS) {
+      const { spawner: s } = spawner();
+      const err = await s.spawn({ agentId: `orch:k-${kind}`, kind }).catch((e: Error) => e);
+      expect((err as Error).message).toContain('resolver must not be reached');
+    }
+  });
+
 
   it('refuses an alias containing a colon, which could impersonate a canonical id', async () => {
     const { spawner: s } = spawner();
@@ -246,8 +316,13 @@ describe('POST /sign-transfer validation', () => {
 // deliberately do not assert the numbers, which are powerout-planner's to move
 // without breaking a build.
 describe('policy defaults', () => {
+  // Iterates WALLET_KINDS rather than a literal list, so adding a kind extends
+  // this test automatically - and a kind added with no defaults fails at
+  // STARTUP (loadPolicyDefaults throws by name) rather than at the first spawn
+  // of that kind. Measured: adding 'wizard' to the constant stops the service
+  // with `policy defaults ... have no valid "wizard" entry`.
   it('has an entry for every wallet kind', () => {
-    for (const kind of ['org', 'agent', 'burner'] as const) {
+    for (const kind of WALLET_KINDS) {
       // Compared in WEI, not as numbers: a cap may be a decimal string, and
       // comparing those numerically is the imprecision the string form exists
       // to prevent.
