@@ -13,6 +13,7 @@ import { Spawner } from '../src/spawn.ts';
 import { loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
+import { blankComments } from './support/source.ts';
 import { asChainError } from '../src/chain.ts';
 import { HttpError } from '../src/errors.ts';
 import type { Config } from '../src/config.ts';
@@ -133,7 +134,12 @@ describe('POST /wallets validation', () => {
   // A source grep cannot tell you WHERE it matched, so the fix is to grep a
   // smaller thing: extract the function's own braces and look only in there.
   it('builds the rejection message FROM the constant, inside parseKind itself', async () => {
-    const src = await Bun.file(new URL('../src/spawn.ts', import.meta.url)).text();
+    // Comments blanked FIRST: this scan counts braces, and a `}` in prose
+    // inside the function truncated the extracted body, so the guard reddened
+    // on a comment rather than on a defect. Same bug as fees.test.ts's phantom
+    // block, same fix, one helper - a second copy would be a second authority
+    // for the rule these guards exist to enforce.
+    const src = blankComments(await Bun.file(new URL('../src/spawn.ts', import.meta.url)).text());
     const at = src.indexOf('private parseKind(');
     // Compare to a VALUE: indexOf returns -1 when the function is renamed, and
     // slicing from -1 would silently search the whole file backwards.

@@ -41,7 +41,10 @@
 // ⚠ AND THE ENUMERATION HAS NOT LEFT, IT HAS MOVED. `FILES` was a hand-written
 // list and became a glob; `SEND_CALLS` is STILL a hand-written list, now of call
 // spellings. Nothing here can catch a viem method that puts a transaction on the
-// wire and is not in it - a new API in a future viem, say. That residual is real
+// wire and is not in it - a new API in a future viem, OR A KNOWN METHOD CALLED
+// WITHOUT A RECEIVER (`const { writeContract } = chain.walletClient` then
+// `writeContract({...})` typechecks, sends, and is invisible here). That
+// residual is real
 // and is stated rather than guarded, because a half-guard implying coverage is
 // how the three defects above got written. WHEN VIEM IS UPGRADED, SOMEBODY HAS
 // TO READ ITS CHANGELOG FOR NEW TRANSACTION METHODS; this file cannot.
@@ -51,6 +54,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { readdirSync } from 'node:fs';
+import { blankComments, callBlocks } from './support/source.ts';
 
 const SRC = new URL('../src/', import.meta.url);
 
@@ -110,28 +114,6 @@ function topLevelLines(block: string): string[] {
   return lines;
 }
 
-/// Brace-balanced from the call's opening `{`, NOT up to the first `})` - the
-/// argument objects contain nested literals, and a naive slice cuts the block
-/// in half and silently checks less than it claims.
-function callBlocks(src: string, needle: string): string[] {
-  const blocks: string[] = [];
-  let from = 0;
-  for (;;) {
-    const at = src.indexOf(needle, from);
-    if (at === -1) return blocks;
-    const open = src.indexOf('{', at);
-    if (open === -1) return blocks;
-    let depth = 0;
-    let i = open;
-    for (; i < src.length; i++) {
-      if (src[i] === '{') depth++;
-      else if (src[i] === '}') { depth--; if (depth === 0) break; }
-    }
-    blocks.push(src.slice(open, i + 1));
-    from = i + 1;
-  }
-}
-
 /// GLOBBED, NOT NAMED. This was a hand-written list of two files, with a
 /// comment claiming the naming was what stopped a new file slipping past.
 /// Measured, naming is PRECISELY what let one through: a new `sweeper.ts` with
@@ -147,7 +129,9 @@ describe('every send site carries explicit zero fees', () => {
   it('spreads ZERO_FEES at every viem send call in the service', async () => {
     let total = 0;
     for (const file of sourceFiles()) {
-      const src = await Bun.file(new URL(file, SRC)).text();
+      // Comments blanked BEFORE the scan, so a comment naming a send call
+      // cannot create a phantom block - nor hide the real sites behind it.
+      const src = blankComments(await Bun.file(new URL(file, SRC)).text());
       for (const needle of SEND_CALLS) {
         for (const block of callBlocks(src, needle)) {
           total++;
@@ -171,6 +155,53 @@ describe('every send site carries explicit zero fees', () => {
     // an unseen site contributes zero blocks and leaves the total unchanged.
     // The needles being unqualified is what covers the add direction.
     expect(total).toBe(6);
+  });
+
+  // THE SKIP, MADE VISIBLE - and this is the assertion the fix actually needs.
+  //
+  // A phantom block does not merely produce a spurious failure. Because the
+  // scan advances past the phantom's braces, THE REAL SITES BEHIND IT ARE NEVER
+  // LOOKED AT - so a red naming one phantom has silently skipped an unknown
+  // number of real ones. The message understates its own extent: it reads as
+  // "one problem" when the state is "one problem, and N sites never scanned".
+  //
+  // So "2 pass after the fix" does NOT demonstrate the skip is closed: with the
+  // comment present the per-block assertion fails first, and `total` is never
+  // reached. The count is what distinguishes "comments no longer make phantoms"
+  // from "…AND the sites behind them are back".
+  //
+  // Both arms are asserted here rather than measured once by hand, so the
+  // control cannot rot: raw scanning must find FEWER sites than blanked
+  // scanning on the same source. A control whose halves agree has measured
+  // nothing.
+  it('does not skip real sites behind a comment that names a send call', () => {
+    const source = [
+      '// this module uses .writeContract( for registry writes',
+      'async function a(c) {',
+      '  return c.walletClient.writeContract({ address: A, args: [], ...ZERO_FEES });',
+      '}',
+      'async function b(c) {',
+      '  return c.walletClient.writeContract({ address: B, args: [], ...ZERO_FEES });',
+      '}',
+    ].join('\n');
+
+    const argsOf = (blocks: string[]) =>
+      blocks.map((b) => b.replace(/\s+/g, ' ').slice(0, 12)).sort();
+
+    const blanked = argsOf(callBlocks(blankComments(source), '.writeContract('));
+    const raw = argsOf(callBlocks(source, '.writeContract('));
+
+    // BOTH real argument objects are examined once comments are blanked.
+    expect(blanked).toEqual(['{ address: A', '{ address: B']);
+
+    // AND THE COUNT ALONE WOULD HAVE HIDDEN IT: the raw scan finds the SAME
+    // NUMBER of blocks. The phantom's `{` is function a's BODY brace, so its
+    // block swallows site A whole - a's argument object is never examined, and
+    // the scan resumes after the function. Same count, one real site skipped,
+    // which is why this asserts WHICH blocks were found and not how many.
+    expect(raw).toHaveLength(blanked.length);
+    expect(raw).not.toEqual(blanked);
+    expect(raw).not.toContain('{ address: A');
   });
 
   it('ZERO_FEES is actually zero on both fields', async () => {
