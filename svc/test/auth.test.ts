@@ -330,10 +330,15 @@ describe('policy enforcement', () => {
       store.close();
     });
 
-    // Both halves of `release` are gated on the SAME fact - did the DELETE
-    // remove a row - because they were not, and the refund ran regardless.
-    // The lower bound that makes absence evidence. Without it, "no emission"
-    // cannot be told from "the tail has not reached it yet".
+    // NO CURRENT CONSUMER: nothing reads `reserved_at_block`. This pins that
+    // the VALUE is stamped, not that a row exists - the reserve-time head is
+    // irrecoverable afterwards, so the future nonce-based branch gets a floor
+    // or gets nothing. It is deliberately NOT a claim that anything depends on
+    // the column today; see the comment on Store.reserve.
+    //
+    // (The two sentences that used to sit here were an orphan from the release
+    // tests above and the "lower bound that makes absence evidence" claim that
+    // the #34 fix retired.)
     it('records the chain head observed before the reservation', () => {
       const store = new Store(':memory:');
       // The store's CURRENT stage: `unresolvedIntents` is bounded to it, so a
@@ -348,9 +353,10 @@ describe('policy enforcement', () => {
       store.close();
     });
 
-    // Rows written before the column existed read as null, which the sweep must
-    // treat as "cannot bound" rather than as block zero - zero would make every
-    // absence look like evidence.
+    // Null when the tail has not polled yet. No consumer exists to mis-read it
+    // today; the point is that it stays distinguishable from block zero, because
+    // zero would make every absence look like evidence - the defect that removed
+    // the sweep's negative branch.
     it('reports a missing bound as null, not as zero', () => {
       const store = new Store(':memory:');
       store.reserve({

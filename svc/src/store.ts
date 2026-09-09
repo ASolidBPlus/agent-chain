@@ -123,11 +123,13 @@ export class Store {
         emissions  INTEGER NOT NULL DEFAULT 0,
         first_tx   TEXT,
         first_from TEXT,
-        -- The chain head observed BEFORE the reservation, as a lower bound on
-        -- where the transfer can be. The reservation strictly precedes the
-        -- broadcast, so tx_block >= head-at-reserve. Without it 'no emission'
-        -- cannot be told from 'the tail has not reached it yet', and an
-        -- unbounded absence is not evidence.
+        -- NO CURRENT CONSUMER. The chain head observed BEFORE the reservation.
+        -- Nothing reads this column: the sweep's negative branch did, and the
+        -- #34 NO-GO removed it. Kept because the reservation strictly precedes
+        -- the broadcast, so tx_block >= head-at-reserve makes it a sound FLOOR
+        -- for the recorded future nonce-based branch - and that value is
+        -- IRRECOVERABLE if it is not stamped at reserve time. See the
+        -- reservedAtBlock comment on reserve().
         reserved_at_block TEXT,
         -- Whether the intent id was CALLER-SUPPLIED or SERVER-GENERATED.
         -- Recorded because the anomaly needs it: a foreign emission under a
@@ -568,13 +570,38 @@ export class Store {
     return apply();
   }
 
+  /// Ages a reservation, so a test can express a retention rule keyed on TIME
+  /// rather than on stage. Test-only: every row a test creates is seconds old,
+  /// so a wall-clock TTL is the one variant of "emission rows are immortal"
+  /// that no ordinary fixture can reach.
+  backdateIntentForTest(intentId: string, createdAt: number): void {
+    this.db.query(`UPDATE intents SET created_at = ? WHERE intent_id = ?`).run(createdAt, intentId);
+  }
+
   /// Intents this store reserved that have no recorded transaction, with the
   /// chain head observed before each reservation. The sweep's input.
   ///
-  /// `reservedAtBlock` is the lower bound that makes absence evidence: the
-  /// reservation strictly precedes the broadcast, so a transfer for this intent
-  /// cannot be below it. Null for rows written before the column existed, which
-  /// the sweep must treat as "cannot bound" rather than as zero.
+  /// NO CURRENT CONSUMER. `reservedAtBlock` is recorded and read by nothing.
+  ///
+  /// Saying so plainly, because this comment used to claim it was "the lower
+  /// bound that makes absence evidence" - true until the `#34` NO-GO removed
+  /// the sweep's negative branch, which was its only reader. The writer, the
+  /// column, the `observedHead` machinery feeding it, the SELECT and the
+  /// justification all survived the removal of the thing they existed for.
+  ///
+  /// KEPT DELIBERATELY, and for a stronger reason than "a future branch might
+  /// want it": the recorded future nonce-based negative branch needs the
+  /// reserve-time head as its FLOOR - where scanning starts, the one thing a
+  /// floor is for - and THAT VALUE IS IRRECOVERABLE IF NOT STAMPED AT RESERVE
+  /// TIME. Deleting the column saves a write and throws away history that
+  /// cannot be reconstructed later, so that PR would have to begin from a
+  /// table which has never held one.
+  ///
+  /// It stays a sound floor because the reservation strictly precedes the
+  /// broadcast: tx_block >= head at broadcast >= head at reserve. Null when the
+  /// tail has not polled yet, and the future consumer must treat null as
+  /// "cannot bound" rather than as zero - zero would make every absence look
+  /// like evidence, which is the shape of the defect that removed the branch.
   unresolvedIntents(): Array<{
     intentId: string;
     topic: string | null;
@@ -736,6 +763,11 @@ export class Store {
   ///
   /// `cursor_now > cursor_at_reserve` does NOT imply the tail passed the
   /// transaction's block. `cursor_now >= observed_head_at_reserve` does.
+  ///
+  /// NO CURRENT CONSUMER. The one caller is `treasury.ts`'s reserve, which
+  /// stamps `reserved_at_block`, which nothing reads - see that column. The
+  /// arithmetic above is what the value MEANS, not a dependency anything has
+  /// today; it is kept because the floor is irrecoverable after the fact.
   observedHead(): bigint | null {
     return this.getCursor('chain-observed-head');
   }
