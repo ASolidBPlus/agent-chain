@@ -336,8 +336,11 @@ describe('policy enforcement', () => {
     // cannot be told from "the tail has not reached it yet".
     it('records the chain head observed before the reservation', () => {
       const store = new Store(':memory:');
+      // The store's CURRENT stage: `unresolvedIntents` is bounded to it, so a
+      // fixture pinning an arbitrary stage would be filtered out and the
+      // assertion would fail for a reason that has nothing to do with the bound.
       store.reserve({
-        intentId: 'bounded', agentId: 'orch:a', stage: 's1',
+        intentId: 'bounded', agentId: 'orch:a', stage: store.currentStage(),
         amount: vee(1), capWei: cap, reservedAtBlock: 4242n,
       });
       const [row] = store.unresolvedIntents();
@@ -350,7 +353,10 @@ describe('policy enforcement', () => {
     // absence look like evidence.
     it('reports a missing bound as null, not as zero', () => {
       const store = new Store(':memory:');
-      store.reserve({ intentId: 'unbounded', agentId: 'orch:a', stage: 's1', amount: vee(1), capWei: cap });
+      store.reserve({
+        intentId: 'unbounded', agentId: 'orch:a', stage: store.currentStage(),
+        amount: vee(1), capWei: cap,
+      });
       expect(store.unresolvedIntents()[0]!.reservedAtBlock).toBeNull();
       store.close();
     });
