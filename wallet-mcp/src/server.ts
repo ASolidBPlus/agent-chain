@@ -66,7 +66,11 @@ export function buildServer(wallet: Wallet): McpServer {
         'reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, frozen, ' +
         'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice.',
       inputSchema: {
-        to: z.string().describe('the recipient NAME (canonical id or vanity alias)'),
+        to: z.string().describe(
+          'the recipient NAME, not a mesh id and not an address. Canonical form is ' +
+          '<org>:<agent id> — in the arena that is "arena:toby" for the agent you see as "toby". ' +
+          'A vanity alias also works. A bare id with no prefix is refused as unknown_name.',
+        ),
         // A DECIMAL STRING is the contract (ruled 03:55). A whole number is
         // accepted because a model writes 50 as readily as "50", and an integer
         // is exactly representable so nothing rounds. A fractional number is
