@@ -240,6 +240,16 @@ export interface LifetimeFacts {
   /// The intents table has no rows: no intent id has ever been consumed, or
   /// none is remembered any more.
   intentsEmpty: boolean;
+  /// How many wallets THIS STORE remembers spawning. The fact that separates a
+  /// wiped store from a live game that has simply not spent yet - the two
+  /// states `intentsEmpty` alone cannot tell apart, because a game's intents
+  /// table is empty until its first transfer and stays empty across every
+  /// restart until then.
+  ///
+  /// 0 is the RESTRICTIVE value here, not the permissive one, which is the
+  /// opposite of `keystoreAgents` - so an error that produced a zero would fail
+  /// closed. It still is not caught: the read is unwrapped like its siblings.
+  storeWallets: number;
   /// How many agents the KEYSTORE holds keys for. Its own volume, untouched by
   /// a store-only wipe.
   keystoreAgents: number;
@@ -277,7 +287,7 @@ export interface LifetimeFacts {
 /// incident that trips this control is an operator doing volume surgery, which
 /// is exactly when a neighbouring volume also fails to attach.
 export async function gatherLifetimeFacts(deps: {
-  store: { intentsEmpty(): boolean };
+  store: { intentsEmpty(): boolean; walletsRecorded(): number };
   keystore: { agentCount(): Promise<number> };
   /// `getCode` rather than the deployments file: the file records what was
   /// deployed ONCE, and the question is what is on the chain NOW. A file
@@ -289,6 +299,7 @@ export async function gatherLifetimeFacts(deps: {
   const code = await deps.getCode();
   return {
     intentsEmpty: deps.store.intentsEmpty(),
+    storeWallets: deps.store.walletsRecorded(),
     keystoreAgents: await deps.keystore.agentCount(),
     contractsDeployed: code !== undefined && code !== '0x',
     acknowledged: deps.acknowledged,
@@ -338,14 +349,22 @@ export class LedgerWipeError extends Error {
 export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
   if (facts.acknowledged) return;
   if (!facts.intentsEmpty) return;
+  // THE STORE IS STILL HERE. A store that survived the restart remembers the
+  // wallets it spawned; a wiped one remembers nothing, because the file is
+  // recreated empty. This is the conjunct that separates the wipe from a live
+  // game that has not spent yet - `intentsEmpty` never could, and without it
+  // `compose down && compose up` on an unspent game refused to start.
+  if (facts.storeWallets > 0) return;
   if (facts.keystoreAgents === 0) return;
   if (!facts.contractsDeployed) return;
 
   throw new LedgerWipeError(
-    `refusing to start: the intents ledger is EMPTY, but this game is live - the keystore ` +
-      `holds ${facts.keystoreAgents} agent key(s) and the contracts are deployed on the ` +
-      `chain. That combination is only reachable by deleting the store volume on its own ` +
-      `(a fresh install has no keystore keys; a full reset has neither keys nor contracts).\n` +
+    `refusing to start: this store is EMPTY - no consumed intent id and no record of a ` +
+      `single wallet it spawned - but this game is live: the keystore holds ` +
+      `${facts.keystoreAgents} agent key(s) and the contracts are deployed on the chain. ` +
+      `That combination is only reachable by deleting the store volume on its own (a fresh ` +
+      `install has no keystore keys; a full reset has neither keys nor contracts; a restart ` +
+      `that kept its volumes still remembers its wallets).\n` +
       `\n` +
       `Those wallets still exist and still hold their balances, and ${LEDGER_RESET_NOTICE}. ` +
       `An intent id that has already paid can pay a second time.\n` +

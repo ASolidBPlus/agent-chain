@@ -216,6 +216,20 @@ export class Store {
     return this.db.query(`SELECT 1 FROM intents LIMIT 1`).get() === null;
   }
 
+  /// How many wallets this store remembers spawning. The second half of the
+  /// ledger-lifetime control's store fact: `intentsEmpty` is true for a wiped
+  /// store AND for a live game that has not transferred yet, and only this
+  /// tells them apart. See migrate.ts.
+  ///
+  /// `spawns` rather than `deployment`, `outbox` or `cursors`, and the reason
+  /// is ordering, not taste: index.ts records the deployment BEFORE it runs the
+  /// control, so a wiped store already has a deployment row by the time the
+  /// question is asked. A table the boot path writes cannot answer whether the
+  /// boot found anything. `spawns` is written only by a spawn request.
+  walletsRecorded(): number {
+    return (this.db.query(`SELECT COUNT(*) AS n FROM spawns`).get() as { n: number }).n;
+  }
+
   close(): void {
     this.db.close();
   }
