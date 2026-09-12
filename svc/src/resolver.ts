@@ -184,6 +184,22 @@ export class Resolver {
 /// and never from config - the standing §0 constraint. It is total:
 /// CANONICAL_ID admits exactly one colon, so a caller in none or several
 /// namespaces is inapplicable rather than unlikely.
+/// The own-namespace candidate for a bare `to`, or null when no such candidate
+/// can exist because `<namespace>:<to>` would not be a canonical id.
+///
+/// EXPORTED SO THE CALLER CAN CLASSIFY THE OUTCOME WITHOUT RE-DERIVING THE RULE.
+/// `chain.bare_id` distinguishes a fallback that was SKIPPED FOR SHAPE from one
+/// that was tried and MISSED, and both arrive at the same `unknown_name`. The
+/// caller therefore has to ask the same question this function answers - and
+/// asking it through this function rather than by repeating
+/// `isCanonicalAgentId(`${namespace}:${to}`)` means the two cannot disagree
+/// about which case they are in. A label that disagrees with the behaviour it
+/// describes is worse than no label.
+export function ownNamespaceCandidate(namespace: string, to: string): string | null {
+  const candidate = `${namespace}:${to}`;
+  return isCanonicalAgentId(candidate) ? candidate : null;
+}
+
 export async function resolveBareName(
   lookup: (name: string) => Promise<Resolved | null>,
   to: string,
@@ -203,7 +219,7 @@ export async function resolveBareName(
     // would not be a canonical id - a mixed-case bare name like `aIpha` can be
     // a registered alias and can never be a local id.
     const candidate = `${namespace}:${to}`;
-    const shaped = isCanonicalAgentId(candidate);
+    const shaped = ownNamespaceCandidate(namespace, to) !== null;
     const peer = shaped ? await lookup(candidate) : null;
 
     // AMBIGUOUS MEANS THEY DISAGREE, NOT MERELY THAT BOTH EXIST.

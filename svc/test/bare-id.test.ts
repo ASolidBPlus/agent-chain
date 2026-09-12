@@ -237,10 +237,10 @@ describe('the bare-id detector', () => {
     const events = store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id');
     expect(events).toHaveLength(1);
     const payload = JSON.parse(events[0]!.payload) as {
-      agentId: string; to: string; outcome: string; count: number;
+      agentId: string; bare: string; outcome: string; count: number;
     };
     expect(payload.agentId).toBe('arena:dana');
-    expect(payload.to).toBe('toby');
+    expect(payload.bare).toBe('toby');
     expect(payload.outcome).toBe('own_namespace');
     // The running total travels with the event, so the trend is visible without
     // querying the store at all.
@@ -265,12 +265,36 @@ describe('the bare-id detector', () => {
     store.close();
   });
 
-  it('delivers a bare MISS too, marked as unresolved', async () => {
+  // THE TWO MISSES ARE DIFFERENT FACTS AND THE EVENT NOW SAYS WHICH.
+  //
+  // Both reach `unknown_name`, and the first version of this detector reported
+  // both as `unresolved` - flattening, in the instrument built to replace a
+  // detector. `unknown` means the fallback was TRIED and nobody holds the name;
+  // `shape_skipped` means the bare form could never be a local id, so it was
+  // never tried at all. A facilitator reading the timeline could not tell a
+  // persona that mistyped a name from one that does not know ids are lowercase.
+  //
+  // Worse, under the refusal-code map `unknown_name` reaches the PERSONA with
+  // the both-attempts detail - so the distinction was disclosed to the party
+  // being socially engineered and withheld from the auditor watching. The
+  // attacker's view was strictly better than the facilitator's.
+  it('marks a tried-and-missed fallback as unknown', async () => {
     const { t, store } = detector({});
     await send(t, 'ghost', 'e2').catch(() => undefined);
     const events = store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id');
     expect(events).toHaveLength(1);
-    expect((JSON.parse(events[0]!.payload) as { outcome: string }).outcome).toBe('unresolved');
+    expect((JSON.parse(events[0]!.payload) as { outcome: string }).outcome).toBe('unknown');
+    store.close();
+  });
+
+  it('marks a fallback skipped for shape as shape_skipped, not unknown', async () => {
+    const { t, store } = detector({});
+    // Mixed case: `arena:aIpha` is not a canonical id, so the candidate is
+    // never constructed and the fallback is never attempted.
+    await send(t, 'aIpha', 'e2b').catch(() => undefined);
+    const events = store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id');
+    expect(events).toHaveLength(1);
+    expect((JSON.parse(events[0]!.payload) as { outcome: string }).outcome).toBe('shape_skipped');
     store.close();
   });
 
