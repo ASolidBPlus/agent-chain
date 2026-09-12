@@ -14,7 +14,7 @@ import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
 import type { Keystore } from './keystore.ts';
-import { resolveBareName } from './resolver.ts';
+import { resolveBareName, ownNamespaceCandidate } from './resolver.ts';
 import type { Resolver, WalletResolution } from './resolver.ts';
 import type { Store } from './store.ts';
 import { walletPrincipal, type Principal } from './auth.ts';
@@ -427,7 +427,19 @@ export class Treasury {
       } else if (err instanceof HttpError && err.code === 'unknown_name' && !name.includes(':')) {
         // A bare miss is the untaught form too - it is what `unknown_name` was
         // detecting before §5, and it must keep firing.
-        this.countAndSignalBareId(fromAgentId, name, 'unresolved');
+        //
+        // TWO WORLDS, NOT ONE. Both reach `unknown_name`, and they are different
+        // facts about the persona: `shape_skipped` means the bare form could
+        // never be a local id (a mixed-case `aIpha`), so the fallback was never
+        // tried; `unknown` means it was tried and nobody holds that name. The
+        // first says the persona typed something that cannot be an id at all;
+        // the second says it named a wallet that does not exist.
+        //
+        // Classified through `ownNamespaceCandidate` - the same function the
+        // resolver uses to decide - so the label cannot disagree with what
+        // actually happened.
+        const outcome = ownNamespaceCandidate(namespace, name) === null ? 'shape_skipped' : 'unknown';
+        this.countAndSignalBareId(fromAgentId, name, outcome);
       }
       throw err;
     }
@@ -448,14 +460,14 @@ export class Treasury {
   /// event so a facilitator sees the trend without querying anything.
   private countAndSignalBareId(
     agentId: string,
-    to: string,
-    outcome: 'own_namespace' | 'unresolved',
+    bare: string,
+    outcome: 'own_namespace' | 'shape_skipped' | 'unknown',
   ): void {
     this.store.countBareId(agentId);
     this.store.enqueueEvent('chain.bare_id', {
       kind: 'chain.bare_id',
       agentId,
-      to,
+      bare,
       outcome,
       count: this.store.bareIdCount(agentId),
     });
