@@ -251,8 +251,8 @@ describe('the facts the control is given', () => {
     const p = dbPath();
     const s = new Store(p);
     expect(s.walletsRecorded()).toBe(0);
-    s.markSpawned('orch:a', '0x1111111111111111111111111111111111111111');
-    s.markSpawned('orch:b', '0x2222222222222222222222222222222222222222');
+    s.markSpawned('orch:a', '0x1111111111111111111111111111111111111111', null);
+    s.markSpawned('orch:b', '0x2222222222222222222222222222222222222222', null);
     expect(s.walletsRecorded()).toBe(2);
     s.close();
 
