@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync } from 'node:fs';
-import { Wallet } from '../src/wallet.ts';
+import { Wallet, refusalFor } from '../src/wallet.ts';
 import type { WalletConfig } from '../src/config.ts';
 
 const TOKEN = 'wallet-token-that-must-never-leak';
@@ -235,6 +235,57 @@ describe('send', () => {
     const result = await wallet.send({ to: 'toby', vee: '1', intent_id: 'd4' });
     expect(result).toMatchObject({ ok: false, reason: 'ambiguous_name' });
     expect((result as { detail?: string }).detail).toContain('both');
+  });
+
+  // ── The closed refusal set ────────────────────────────────────────────────
+  //
+  // A persona-facing code carries chain-svc's own detail; a generic one carries
+  // NOTHING, and the real code goes to the facilitator instead. The generic
+  // mapping is only safe because of that second half - without the log it is
+  // opaque rather than protective, and contract drift becomes invisible.
+
+  it('passes a persona-facing code through WITH its detail', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    fake.reply = { status: 409, body: { error: 'over_max_per_tx', detail: 'max_per_tx is 100 VEE' } };
+    expect(await wallet.send({ to: 'alpha.vee', vee: '1', intent_id: 'r1' })).toMatchObject({
+      ok: false,
+      reason: 'over_max_per_tx',
+      detail: 'max_per_tx is 100 VEE',
+    });
+  });
+
+  // ⛔ THE CODE ITSELF IS A DETAIL. Handing back `not_your_wallet` undoes the
+  // disclosure decision with an argument that looks like helpfulness.
+  it('gives a generic code NO detail, not even the code', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    fake.reply = { status: 403, body: { error: 'not_your_wallet', detail: 'orch:someone-else' } };
+    const result = await wallet.send({ to: 'alpha.vee', vee: '1', intent_id: 'r2' });
+    expect(result).toEqual({ ok: false, reason: 'error' });
+    expect(JSON.stringify(result)).not.toContain('not_your_wallet');
+    expect(JSON.stringify(result)).not.toContain('orch:someone-else');
+  });
+
+  it('logs the real code for the facilitator when it maps to generic', () => {
+    const lines: string[] = [];
+    expect(refusalFor('internal_error', (m) => lines.push(m))).toBeNull();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('internal_error');
+  });
+
+  // Drift: the wire can carry a code this build does not declare. That is
+  // facilitator business, and it must not reach the persona as anything but
+  // generic.
+  it('treats an undeclared code as generic and names it as drift', () => {
+    const lines: string[] = [];
+    expect(refusalFor('a_code_from_the_future', (m) => lines.push(m))).toBeNull();
+    expect(lines[0]).toContain('a_code_from_the_future');
+    expect(lines[0]).toContain('drift');
+  });
+
+  it('does not log for a persona-facing code — the persona was told', () => {
+    const lines: string[] = [];
+    expect(refusalFor('unknown_name', (m) => lines.push(m))).toBe('unknown_name');
+    expect(lines).toHaveLength(0);
   });
 
   it('refuses when the policy file says frozen', async () => {

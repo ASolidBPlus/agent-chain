@@ -4,6 +4,12 @@
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
 import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
+// TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
+// erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
+// runs on node or bun with chain-svc absent (spec S5 - org-core imports this as
+// a library). What the import buys is the exhaustiveness: a code added to
+// chain-svc without a decision in REFUSAL_FOR fails typecheck here.
+import type { ErrorCode } from '../../svc/src/errors.ts';
 import { WalletStore } from './store.ts';
 
 export interface SendResult {
@@ -23,18 +29,112 @@ const RECONCILE_BUDGET_MS = 10_000;
 
 const RECONCILE_INTERVAL_MS = 250;
 
-/// chain-svc error code -> the reason a persona sees. Exported so a root test
-/// can check every key against the codes chain-svc actually emits: a typo or a
-/// retired code here degrades silently into `error`, which tells the model
-/// nothing and is indistinguishable from a genuine fault.
-export const REFUSAL_FOR: Record<string, Refusal> = {
+/// EVERY chain-svc ERROR CODE, DECIDED. Exhaustive over `ErrorCode` by type, so
+/// a code added to chain-svc without a decision here FAILS TYPECHECK rather
+/// than silently degrading to a generic error nobody notices.
+///
+/// `null` means GENERIC: the persona sees `reason: "error"` with no detail, and
+/// wallet-mcp logs the real code for the facilitator. That logging is what makes
+/// generic safe rather than merely opaque - contract drift stays visible to
+/// someone, just not to the persona.
+///
+/// THE MEMBERSHIP TEST, so the next person can apply it rather than copy it: a
+/// code is persona-facing when it is a fact about the persona's OWN wallet,
+/// policy or input, or about the PUBLIC registry - things it can already learn
+/// by `wallet_balance` / `wallet_resolve` or by probing, so telling it changes
+/// nothing an attacker could do. The caps are the bound, and knowing the bound
+/// is not a bypass. Everything else is generic.
+///
+/// ⚠ AND A NOTE FOR WHOEVER EXTENDS THIS: an UNKNOWN KEY here means "that is
+/// not a chain-svc error code", NEVER "that reason is not persona-facing".
+/// `duplicate_intent` is a real `Refusal` that wallet-mcp raises ITSELF - it has
+/// no `ErrorCode` preimage because chain-svc answers a duplicate with the
+/// ORIGINAL txHash as a success, while this side refuses a repeat under the same
+/// id with a DIFFERENT `to` or `vee`. Reading a key rejection as "drop the
+/// reason" would delete a refusal the tool description promises.
+export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
+  // ── Persona-facing: the persona's own wallet, policy or input, or the
+  //    public registry. All four policy codes are wallet-mcp's FAST-PATH
+  //    COPIES of checks whose authority is chain-svc, so the persona learns
+  //    the fast path's answer rather than the boundary's - and it could
+  //    provoke exactly that by calling and reading the refusal.
   over_max_per_tx: 'over_max_per_tx',
   over_stage_cap: 'over_stage_cap',
   counterparty_denied: 'counterparty_denied',
+  wallet_frozen: 'frozen',
   unknown_name: 'unknown_name',
   ambiguous_name: 'ambiguous_name',
-  wallet_frozen: 'frozen',
+  // The send MAY have happened. The model must be able to tell this apart from
+  // every refusal that means nothing moved, or it will retry a live payment.
+  intent_unresolved: 'intent_unresolved',
+  // Facts about the string the persona just typed.
+  invalid_name: 'invalid_name',
+  invalid_amount: 'invalid_amount',
+
+  // ── Generic: `reason: "error"`, no detail, real code logged for the
+  //    facilitator.
+  //
+  // The auth family can only arise from wallet-mcp misuse or config drift and
+  // never from persona input, so a persona learns nothing it can act on and an
+  // attacker driving one learns nothing about the money layer.
+  unauthorized: null,
+  principal_mismatch: null,
+  wrong_scope: null,
+  not_your_wallet: null,
+  // An existence oracle about intents that are not this wallet's.
+  unknown_intent: null,
+  // The agent id is derived from the credential, never from persona input, so a
+  // persona cannot cause this and learns nothing from it.
+  invalid_agent_id: null,
+  invalid_request: null,
+  // Infrastructure: tells a persona only "it did not happen", which the generic
+  // reason already says.
+  chain_error: null,
+  chain_unreachable: null,
+  // GENERIC, AND NOT BECAUSE NO ROUTE RAISES IT TODAY. About the persona's OWN
+  // wallet it is unreachable for a live persona: a wallet token is minted at
+  // spawn beside `markSpawned`, so holding a valid token entails having a
+  // spawns row - and if it ever does arise, the store has lost the row, which
+  // is a custody fact and facilitator business, the same class as the keystore
+  // integrity errors below. About ANY OTHER wallet it is a standing existence
+  // oracle. Neither reading is persona-facing, so this does not depend on the
+  // current routing and a new wallet-scope path does not reopen it.
+  wallet_not_found: null,
+  // Keystore integrity: "could not be decrypted", "address does not match its
+  // private key". A persona learning any of these learns about the custody of
+  // keys it must never learn about, and can act on none of it.
+  internal_error: null,
 };
+/// The reason a persona sees for a chain-svc error code, or null for generic.
+///
+/// TAKES A WIRE STRING, NOT AN `ErrorCode`. The map is exhaustive over the codes
+/// chain-svc DECLARES; the wire can carry anything - a newer chain-svc, a proxy,
+/// a typo. An undeclared code is contract drift, which is FACILITATOR business
+/// rather than persona business, so it takes the generic path and is logged by
+/// name like every other generic mapping.
+///
+/// The log line is what makes generic safe rather than merely opaque: the
+/// persona is told nothing, and someone is told everything.
+export function refusalFor(
+  code: string,
+  warn: (message: string) => void = console.error,
+): Refusal | null {
+  const known = Object.prototype.hasOwnProperty.call(REFUSAL_FOR, code);
+  if (!known) {
+    warn(
+      `[wallet-mcp] chain-svc returned an error code this build does not know: ${code}. ` +
+        `Reported to the model as a generic error. This is contract drift between ` +
+        `chain-svc and wallet-mcp, not a persona problem.`,
+    );
+    return null;
+  }
+  const mapped = REFUSAL_FOR[code as ErrorCode];
+  if (mapped === null) {
+    warn(`[wallet-mcp] chain-svc error ${code} reported to the model as a generic error.`);
+  }
+  return mapped;
+}
+
 
 export class Wallet {
   private readonly client: ChainSvcClient;
@@ -150,10 +250,25 @@ export class Wallet {
   ): Promise<
     | { address: string; canonical: string | null; resolvedVia?: string }
     | { error: string; detail?: string }
+    | { unreachable: string }
   > {
     const res = await this.client.resolve(name);
     const down = Wallet.unreachable(res);
-    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'unknown_name') };
+    // A TRANSPORT FAILURE IS NOT AN ERROR CODE, and it used to arrive in the
+    // same `error` field - one field carrying two kinds of thing, so a caller
+    // could not tell chain-svc's `not_your_wallet` from wallet-mcp's own
+    // "chain-svc is unreachable (ConnectionRefused)". It is now its own shape.
+    //
+    // The distinction is load-bearing rather than tidy: a chain-svc CODE may be
+    // withheld from the persona, while an outage MUST reach it - a persona told
+    // a generic "error" during an outage cannot tell "my send was refused" from
+    // "the service is down", and a student debugging the game is sent looking
+    // for a registration bug that does not exist. That is the flattening the
+    // note above forbids; collapsing them into one field made it possible to
+    // reintroduce by accident, which is exactly what happened.
+    if (down || res.outcome !== 'response') {
+      return { unreachable: this.redact(down ?? 'chain-svc did not answer') };
+    }
     const body = res.body as {
       address?: string; canonical?: string | null; error?: string; detail?: string; resolvedVia?: string;
     } | null;
@@ -240,6 +355,13 @@ export class Wallet {
     // address and never an id scraped from a message tag. A bare local id is
     // not registered, so it lands here as unknown_name.
     const resolved = await this.resolve(to);
+    // AN OUTAGE REACHES THE PERSONA IN FULL, and before any code mapping can
+    // reach it. It is a fact about the world rather than about another wallet,
+    // and it is the one thing a persona can actually act on - told a bare
+    // "error" during an outage, it cannot tell "my send was refused" from "the
+    // service is down", which is the flattening this file forbids.
+    if ('unreachable' in resolved) return this.fail('error', resolved.unreachable);
+
     if ('error' in resolved) {
       // DO NOT FLATTEN. This used to map every resolve failure to
       // `unknown_name`, so a chain-svc outage reached the persona as "that name
@@ -262,10 +384,25 @@ export class Wallet {
       // one fact, and the two would drift the first time either side reworded
       // it. chain-svc already says exactly what it tried; this passes it
       // through and adds nothing.
-      if (resolved.error === 'unknown_name' || resolved.error === 'ambiguous_name') {
-        return this.fail(REFUSAL_FOR[resolved.error]!, resolved.detail ?? resolved.error);
-      }
-      return this.fail('error', resolved.error);
+      // ONE DECISION POINT, shared with the send path below. This used to
+      // hand-roll its own two-code allowlist and then fall through to
+      // `this.fail('error', resolved.error)` - which leaked the real code to
+      // the persona exactly as the send path did, and was NOT caught when the
+      // map became `Record<ErrorCode, …>`, because this branch never indexed
+      // the map. The type change flagged every site that LOOKED UP a code and
+      // none that merely PASSED ONE ALONG.
+      //
+      // Routing both paths through `refusalFor` removes the class rather than
+      // the instance: a code's disclosure is decided in one place, and a second
+      // site cannot disagree with the first about which codes are safe.
+      const mapped = refusalFor(resolved.error);
+      // The detail is chain-svc's own prose - since §5 a bare `to` has TWO
+      // readings, and the refusal has to name both or a persona reads "no
+      // wallet is registered as toby" while `arena:toby` exists and concludes
+      // the registry is broken. Reconstructing that sentence here would be a
+      // second authority for one fact. It is passed through, never invented,
+      // and NEVER replaced by the code itself.
+      return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
     }
 
     const local = checkLocally(readPolicy(this.config.policyFile), to, vee);
@@ -311,8 +448,24 @@ export class Wallet {
       return await this.reconcile(intentId, to, vee);
     }
 
-    const mapped = body?.error ? REFUSAL_FOR[body.error] : undefined;
-    return mapped ? this.fail(mapped, body?.detail) : this.fail('error', body?.error ?? `chain-svc returned ${res.status}`);
+    // The DETAIL travels with a persona-facing reason and NEVER with a generic
+    // one: `detail` is chain-svc's own prose about what it tried, which is the
+    // half a persona needs when the refusal is about its own input, and the
+    // half that would leak when the refusal is about anything else.
+    const mapped = body?.error ? refusalFor(body.error) : null;
+    if (mapped) {
+      // The DETAIL travels with a persona-facing reason: it is chain-svc's own
+      // prose about what it tried, and it is the half a persona needs when the
+      // refusal is about its own wallet, policy or input.
+      return this.fail(mapped, body?.detail);
+    }
+    // ⛔ NO DETAIL ON THE GENERIC PATH, and the code itself is a detail.
+    // Passing `body.error` here would hand the persona the exact string the
+    // generic mapping exists to withhold - `not_your_wallet`, `unknown_intent`,
+    // `internal_error` - which is the whole disclosure decision undone by an
+    // argument that looks like helpfulness. `refusalFor` has already logged the
+    // real code for the facilitator; that is where it goes.
+    return this.fail('error');
   }
 
   /// Polls GET /intents/:intentId until the reservation resolves or the budget
