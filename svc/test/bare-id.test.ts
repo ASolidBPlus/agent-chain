@@ -183,7 +183,7 @@ function detector(entries: Record<string, string | null>) {
     }),
   );
   const store = new Store(':memory:');
-  store.markSpawned('arena:dana', addr('9'));
+  store.markSpawned('arena:dana', addr('9'), null);
   const lookup = registry(entries);
   const t = new Treasury(
     { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json') } as Config,

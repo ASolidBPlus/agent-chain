@@ -40,6 +40,7 @@ export type Reservation =
 
 import { migrate } from './migrate.ts';
 import type { DeploymentIdentity } from './deployment.ts';
+import type { WalletKind } from './policy.ts';
 
 export interface OutboundEvent {
   id: number;
@@ -72,6 +73,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS spawns (
         agent_id   TEXT PRIMARY KEY,
         address    TEXT NOT NULL,
+        -- The kind ENFORCED at spawn (the post-parseKind value), or NULL for a
+        -- wallet spawned before this column existed. Nothing can reconstruct it
+        -- afterwards: org and agent take the identical registration branch, and
+        -- caps are a patch over tunable defaults. See migrate.ts for why NULL
+        -- must stay NULL.
+        kind       TEXT,
         -- §5's bare-id detector. Counts, never accumulates: a log of every bare
         -- send would be keyed on caller behaviour and grow forever, and the
         -- 09:41 rule forbids exactly that. A counter bounded by this table has
@@ -276,10 +283,39 @@ export class Store {
   // and funding the wallet, a retry that trusted the key file would return a
   // wallet with no money and no name, reporting success.
 
-  markSpawned(agentId: string, address: string): void {
+  /// `kind` is REQUIRED rather than optional, and `null` is a legitimate value.
+  ///
+  /// Optional would leave a silent forget-path: a future caller that omitted it
+  /// would write NULL, which reads as "spawned before the column existed" - a
+  /// false statement about when, produced by an oversight. Required forces every
+  /// site to say what it means, and a fixture passing `null` is stating
+  /// truthfully that it recorded no kind.
+  markSpawned(agentId: string, address: string, kind: WalletKind | null): void {
     this.db
-      .query(`INSERT INTO spawns (agent_id, address, created_at) VALUES (?, ?, ?) ON CONFLICT(agent_id) DO NOTHING`)
-      .run(agentId, address, Date.now());
+      .query(
+        `INSERT INTO spawns (agent_id, address, kind, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT(agent_id) DO NOTHING`,
+      )
+      .run(agentId, address, kind, Date.now());
+  }
+
+  /// The wallet row, for the platform-scope read. Null when nothing was ever
+  /// spawned under that id.
+  ///
+  /// `kind` is `WalletKind | null` and the null is NOT filled in here or
+  /// anywhere downstream - a consumer seeing null learns that this wallet
+  /// predates the column, which is a different fact from any kind it might
+  /// plausibly have been.
+  walletRow(agentId: string): { address: string; kind: WalletKind | null; bareIdCount: number } | null {
+    const row = this.db
+      .query(`SELECT address, kind, bare_id_count FROM spawns WHERE agent_id = ?`)
+      .get(agentId) as { address: string; kind: string | null; bare_id_count: number } | null;
+    if (!row) return null;
+    return {
+      address: row.address,
+      kind: row.kind === null ? null : (row.kind as WalletKind),
+      bareIdCount: row.bare_id_count,
+    };
   }
 
   spawnedAddress(agentId: string): string | null {

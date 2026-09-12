@@ -136,6 +136,47 @@ describe('credential scopes', () => {
   });
 });
 
+describe('GET /wallets/:agentId', () => {
+  // PLATFORM SCOPE, deliberately not 'any'. The row carries the bare-id
+  // counter, which is a facilitator's measurement OF the persona - a wallet
+  // reading its own detector score is the observed party reading the
+  // observer's notes.
+  it('refuses a wallet-scope caller', async () => {
+    const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:a')}`, {
+      headers: { authorization: `Bearer ${WALLET_TOKEN}` },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('returns the row a write path produced and nothing could read', async () => {
+    store.markSpawned('orch:rowtest', WALLET, 'burner');
+    const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:rowtest')}`, { headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      agentId: 'orch:rowtest',
+      address: WALLET,
+      canonical: 'alpha:darknetclient',
+      kind: 'burner',
+      frozen: false,
+      bareIdCount: 0,
+    });
+  });
+
+  // NULL TRAVELS AS NULL to the consumer. Filling it in downstream would undo
+  // the column's only purpose just as surely as backfilling the table would.
+  it('carries an unrecorded kind through as null', async () => {
+    store.markSpawned('orch:oldrow', WALLET, null);
+    const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:oldrow')}`, { headers: auth });
+    expect((await res.json() as { kind: unknown }).kind).toBeNull();
+  });
+
+  it('404s a wallet that was never spawned', async () => {
+    const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:never')}`, { headers: auth });
+    expect(res.status).toBe(404);
+    expect((await body(res)).error).toBe('unknown_name');
+  });
+});
+
 describe('routing', () => {
   it('resolves a percent-encoded canonical id', async () => {
     const res = await fetch(`${base}/resolve/${encodeURIComponent('alpha.vee')}`, { headers: auth });

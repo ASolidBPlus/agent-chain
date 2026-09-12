@@ -187,6 +187,38 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
   return { intentId, status: 'reserved' };
 }
 
+/// The wallet row, platform scope (spec S4).
+///
+/// EVERY FIELD HERE IS PRODUCED BY A WRITE PATH AND WAS READABLE BY NONE.
+/// `kind` is recorded at spawn, `frozen` is set by retirement and cleared only
+/// by `PATCH /policy {frozen:false}`, and `bareIdCount` is incremented by the
+/// §5 detector - and until this endpoint the only way to see any of them was to
+/// open the sqlite file. The arena's Wallets panel synthesises this row today
+/// from several calls and cannot get the last two at all.
+///
+/// `kind` MAY BE NULL and is never inferred. Null means the wallet was spawned
+/// before chain-svc recorded kinds, which is a different fact from any kind it
+/// might plausibly have been - see the ALTER-site comment in migrate.ts for why
+/// filling it in would be a false record rather than a tidy-up.
+async function getWallet({ services, param }: RouteContext): Promise<unknown> {
+  const agentId = assertCanonicalAgentId(param);
+  const row = services.store.walletRow(agentId);
+  if (!row) throw new HttpError('unknown_name', `no wallet is registered as ${agentId}`);
+
+  // The registry, not the store, for the canonical: retirement clears aliases
+  // and a name can be re-registered, so the store's copy would age.
+  const canonical = await services.resolver.reverseOf(row.address as `0x${string}`);
+
+  return {
+    agentId,
+    address: row.address,
+    canonical,
+    kind: row.kind,
+    frozen: services.store.isFrozen(agentId),
+    bareIdCount: row.bareIdCount,
+  };
+}
+
 async function getBalance({ services, param, principal }: RouteContext): Promise<unknown> {
   const name = assertLookupName(param);
   const found = await services.resolver.require(name);
@@ -278,6 +310,11 @@ export const ROUTES: Route[] = [
   { method: 'GET', path: '/reverse/', prefix: true, scope: 'any', handler: getReverse },
   // 'any' at the router, then self-only inside: the handler has to resolve the
   // name before it can know whose wallet it is.
+  // Platform scope, and deliberately not 'any': the row carries the bare-id
+  // counter, which is a facilitator's measurement OF the persona. A wallet
+  // reading its own detector score is the observed party reading the observer's
+  // notes.
+  { method: 'GET', path: '/wallets/', prefix: true, scope: 'platform', handler: getWallet },
   { method: 'GET', path: '/balance/', prefix: true, scope: 'any', handler: getBalance },
   { method: 'GET', path: '/history/', prefix: true, scope: 'any', handler: getHistory },
   { method: 'GET', path: '/intents/', prefix: true, scope: 'any', handler: getIntent },

@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export class SchemaError extends Error {
   constructor(
@@ -87,6 +87,40 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; dd
   // at zero rather than null - a null counter would have to be treated as
   // "unknown", and the detector's whole job is to be readable at a glance.
   { table: 'spawns', column: 'bare_id_count', ddl: 'INTEGER NOT NULL DEFAULT 0' },
+  // v4, §4: the wallet kind that was ENFORCED at spawn.
+  //
+  // ⛔ NULLABLE, NO DEFAULT, AND `null` MUST STAY `null`. DO NOT BACKFILL THESE
+  // FROM CAPS - not now, not as a tidy-up, not when the column looks
+  // half-finished. Three reasons, and all three have to be wrong before a
+  // backfill is safe:
+  //
+  //   1. STRUCTURAL. `org` and `agent` take the IDENTICAL branch in
+  //      `spawn.ts` (`if (kind !== 'burner')`), so the registry cannot
+  //      separate them by construction - no caller, no config, no exception.
+  //   2. CONFIGURATION-DEPENDENT. The caps route works only while
+  //      `policy-defaults.json` keeps two kinds' defaults distinct, and that
+  //      file is operator-tunable game balance. If the owner tunes `org` and
+  //      `agent` to coincide - a plausible balance decision, no code change -
+  //      the inference dies silently, everywhere at once, and no test fails.
+  //   3. COLLISION. Even while they differ, a supplied policy is a PATCH over
+  //      the kind defaults (`mergePolicy`), so an override can coincide with
+  //      another kind's default and the inference goes ACTIVELY WRONG rather
+  //      than absent - an org reading as an agent, permanently, in the one
+  //      column that exists to be believed.
+  //
+  // `parseKind` returns 'agent' for a missing value, so `NOT NULL DEFAULT
+  // 'agent'` would be NEARLY right - which is exactly what makes it dangerous.
+  // It would convert "we did not record this" into "this was an agent",
+  // indistinguishable from a measurement, for every row that predates the
+  // column. A consumer reading `null` learns the true thing: this wallet was
+  // spawned before chain-svc recorded kinds.
+  //
+  // The deferred detection work that wants this column can check whether the
+  // ambiguity is behind it with one query, per store, at USE rather than once:
+  //     SELECT COUNT(*) FROM spawns WHERE kind IS NULL;      -- zero => available
+  // Zero today does not stay zero: a store restored from an old backup
+  // reintroduces null rows.
+  { table: 'spawns', column: 'kind', ddl: 'TEXT' },
 
 ];
 

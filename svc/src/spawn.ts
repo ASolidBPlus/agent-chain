@@ -134,7 +134,11 @@ export class Spawner {
     // whose agent has no way to authenticate.
     const walletToken = this.issueWalletToken(agentId);
 
-    this.store.markSpawned(agentId, address);
+    // The EFFECTIVE kind - the post-parseKind value, what was actually enforced -
+    // because that is what answers the audit question. Whether the caller
+    // SPECIFIED it or fell through to the default is a hub-core call-site
+    // question, not a chain-svc record question, and is deliberately not stored.
+    this.store.markSpawned(agentId, address, kind);
     return { agentId, address, ...(alias ? { alias } : {}), walletToken };
   }
 
