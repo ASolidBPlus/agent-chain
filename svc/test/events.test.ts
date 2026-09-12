@@ -507,7 +507,7 @@ describe('the intent anomaly', () => {
   // that is the observed value, and comparing it to itself proves nothing.
   it('flags a FOREIGN sender on the very first emission', async () => {
     const store = new Store(':memory:');
-    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
       intentId: 'i-foreign', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
@@ -535,7 +535,7 @@ describe('the intent anomaly', () => {
     ['server' as const, 'not guessable'],
   ])('a foreign emission reports a %s-supplied id', async (idSource, phrase) => {
     const store = new Store(':memory:');
-    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
       intentId: `i-${idSource}`, topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n, idSource,
@@ -556,7 +556,7 @@ describe('the intent anomaly', () => {
   it('does NOT flag our own wallet as foreign', async () => {
     const store = new Store(':memory:');
     const WALLET = '0x000000000000000000000000000000000000bEEF';
-    store.markSpawned('orch:mark', WALLET);
+    store.markSpawned('orch:mark', WALLET, null);
     store.reserve({
       intentId: 'i-ours', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
@@ -575,7 +575,7 @@ describe('the intent anomaly', () => {
   // would flag every one of our own emissions as foreign.
   it('does not flag our own wallet when the casing differs', async () => {
     const store = new Store(':memory:');
-    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
       intentId: 'i-case', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
@@ -637,7 +637,7 @@ describe('sweepOnce', () => {
 
   function seeded(): { store: Store; tail: EventTail } {
     const store = new Store(':memory:');
-    store.markSpawned('orch:mark', WALLET);
+    store.markSpawned('orch:mark', WALLET, null);
     return { store, tail: new EventTail({ token: 'tok' } as Config, chainAt(5n, []), store) };
   }
 
@@ -911,7 +911,7 @@ describe('sweepOnce', () => {
 describe('start() schedules the sweep', () => {
   it('runs the sweep on its own cadence, and stop() ends it', async () => {
     const store = new Store(':memory:');
-    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF');
+    store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     const tail = new EventTail({ token: 'tok' } as Config, chainAt(1n, []), store);
 
     let swept = 0;

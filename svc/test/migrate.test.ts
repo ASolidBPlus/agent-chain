@@ -239,7 +239,7 @@ describe('the facts the control is given', () => {
   // fresh install WITHOUT the keystore conjunct.
   it('intentsEmpty stays true when other tables have rows', async () => {
     const s = new Store(dbPath());
-    await s.markSpawned('orch:a', '0x1111111111111111111111111111111111111111');
+    await s.markSpawned('orch:a', '0x1111111111111111111111111111111111111111', null);
     expect(s.intentsEmpty()).toBe(true);
     s.close();
   });

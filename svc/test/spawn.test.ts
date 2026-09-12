@@ -194,7 +194,7 @@ describe('POST /wallets validation', () => {
   it('returns the recorded wallet without touching the chain once spawned', async () => {
     const store = new Store(':memory:');
     const { spawner: s } = spawner(store);
-    store.markSpawned('orch:shadowbroker', '0x1111111111111111111111111111111111111111');
+    store.markSpawned('orch:shadowbroker', '0x1111111111111111111111111111111111111111', null);
 
     const result = await s.spawn({ agentId: 'orch:shadowbroker', fundVee: 250, kind: 'agent' });
     expect(result.address).toBe('0x1111111111111111111111111111111111111111');
@@ -966,7 +966,7 @@ describe('POST /wallets/:agentId/balance', () => {
 
   function treasuryAt(balance: bigint, frozen = false): { t: RecordingTreasury; store: Store } {
     const store = new Store(':memory:');
-    store.markSpawned('orch:a', WALLET);
+    store.markSpawned('orch:a', WALLET, null);
     if (frozen) store.freeze('orch:a');
     const t = new RecordingTreasury(
       { ...config, policyDir: '/tmp/none' } as Config,
@@ -1122,7 +1122,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
   function spawnerWith(canonicalOf: Record<string, string> = {}): { s: Spawner; store: Store; dir: string } {
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const store = new Store(':memory:');
-    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', null);
     const s = new Spawner(
       { ...config, policyDir: dir } as Config,
       exploding('chain') as Chain,
@@ -1236,4 +1236,64 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const { s } = spawnerWith();
     expect(await codeOf(() => s.patchPolicy('orch:nobody', { frozen: true }))).toBe('wallet_not_found');
   }, 20_000);
+});
+
+// ── The kind reaches the STORE ──────────────────────────────────────────────
+//
+// The column round-trips and the endpoint reads it - and neither shows that
+// SPAWN puts the real kind in. Measured: replacing `kind` with `null` at
+// `spawn.ts`'s markSpawned call left every other test in this package green,
+// which is the same defect as the bare-id counter that nothing read. A value
+// recorded by nobody and a value recorded wrongly are both invisible to tests
+// of the recorder.
+describe('spawn records the kind it enforced', () => {
+  const completing = (store: Store) => {
+    const address = '0x000000000000000000000000000000000000bEEF';
+    const chain = {
+      viemChain: {},
+      deployment: { VEEBux: '0x0', NameRegistry: '0x1' },
+      publicClient: {
+        getBalance: async () => 10n ** 18n,      // already endowed
+        readContract: async () => 10n ** 30n,    // already funded
+        waitForTransactionReceipt: async () => ({}),
+      },
+      walletClient: {
+        account: { address: '0x5' },
+        sendTransaction: async () => '0xdead',
+        writeContract: async () => '0xbeef',
+      },
+    } as unknown as Chain;
+    const keystore = { has: async () => true, load: async () => ({ address, privateKey: '0x00' }) } as unknown as Keystore;
+    const resolver = {
+      lookup: async (name: string) =>
+        name === 'treasury.vee'
+          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.vee' }
+          : { address, canonical: 'orch:kindwire' },
+      reverseOf: async () => 'orch:kindwire',
+      aliasesOf: async () => [],
+    } as unknown as Resolver;
+    return new Spawner(
+      { ...config, policyDir: mkdtempSync(join(tmpdir(), 'policies-')) } as Config,
+      chain, keystore, store, resolver, DEFAULTS,
+    );
+  };
+
+  // `org` rather than `agent`: `parseKind` defaults to 'agent', so asserting
+  // 'agent' would pass on a spawn that recorded nothing and let the default
+  // answer for it.
+  it('stores the kind the caller asked for, not the default', async () => {
+    const store = new Store(':memory:');
+    await completing(store).spawn({ agentId: 'orch:kindwire', kind: 'org' });
+    expect(store.walletRow('orch:kindwire')?.kind).toBe('org');
+    store.close();
+  });
+
+  // A burner takes the other registration branch, so this also pins that the
+  // record does not depend on names having been registered.
+  it('stores burner, which registers no names at all', async () => {
+    const store = new Store(':memory:');
+    await completing(store).spawn({ agentId: 'orch:kindburner', kind: 'burner' });
+    expect(store.walletRow('orch:kindburner')?.kind).toBe('burner');
+    store.close();
+  });
 });
