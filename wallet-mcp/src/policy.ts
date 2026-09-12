@@ -29,7 +29,14 @@ export type Refusal =
   // Not a policy refusal: the send may have happened. Kept in this union
   // because it is a reason the model sees, and the model must be able to tell
   // it apart from every refusal that means "nothing moved".
-  | 'intent_unresolved';
+  | 'intent_unresolved'
+  /// The caller's own input was malformed - a name that cannot be a name, an
+  /// amount that cannot be an amount. Persona-facing because it is a fact about
+  /// what the persona just typed: it can already learn it by trying again, and
+  /// telling it is the difference between a model that corrects itself and one
+  /// that retries the same bad string against an opaque "error".
+  | 'invalid_name'
+  | 'invalid_amount';
 
 export interface WalletPolicy {
   agentId: string;
