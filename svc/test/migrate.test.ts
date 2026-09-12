@@ -244,6 +244,32 @@ describe('the facts the control is given', () => {
     s.close();
   });
 
+  // THE FACT THAT SEPARATES A WIPE FROM A RESTART, and the one whose absence
+  // made `compose down && compose up` refuse to start. The reopen IS the
+  // scenario: same file, new process, no transfer ever made in this game.
+  it('walletsRecorded survives a restart that keeps the volume, while intents stays empty', () => {
+    const p = dbPath();
+    const s = new Store(p);
+    expect(s.walletsRecorded()).toBe(0);
+    s.markSpawned('orch:a', '0x1111111111111111111111111111111111111111');
+    s.markSpawned('orch:b', '0x2222222222222222222222222222222222222222');
+    expect(s.walletsRecorded()).toBe(2);
+    s.close();
+
+    const again = new Store(p);
+    expect(again.walletsRecorded()).toBe(2);
+    expect(again.intentsEmpty()).toBe(true); // the reason intents cannot answer this
+    again.close();
+  });
+
+  // A WIPED store is recreated EMPTY, not absent - so the zero has to come from
+  // a store that exists and has tables, which is the state being detected.
+  it('walletsRecorded is zero on a store that was recreated from nothing', () => {
+    const s = new Store(dbPath());
+    expect(s.walletsRecorded()).toBe(0);
+    s.close();
+  });
+
   it('agentCount counts key files, and is zero with no directory at all', async () => {
     const ks = new Keystore(join(dir, 'no-such-keystore'), 'secret-secret-secret-secret');
     expect(await ks.agentCount()).toBe(0);
@@ -279,8 +305,8 @@ describe('the facts the control is given', () => {
 // the control is permanently off - the shape that left #34's sweep dormant
 // through a merge.
 describe('gathering the facts', () => {
-  const deps = (over: Partial<{ empty: boolean; agents: number; code: string | undefined; ack: boolean }> = {}) => ({
-    store: { intentsEmpty: () => over.empty ?? true },
+  const deps = (over: Partial<{ empty: boolean; wallets: number; agents: number; code: string | undefined; ack: boolean }> = {}) => ({
+    store: { intentsEmpty: () => over.empty ?? true, walletsRecorded: () => over.wallets ?? 0 },
     keystore: { agentCount: async () => over.agents ?? 2 },
     getCode: async () => ('code' in over ? over.code : '0x6080'),
     acknowledged: over.ack ?? false,
@@ -288,9 +314,10 @@ describe('gathering the facts', () => {
 
   it('carries each fact from its own source', async () => {
     expect(await gatherLifetimeFacts(deps())).toEqual({
-      intentsEmpty: true, keystoreAgents: 2, contractsDeployed: true, acknowledged: false,
+      intentsEmpty: true, storeWallets: 0, keystoreAgents: 2, contractsDeployed: true, acknowledged: false,
     });
     expect((await gatherLifetimeFacts(deps({ empty: false }))).intentsEmpty).toBe(false);
+    expect((await gatherLifetimeFacts(deps({ wallets: 4 }))).storeWallets).toBe(4);
     expect((await gatherLifetimeFacts(deps({ agents: 7 }))).keystoreAgents).toBe(7);
     expect((await gatherLifetimeFacts(deps({ ack: true }))).acknowledged).toBe(true);
   });
@@ -422,7 +449,7 @@ describe('the ledger lifetime control', () => {
   // Empty store + keys in the keystore + contracts on the chain. Each conjunct
   // rules out one legitimate way to arrive at an empty store, which is why
   // this is a proof rather than a heuristic.
-  const wiped = { intentsEmpty: true, keystoreAgents: 3, contractsDeployed: true, acknowledged: false };
+  const wiped = { intentsEmpty: true, storeWallets: 0, keystoreAgents: 3, contractsDeployed: true, acknowledged: false };
 
   it('refuses a store wiped beneath a live game', () => {
     expect(() => assertLedgerLifetimeIntact(wiped)).toThrow(LedgerWipeError);
@@ -448,12 +475,30 @@ describe('the ledger lifetime control', () => {
     expect(() => assertLedgerLifetimeIntact({ ...wiped, contractsDeployed: false })).not.toThrow();
   });
 
-  // A LIVE GAME THAT HAS SIMPLY NOT SPENT YET is the case this must not break:
-  // it is distinguished by the store being present, not by the ledger being
-  // non-empty... so the control has to accept it via the OTHER conjuncts. Here
-  // it is caught, and that is correct and deliberate - see the note below.
   it('does not refuse once any intent has been consumed', () => {
     expect(() => assertLedgerLifetimeIntact({ ...wiped, intentsEmpty: false })).not.toThrow();
+  });
+
+  // A LIVE GAME THAT HAS SIMPLY NOT SPENT YET - the false positive that sent
+  // this back. `compose down` followed by `compose up` keeps every volume: the
+  // store returns with its spawns, its outbox and its wallet tokens, and an
+  // intents table that is empty because no transfer has happened YET. The old
+  // comment here said this case was caught deliberately and referred to a note
+  // below justifying it; there was no note below, and once the stack restarts
+  // routinely (#83) the refusal fires on an ordinary restart.
+  //
+  // It is distinguished by THE STORE BEING PRESENT, which is what this conjunct
+  // now reads - and nothing else changed, so each of the cases below still
+  // rules out one legitimate way to arrive at an empty store.
+  it('starts normally when the store still remembers the wallets it spawned', () => {
+    expect(() => assertLedgerLifetimeIntact({ ...wiped, storeWallets: 4 })).not.toThrow();
+  });
+
+  // The NULL MUTANT for the new conjunct: one wallet is enough to prove the
+  // store survived, and a `>= 1` that drifted to `> 1` would pass the case
+  // above and refuse a one-agent game.
+  it('one remembered wallet is already proof the store survived', () => {
+    expect(() => assertLedgerLifetimeIntact({ ...wiped, storeWallets: 1 })).not.toThrow();
   });
 
   // The legitimate reset stays ONE documented step.
