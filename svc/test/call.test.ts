@@ -218,6 +218,13 @@ class RecordingTreasury extends Treasury {
 /// is the use no amount assertion can see.
 const written: string[] = [];
 
+/// Every address the treasury READ from, in order, for the same reason one
+/// level over. `set-balance` reads a balance and then moves the difference, so
+/// the token is named TWICE on two different clients - and asserting only the
+/// write leaves "measure one, move another" invisible, which is precisely the
+/// failure the test's own comment describes.
+const readFrom: string[] = [];
+
 async function harness(
   entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR],
   opts: {
@@ -255,7 +262,8 @@ async function harness(
     viemChain: { id: 31337 },
     publicClient: {
       waitForTransactionReceipt: async () => ({ status: opts.reverted ? 'reverted' : 'success' }),
-      readContract: async () => {
+      readContract: async (a: { address?: string } = {}) => {
+        readFrom.push(String(a.address));
         if (opts.contractReverts) {
           throw new Error('The contract function "quote" reverted.\n\nError: UnknownPair()');
         }
@@ -304,6 +312,7 @@ async function harness(
   );
   t.estimateReverts = opts.estimateReverts === true;
   written.length = 0;
+  readFrom.length = 0;
   return { t, store };
 }
 
@@ -1184,6 +1193,13 @@ describe('fund and set-balance, per token', () => {
     const { t } = await harness();
     await t.setBalance('orch:a', { amount: '9', token: 'gold', intentId: 's-1' });
     expect(written).toEqual([GOLD]);
+    // THE OTHER HALF OF THE NAME. Asserting only the write left the mutant
+    // "read the DEFAULT token's balance, move the named one" alive against the
+    // whole suite - measured, 807 pass 0 fail - which is the exact defect the
+    // comment above says must not happen. A set is used rather than a list
+    // because the reply re-reads: the claim is that every read named GOLD, not
+    // how many there were.
+    expect([...new Set(readFrom)]).toEqual([GOLD]);
   });
 });
 

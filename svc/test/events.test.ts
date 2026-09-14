@@ -1422,6 +1422,13 @@ describe('generic decoding', () => {
 
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
 
+    // THE EMISSION WAS RECORDED, asserted before the absence. Zero anomalies is
+    // also what an emission that was ignored entirely produces, so on its own it
+    // says the detector stayed quiet and nothing about whether the intent was
+    // RESOLVED - the first half of this test's own name. Siblings do kill the
+    // "record nothing" mutant, so this closed no hole; it stops this test
+    // passing for a reason it does not claim.
+    expect(store.intentRecord('call-1')?.emissions).toBe(1);
     const anomalies = payloads(store).filter((p) => p.kind === 'chain.anomaly');
     expect(anomalies).toHaveLength(0);
     store.close();

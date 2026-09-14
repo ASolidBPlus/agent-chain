@@ -587,6 +587,10 @@ describe('the allow-list warning', () => {
     // the kind defaults do not, and this side cannot see those files.
     write(only({ ...CONVERT, kinds: ['burner'], amount: { arg: 2, token: 'play' } }));
     expect((await withDefaults()).snapshot().entries).toHaveLength(1);
+    // "warns BUT still loads" is two facts and only the load was asserted. The
+    // sibling above kills the drop-the-warning mutant, so this is a test saying
+    // what it means rather than a hole being closed.
+    expect(logged.join('\n')).toMatch(/burner's default allow list does not name "converter"/);
   });
 });
 
