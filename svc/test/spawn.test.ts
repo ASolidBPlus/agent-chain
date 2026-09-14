@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
+import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
@@ -366,6 +366,9 @@ describe('policy defaults', () => {
   // resolves no names, so it is DROPPED rather than kept as a literal
   // containing `{tld}` - which would read as a rule and match nothing.
   it('drops the TLD patterns when a deployment has no names module, and says so once', () => {
+    // The set is process-wide, so this test owns it rather than inheriting
+    // whatever another file left in it.
+    droppedPatternsLogged.clear();
     const lines: string[] = [];
     const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
 

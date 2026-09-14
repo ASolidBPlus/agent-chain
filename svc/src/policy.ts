@@ -80,7 +80,13 @@ export type PolicyDefaults = Record<WalletKind, AgentPolicy>;
 /// process is the signal; once ever would need a store row, and a config
 /// oddity does not earn one.
 const TLD_PATTERN = /\{tld\}/;
-const droppedPatternsLogged = new Set<string>();
+
+/// EXPORTED so a test can clear it, and that is not a leak of internals - it is
+/// the honest shape of "once per PROCESS". The property is about process state,
+/// so a test asserting it has to own that state; leaving the set private made
+/// the assertion depend on which other test file had already consumed the first
+/// occurrence, which is a test that passes alone and fails in a suite.
+export const droppedPatternsLogged = new Set<string>();
 
 function fillPatterns(
   patterns: string[],

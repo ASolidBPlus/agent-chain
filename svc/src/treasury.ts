@@ -77,8 +77,11 @@ export interface HistoryEntry {
 
 /// Deny entries already reported as unresolvable, so the line is printed once
 /// per distinct entry per process rather than once per send. Module-level
-/// because the lifetime is the PROCESS, not a Treasury instance.
-const skippedDenyEntriesLogged = new Set<string>();
+/// because the lifetime is the PROCESS, not a Treasury instance - and EXPORTED
+/// for the same reason `droppedPatternsLogged` is: a test asserting a
+/// once-per-process property has to own the process state, or it passes alone
+/// and fails beside another file that consumed the first occurrence.
+export const skippedDenyEntriesLogged = new Set<string>();
 
 export class Treasury {
   /// hub-core's stage, cached briefly (spec S5). Only consulted when
