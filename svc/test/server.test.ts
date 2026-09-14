@@ -454,6 +454,7 @@ describe('an intent is not an existence oracle', () => {
   beforeAll(() => {
     // A real reservation owned by a DIFFERENT wallet.
     store.reserve({
+      token: 'play',
       intentId: 'belongs-to-beta',
       agentId: 'beta:someoneelse',
       stage: store.currentStage(),
@@ -479,6 +480,7 @@ describe('an intent is not an existence oracle', () => {
 
   it('lets the owning wallet read its own', async () => {
     store.reserve({
+      token: 'play',
       intentId: 'mine-alpha',
       agentId: 'alpha:client',
       stage: store.currentStage(),

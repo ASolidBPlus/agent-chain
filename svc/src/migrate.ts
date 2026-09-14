@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export class SchemaError extends Error {
   constructor(
@@ -139,6 +139,20 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; dd
   { table: 'intents', column: 'call_contract', ddl: 'TEXT' },
   { table: 'intents', column: 'call_function', ddl: 'TEXT' },
   { table: 'intents', column: 'call_args_hash', ddl: 'TEXT' },
+
+  // v7, §2: WHICH TOKEN this intent moved.
+  //
+  // ADDITIVE AND BACKFILLED BY A NUMBERED STEP, which is the first pairing of
+  // the two mechanisms and worth naming. The column is additive because adding
+  // it needs no reshape; the BACKFILL is numbered because the value to fill it
+  // with is not a constant - it is the deployment's default token key, read
+  // from the deployment row at migration time - and an ADDITIVE_COLUMNS entry
+  // carries a static DDL literal that cannot express that.
+  //
+  // Nullable for the same reason as every other additive column: ALTER TABLE
+  // cannot add NOT NULL without a default, and a default here would be a
+  // token name invented for rows written before tokens were named.
+  { table: 'intents', column: 'token', ddl: 'TEXT' },
 ];
 
 /// Columns that arrived with a TABLE created after the first schema.
@@ -171,6 +185,12 @@ const NEW_TABLE_COLUMNS: ReadonlyArray<[string, string]> = [
   ['call_counts', 'contract'],
   ['call_counts', 'function'],
   ['call_counts', 'count'],
+  // v7: stage_spend's primary key gains `token`. Classified here rather than in
+  // ORIGINAL_COLUMNS because the column did not exist in the first schema, and
+  // not in ADDITIVE_COLUMNS because ALTER TABLE cannot add a PRIMARY KEY
+  // component - the numbered step recreates the table, so `createTables` makes
+  // it complete on a fresh store and the reconciliation never visits it.
+  ['stage_spend', 'token'],
 ];
 
 export function classifiedColumns(): Set<string> {
@@ -244,6 +264,59 @@ const NUMBERED: ReadonlyArray<{
         DROP TABLE deployment;
         ALTER TABLE deployment_v5 RENAME TO deployment;
         PRAGMA user_version = 5;
+      `);
+    },
+  },
+  {
+    to: 7,
+    // GUARDED ON THE SCHEMA, never the version. A fresh store is created by
+    // createTables() at the CURRENT shape and stamped 0 until the end of
+    // `migrate`, so `version < 7` would fire this against a stage_spend that
+    // already has the new key - which is how the v5 entry failed before it was
+    // written this way, with `no such column: veebux` on every fresh store.
+    applies: (db) => tableExists(db, 'stage_spend') && !columnsOf(db, 'stage_spend').has('token'),
+    up: (db) => {
+      // THE DEFAULT TOKEN IS READ, NEVER ASSUMED. It is the first token in
+      // manifest order, which is the same rule every other consumer uses - and
+      // it lives in the deployment row this store already carries.
+      const row = db
+        .query(`SELECT modules_json FROM deployment WHERE id = 1`)
+        .get() as { modules_json: string } | null;
+      const modules = row ? (JSON.parse(row.modules_json) as Array<Record<string, unknown>>) : [];
+      const defaultKey = modules.find((m) => m.kind === 'token')?.key as string | undefined;
+
+      if (defaultKey === undefined) {
+        // REFUSES BY NAME RATHER THAN WRITING NULL INTO A PRIMARY KEY. A null
+        // there produces rows no query naming a token can read back - a
+        // corruption that reports itself as "no spend recorded", which reads as
+        // a wallet with budget left. A store with spend to migrate and no
+        // deployment row is a store whose history cannot be interpreted, and
+        // that is an operator's decision, not this function's.
+        throw new SchemaError(
+          'store_schema_unmigratable',
+          `store schema v6 -> v7 needs the deployment's default token to say which token ` +
+            `the recorded spend was in, and this store has no deployment row to read it from. ` +
+            `A store that has never seen a deployment has nothing to migrate: start chain-svc ` +
+            `against its chain once, or restore a store from after its first boot. ` +
+            `DO NOT delete the store volume: ${LEDGER_RESET_NOTICE}`,
+        );
+      }
+
+      const key = JSON.stringify(defaultKey);
+      db.exec(`
+        CREATE TABLE stage_spend_v7 (
+          agent_id TEXT NOT NULL,
+          stage    TEXT NOT NULL,
+          token    TEXT NOT NULL,
+          spent    TEXT NOT NULL,
+          PRIMARY KEY (agent_id, stage, token)
+        );
+        INSERT INTO stage_spend_v7 (agent_id, stage, token, spent)
+          SELECT agent_id, stage, ${key}, spent FROM stage_spend;
+        DROP TABLE stage_spend;
+        ALTER TABLE stage_spend_v7 RENAME TO stage_spend;
+        UPDATE intents SET token = ${key} WHERE token IS NULL;
+        PRAGMA user_version = 7;
       `);
     },
   },

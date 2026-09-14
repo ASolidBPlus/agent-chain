@@ -72,6 +72,7 @@ describe('schema migration', () => {
 
     const s = new Store(dbPath());
     const r = s.reserve({
+      token: 'play',
       intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(),
       amount: 10n, capWei: 100n, topic: '0xdead',
     });
@@ -98,7 +99,7 @@ describe('schema migration', () => {
 
     const s = new Store(dbPath());
     const replay = s.reserve({
-      intentId: 'already-paid', agentId: 'orch:a', stage: 's1', amount: 5n, capWei: 100n,
+      intentId: 'already-paid', agentId: 'orch:a', stage: 's1', amount: 5n, capWei: 100n, token: 'play',
     });
     s.close();
 
@@ -173,7 +174,12 @@ describe('schema migration', () => {
       'function',
       'stage',
     ]);
-    expect(userVersion(dbPath())).toBe(6);
+    // SCHEMA_VERSION, not 6: this test is about the v5 -> v6 step landing, and
+    // a store that then runs the v7 step is stamped 7. Pinning the literal
+    // would make it a test about how many migrations exist rather than about
+    // whether this one applied - which is the same mistake the v4->v5 pair
+    // carried until the call increment.
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 
   it('leaves the three new columns NULL on rows that predate them', () => {
@@ -182,7 +188,7 @@ describe('schema migration', () => {
     // nullable with no default: a default would turn "this was not a call" and
     // "we did not record it" into the same answer.
     const s1 = new Store(dbPath());
-    s1.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null });
+    s1.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null, token: 'play' });
     s1.close();
 
     const db = new Database(dbPath());
@@ -296,7 +302,7 @@ describe('the facts the control is given', () => {
   it('intentsEmpty is true on a fresh store and false once an id is consumed', () => {
     const s = new Store(dbPath());
     expect(s.intentsEmpty()).toBe(true);
-    s.reserve({ intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(), amount: 1n, capWei: 10n });
+    s.reserve({ intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(), amount: 1n, capWei: 10n, token: 'play' });
     expect(s.intentsEmpty()).toBe(false);
     s.close();
   });
@@ -691,10 +697,10 @@ describe('the v4 -> v5 deployment reshape', () => {
 
     // A TRIPWIRE, deliberately a literal: it exists to fire when somebody
     // bumps SCHEMA_VERSION, so they come and check that this file's v4 and v5
-    // fixtures still describe the migration they think they do. Bumped to 6 by
-    // the call increment, which added three nullable columns and call_counts -
-    // both additive, so the v4 -> v5 reshape below is untouched.
-    expect(SCHEMA_VERSION).toBe(6);
+    // fixtures still describe the migration they think they do. Bumped to 7 by
+    // the multi-token increment, which rekeys stage_spend by token - a NUMBERED
+    // step, like the v4 -> v5 reshape below, which it leaves untouched.
+    expect(SCHEMA_VERSION).toBe(7);
     expect(() => new Store(dbPath())).toThrow(/newer/i);
   });
 
@@ -705,6 +711,136 @@ describe('the v4 -> v5 deployment reshape', () => {
     s.close();
 
     expect(recorded?.modules).toEqual([{ kind: 'token', key: 'play', address: '0xA' }]);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
+  });
+});
+
+// §2. v6 -> v7: caps become per token, so the two tables that record spending
+// have to say WHICH token.
+//
+// TWO MECHANISMS IN ONE STEP, and this is the first time they are paired:
+//
+//   stage_spend  its PRIMARY KEY gains `token`. ALTER TABLE cannot change a
+//                primary key, so this is a NUMBERED migration - recreate,
+//                copy, rename - which is what the numbered mechanism exists
+//                for and what ADDITIVE_COLUMNS cannot express.
+//   intents      gains a nullable `token`, which IS additive - its DDL is a
+//                static literal and cannot carry a dynamic default - and the
+//                SAME numbered step backfills it, because the value to fill it
+//                with is read from the deployment row at migration time.
+//
+// The guard is on the SCHEMA, never the version. A fresh store is created by
+// createTables() at the CURRENT shape and stamped 0 until the end, so a guard
+// of `version < 7` would fire this against a table that never had the old key -
+// which is exactly how increment 2's numbered migration failed, with
+// `no such column: veebux` on every fresh store.
+describe('the v6 -> v7 per-token rekey', () => {
+  /// A store as v6 left it: stage_spend keyed (agent_id, stage), intents with
+  /// no token column, and a deployment row naming the default token.
+  function v6Store(path: string, opts: { deployment?: boolean } = {}): void {
+    const s = new Store(path);
+    s.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    if (opts.deployment !== false) {
+      s.recordDeployment({
+        chainId: '31337',
+        modules: [
+          { kind: 'token', key: 'vee', address: '0xA' },
+          { kind: 'token', key: 'au', address: '0xB' },
+        ],
+      });
+    }
+    s.close();
+
+    const db = new Database(path);
+    db.exec('PRAGMA user_version = 6');
+    // Put the two tables back into their v6 shape.
+    db.exec(`
+      DROP TABLE stage_spend;
+      CREATE TABLE stage_spend (
+        agent_id TEXT NOT NULL,
+        stage    TEXT NOT NULL,
+        spent    TEXT NOT NULL,
+        PRIMARY KEY (agent_id, stage)
+      );
+      INSERT INTO stage_spend (agent_id, stage, spent) VALUES ('orch:a', 's1', '500');
+      ALTER TABLE intents DROP COLUMN token;
+    `);
+    db.exec(
+      `INSERT INTO intents (intent_id, agent_id, stage, amount, held_wei, created_at)
+       VALUES ('i-1', 'orch:a', 's1', '500', '500', 0)`,
+    );
+    db.close();
+  }
+
+  it('rekeys stage_spend and backfills BOTH tables with the default token', () => {
+    v6Store(dbPath());
+    const s = new Store(dbPath());
+    s.close();
+
+    const db = new Database(dbPath());
+    // The default token is the FIRST in manifest order, which is the same rule
+    // every other consumer uses - not a token chosen by this migration.
+    expect(db.query('SELECT token, spent FROM stage_spend').get()).toEqual({
+      token: 'vee',
+      spent: '500',
+    });
+    expect(db.query('SELECT token FROM intents').get()).toEqual({ token: 'vee' });
+    const key = db.query(`SELECT * FROM pragma_index_list('stage_spend')`).all();
+    db.close();
+
+    expect(userVersion(dbPath())).toBe(7);
+    expect(columns(dbPath(), 'stage_spend').sort()).toEqual(['agent_id', 'spent', 'stage', 'token']);
+    expect(key.length).toBeGreaterThan(0);
+  });
+
+  it('keys stage_spend by (agent_id, stage, token) afterwards', () => {
+    // THE POINT OF THE REKEY, asserted by writing rather than by reading the
+    // schema: two tokens in one stage for one wallet are two rows, and under
+    // the old key the second would have replaced the first.
+    v6Store(dbPath());
+    const s = new Store(dbPath());
+    s.close();
+
+    const db = new Database(dbPath());
+    db.exec(
+      `INSERT INTO stage_spend (agent_id, stage, token, spent) VALUES ('orch:a', 's1', 'au', '7')`,
+    );
+    const rows = db.query('SELECT token, spent FROM stage_spend ORDER BY token').all();
+    db.close();
+    expect(rows).toEqual([
+      { token: 'au', spent: '7' },
+      { token: 'vee', spent: '500' },
+    ]);
+  });
+
+  it('REFUSES BY NAME when there is no deployment row to read a default from', () => {
+    // NEVER NULL INTO A PRIMARY KEY. A store with no deployment row has no
+    // default token to backfill FROM, and writing null would produce rows that
+    // cannot be read back by any query that names a token - a corruption that
+    // reports itself as "no spend recorded", which reads as a wallet with
+    // budget left.
+    v6Store(dbPath(), { deployment: false });
+    expect(() => new Store(dbPath())).toThrow(/no deployment row/);
+  });
+
+  it('leaves a store that has already been rekeyed alone', () => {
+    // Idempotent or it is not a migration: every restart runs it, and a step
+    // that is not a no-op the second time corrupts on the first restart rather
+    // than on the first upgrade. The guard is on the SCHEMA, so the second boot
+    // sees the new key and does nothing.
+    v6Store(dbPath());
+    new Store(dbPath()).close();
+    const after = columns(dbPath(), 'stage_spend').sort();
+    new Store(dbPath()).close();
+    expect(columns(dbPath(), 'stage_spend').sort()).toEqual(after);
+    expect(userVersion(dbPath())).toBe(7);
+  });
+
+  it('does not run against a FRESH store, which never had the old key', () => {
+    // The failure increment 2 paid for: a numbered migration guarded on the
+    // VERSION fires against a fresh store created at the current shape, and
+    // dies reading a column that never existed.
+    expect(() => new Store(dbPath()).close()).not.toThrow();
     expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 });
