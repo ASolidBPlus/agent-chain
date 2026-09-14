@@ -26,7 +26,7 @@ operator's: mint, fund, spawn, freeze, rotate, set a balance, read anything.
 
 ## How the pieces fit
 
-Dashed boxes land with the next release; everything else is on `main` today.
+Dashed boxes land with the next release; everything else is on `main` today (v0.3.0).
 chain-svc reads the chain's logs back and posts every transfer, name change and
 anomaly to the operator's event sink (arrows omitted for legibility).
 
@@ -45,18 +45,20 @@ flowchart LR
   end
   M[manifest.json] --> D[chain-deploy] --> chain
   classDef next stroke-dasharray: 5 5
-  class M,T,X next
+  class X next
 ```
 
 A **manifest** names what a deployment has: token instances (name, symbol,
 initial supply), an optional name registry (with the suffix names end in), and
 further modules. `chain-svc` reads the result at boot and serves only what is
 deployed: money endpoints exist when a token does, name endpoints when the
-registry does, and `wallet-mcp` advertises only the tools that work. Today the
-tree carries one sample ERC-20 (`VEEBux`) and the registry; the generic `Token`
-named at deploy, the manifest, and module-gated endpoints are landing next, then
-a generic, allowlisted contract-call operation, and a `Converter` module that
-exchanges one token for another at operator-set rates.
+registry does, and `wallet-mcp` advertises only the tools that work. Every
+module deploys at a deterministic address (CREATE2, salted by its manifest key),
+so the same manifest yields the same addresses on any chain. Shipped: the
+generic `Token`, the manifest, module-gated endpoints, and the `Converter` that
+exchanges one token for another at operator-set rates (v0.3.0). Landing next:
+custom contracts from the manifest, then a generic, allowlisted contract-call
+operation.
 
 ## A payment, end to end
 
@@ -96,9 +98,9 @@ anomaly rather than suppressed.
 
 ## The contracts
 
-**Token** (`contracts/src/VEEBux.sol` today; a generic `Token` named at deploy
-lands with the next release, same interface plus a burn role). An OpenZeppelin
-ERC-20 with 18 decimals and role-based access:
+**Token** (`contracts/src/Token.sol`). One generic OpenZeppelin ERC-20, 18
+decimals, name and symbol given at deploy, so every token in a manifest is an
+instance of the same code at its own address. Role-based access:
 
 - `mint(to, amount)` — `MINTER_ROLE` only. The treasury holds it; nothing an
   agent can reach does. Total supply is whatever the operator has minted.
@@ -108,9 +110,10 @@ ERC-20 with 18 decimals and role-based access:
   contract records it and deliberately does **not** deduplicate: chain-svc
   refuses a second send under the same id before it is broadcast, and a second
   emission under one id, from anywhere, is therefore visible as an anomaly.
-- No pause, no blacklist, no burn from outside. Freezing a wallet is policy in
-  chain-svc, not a contract action. Next release adds `BURNER_ROLE` +
-  `burnFrom`, granted to nobody at deploy, for a converter between tokens.
+- `burnFrom(account, amount)` — `BURNER_ROLE` only, granted to nobody at deploy;
+  the deploy grants it to the Converter for each pair's source token.
+- No pause, no blacklist. Freezing a wallet is policy in chain-svc, not a
+  contract action.
 
 ```mermaid
 flowchart LR
@@ -118,9 +121,7 @@ flowchart LR
   T -- balances --> W1[Wallet A]
   W1 -- "transferWithIntent(to, amount, intentId)" --> W2[Wallet B]
   W1 -. "emits IntentTransfer" .-> L[(logs)]
-  CV[Converter] -. "burnFrom (BURNER_ROLE)" .-> T
-  classDef next stroke-dasharray: 5 5
-  class CV next
+  CV[Converter] -- "burnFrom (BURNER_ROLE)" --> T
 ```
 
 **NameRegistry** (`contracts/src/NameRegistry.sol`). Names are the addressing
@@ -148,7 +149,7 @@ flowchart LR
   W -- reverseOf --> N1
 ```
 
-**Converter** (next release). One per deployment, holding a table of pairs the
+**Converter** (`contracts/src/Converter.sol`). One per deployment, holding a table of pairs the
 operator creates: `pairs[source][target] = {rate, paused}`. `setPair` creates or
 re-rates a pair (a loop guard refuses any pair whose rate times the reverse
 pair's rate exceeds 1, so no round trip can print value; a ceiling stops a typo
@@ -166,8 +167,6 @@ flowchart LR
   CV -- "burnFrom (BURNER_ROLE)" --> TA[Token A]
   CV -- "mint (MINTER_ROLE)" --> TB[Token B]
   CV -. "emits Converted" .-> L[(logs)]
-  classDef next stroke-dasharray: 5 5
-  class CV next
 ```
 
 Both contracts are deployed by `chain-deploy` from the treasury key, which is
@@ -178,7 +177,8 @@ generated into `svc/src/abi.ts` and drift-checked in CI.
 
 ```
 contracts/          Foundry project: src/, script/Deploy.s.sol, test/, mutation/
-deployments/        local.json for THIS deployment (gitignored)
+deployments/        manifest.json (what to deploy) and local.json (what was), both
+                    for THIS deployment and gitignored; examples/ ships four manifests
 docker/             the Anvil image and verification scripts
 svc/                chain-svc (bun, HTTP on 127.0.0.1:7000)
 wallet-mcp/         the MCP server (bun, stdio)
@@ -190,7 +190,8 @@ compose.chain.yml   the `chain` profile
 ```
 git submodule update --init --recursive   # Foundry vendors forge-std and OpenZeppelin
 bun install
-docker compose -f compose.chain.yml --profile chain up
+cp deployments/examples/token-and-names.json deployments/manifest.json   # a manifest is required
+docker compose -f compose.chain.yml --profile chain up --build
 ```
 
 Compose reads three secrets from a `.env` in this directory (or from the
@@ -223,5 +224,6 @@ refusing to start against anything that is not a private chain.
 
 ## Status
 
-Pre-release. The sequence of work is: repo split (done) → modules and manifest →
-generic call op → second token and converter.
+Pre-release. Shipped: repo split (v0.1.1) → modules, manifest and the generic
+Token (v0.2.0) → the Converter (v0.3.0). Next: custom contracts from the
+manifest, the generic call op, then multi-token endpoints and per-token caps.
