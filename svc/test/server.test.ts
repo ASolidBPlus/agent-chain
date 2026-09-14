@@ -27,6 +27,15 @@ let base: string;
 const services = {
   config: { token: TOKEN },
   store,
+  // The module view the router and /health read. A vee-plus-names deployment,
+  // which is what every expectation in this file was written against.
+  chain: {
+    deployment: { chainId: 31337, treasury: '0xtreasury' },
+    modules: {
+      tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }],
+      names: { address: '0xreg', tld: 'vee' },
+    },
+  },
   resolver: {
     lookup: async (name: string) => (name === 'alpha.vee' ? { address: WALLET, canonical: 'alpha:client' } : null),
     require: async (name: string) => {
@@ -76,7 +85,10 @@ describe('authentication', () => {
   it('serves /health unauthenticated', async () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // The module list is part of /health so an operator can see what a
+    // deployment actually has without a credential. Sorted, so two deployments
+    // with the same modules compare equal whatever order the manifest used.
+    expect(await res.json()).toEqual({ ok: true, modules: ['names', 'token:vee'] });
   });
 
   it('compares tokens without leaking length through an exception', () => {

@@ -124,6 +124,7 @@ describe('the router-level scope guard, isolated from the handlers', () => {
     prefix: false,
     scope,
     handler: async () => ({}),
+    requires: [],
   });
 
   it('refuses a wallet credential on a platform-scoped route', () => {

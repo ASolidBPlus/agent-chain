@@ -102,9 +102,13 @@ export async function buildModules(
         );
       }
       tokens.push({ key: m.key as string, address: m.address, symbol: meta.symbol, decimals: meta.decimals });
-    } else {
+    } else if (m.kind === 'names') {
       names = { address: m.address, tld: m.tld as string };
     }
+    // No else: a kind this build does not know is refused by loadDeployment
+    // before it reaches here. It is NOT silently folded into `names`, which is
+    // what a two-way branch would have done to the next module kind added.
+
   }
 
   return { tokens, names };

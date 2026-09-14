@@ -119,6 +119,16 @@ export function loadDeployment(deploymentsDir: string): Deployment {
     if (typeof entry.address !== 'string') {
       throw new Error(`chain-svc: ${path} module "${label}" has no address`);
     }
+    // ONE BRANCH PER KIND, never `token` versus everything-else. The
+    // else-form was correct while there were exactly two kinds and became
+    // silently wrong the moment a third could exist: a module that is not a
+    // token was validated AS a names module, so it was rejected for having no
+    // tld, and a deployment carrying both tripped "more than one names module".
+    // Neither message would have named the real problem.
+    //
+    // An unknown kind cannot reach here - MODULES is checked above - so the
+    // default is unreachable today and is written anyway, because the next kind
+    // should fail loudly here rather than be mistaken for one of these.
     if (kind === 'token') {
       if (typeof entry.key !== 'string' || entry.key.length === 0) {
         throw new Error(`chain-svc: ${path} has a token module with no key`);
@@ -127,7 +137,7 @@ export function loadDeployment(deploymentsDir: string): Deployment {
         throw new Error(`chain-svc: ${path} has duplicate token key "${entry.key}"`);
       }
       keys.add(entry.key);
-    } else {
+    } else if (kind === 'names') {
       namesSeen++;
       if (namesSeen > 1) {
         throw new Error(`chain-svc: ${path} declares more than one names module`);
@@ -135,6 +145,8 @@ export function loadDeployment(deploymentsDir: string): Deployment {
       if (typeof entry.tld !== 'string' || entry.tld.length === 0) {
         throw new Error(`chain-svc: ${path} names module has no tld`);
       }
+    } else {
+      throw new Error(`chain-svc: ${path} module kind "${String(kind)}" has no validation rule`);
     }
     modules.push({
       kind,
