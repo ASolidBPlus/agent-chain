@@ -2,20 +2,44 @@ import { describe, it, expect } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkLocally, normaliseVee, veeToWei, matchesPattern, readPolicy, type WalletPolicy } from '../src/policy.ts';
+import {
+  capsRefusal,
+  checkLocally,
+  normaliseVee,
+  veeToWei,
+  matchesPattern,
+  readPolicy,
+  type WalletPolicy,
+} from '../src/policy.ts';
 import { WalletStore } from '../src/store.ts';
 import { REFUSAL_FOR } from '../src/wallet.ts';
 
-// `decimals` is now threaded from chain-svc's /modules (spec S5). These cases
-// exercise an 18-place token, so they pin decimals = 18 at the call rather than
-// repeating it fifteen times.
-const chk = (policy: WalletPolicy | null, to: string, vee: string) => checkLocally(policy, to, vee, 18);
+// The RESOLVED TOKEN is threaded in as one value (spec S3): key and decimals
+// are two facts about one token, and passing them apart is what lets an amount
+// be scaled by one token's precision and capped under another's name.
+//
+// Two tokens, and they disagree in every dimension the code filters on - key,
+// symbol, caps, decimals. A fixture whose tokens differ in only one of those
+// passes against a guard that reads the wrong one of the other three.
+const PLAY = { key: 'play', decimals: 18 };
+const GOLD = { key: 'au', decimals: 6 };
+
+// These cases exercise the 18-place token, so they pin it at the call rather
+// than repeating it fifteen times; the per-token cases below name their own.
+//
+// The REASON alone, because that is what these cases are about. `checkLocally`
+// returns `{reason, detail?}` since the capless path needs to say which token
+// it found no cap for, and the detail has its own cases further down.
+const chk = (policy: WalletPolicy | null, to: string, vee: string, token = PLAY) =>
+  checkLocally(policy, to, vee, token)?.reason ?? null;
 const wei = (vee: string) => veeToWei(vee, 18);
 
 const POLICY: WalletPolicy = {
   agentId: 'orch:vendor',
-  max_per_tx: 100,
-  max_per_stage: 500,
+  caps: {
+    play: { max_per_tx: 100, max_per_stage: 500 },
+    au: { max_per_tx: 5, max_per_stage: 20 },
+  },
   allow: ['*.play'],
   deny: ['treasury.play'],
   frozen: false,
@@ -62,12 +86,87 @@ describe('the local pre-check', () => {
   });
 });
 
+// §3. Every guard below reads the token it was GIVEN. The fixture's two tokens
+// disagree in key, symbol, caps and decimals, so a guard that reaches for the
+// default, for the first entry, or for the wrong precision produces a different
+// answer here rather than the same one.
+describe('caps are per token', () => {
+  it('applies the named token\'s cap, not the other one\'s', () => {
+    // 10 is under PLAY's cap of 100 and over GOLD's of 5. One amount, one
+    // policy, two answers - which is the whole point of the map.
+    expect(chk(POLICY, 'alpha.play', '10')).toBeNull();
+    expect(chk(POLICY, 'alpha.play', '10', GOLD)).toBe('over_max_per_tx');
+  });
+
+  it('scales the amount by the named token\'s decimals', () => {
+    // GOLD is six places. Scaled by eighteen, "5" would compare as 5e18 against
+    // a cap of 5e6 and refuse a send that is exactly at the cap; scaled by six,
+    // both sides are 5e6.
+    expect(chk(POLICY, 'alpha.play', '5', GOLD)).toBeNull();
+    expect(chk(POLICY, 'alpha.play', '5.000001', GOLD)).toBe('over_max_per_tx');
+    // And the fraction that only exists at eighteen places is below GOLD's
+    // resolution entirely, so it is not over the cap - it truncates to 5.
+    expect(chk(POLICY, 'alpha.play', '5.0000000001', GOLD)).toBeNull();
+  });
+
+  // FAIL CLOSED. Silence about a token is not permission: an absent cap read as
+  // "no limit" is the only reading of this that costs money.
+  it('refuses a token the policy says nothing about, and says which', () => {
+    const only = { ...POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } };
+    const refusal = checkLocally(only, 'alpha.play', '1', GOLD);
+    expect(refusal?.reason).toBe('over_max_per_tx');
+    expect(refusal?.detail).toContain('au');
+    // ...while the token it does cover is unaffected.
+    expect(chk(only, 'alpha.play', '1')).toBeNull();
+  });
+
+  // The map is chain-svc's, and chain-svc's bookkeeping stores KEYS. A policy
+  // keyed by the symbol caps nothing - which is why the fixture's symbol is not
+  // its key upper-cased: keyed by symbol, this test would pass by coincidence.
+  it('reads the map by key, never by symbol', () => {
+    const bySymbol = { ...POLICY, caps: { GOLD: { max_per_tx: 5, max_per_stage: 20 } } };
+    expect(chk(bySymbol, 'alpha.play', '1', GOLD)).toBe('over_max_per_tx');
+    expect(capsRefusal(bySymbol, 'au')?.detail).toContain('au');
+    expect(capsRefusal(bySymbol, 'GOLD')).toBeNull();
+  });
+
+  // `*` IS NOT A WILDCARD HERE, and that is the boundary's rule, not a gap.
+  // chain-svc's policy-defaults.json may write `caps: {"*": ...}`, but it
+  // EXPANDS that to one entry per deployed token at load - what reaches a
+  // wallet's policy file is always explicit keys. Its own `capsFor` does not
+  // read `*` either, so a reader that did would grant here what the boundary
+  // refuses: the local check would pass and /sign-transfer would reject, which
+  // reads to a persona as the platform being broken.
+  it('does not treat a literal "*" entry as covering every token', () => {
+    const wild = { ...POLICY, caps: { '*': { max_per_tx: 100, max_per_stage: 500 } } };
+    expect(chk(wild, 'alpha.play', '1')).toBe('over_max_per_tx');
+    expect(capsRefusal(wild, 'play')?.detail).toBe('no cap set for play');
+  });
+
+  // The NARROW function chain-svc's agreement test asserts against
+  // (svc/test/policy.test.ts). It is asserted here on its own, not only through
+  // checkLocally, because the agreement is about this one decision: a test that
+  // reached it through the five-branch check would be hostage to that check's
+  // internal ordering on both sides.
+  it('capsRefusal answers for one token at a time', () => {
+    expect(capsRefusal(POLICY, 'play')).toBeNull();
+    expect(capsRefusal(POLICY, 'au')).toBeNull();
+    expect(capsRefusal(POLICY, 'nope')).toEqual({
+      reason: 'over_max_per_tx',
+      detail: 'no cap set for nope',
+    });
+    // A half-written entry is not an entry: either bound missing is no cap.
+    const half = { ...POLICY, caps: { play: { max_per_stage: 500 } as never } };
+    expect(capsRefusal(half, 'play')?.reason).toBe('over_max_per_tx');
+  });
+});
+
 describe('reading the policy file', () => {
   it('reads a written policy and reports an unusable one as null', () => {
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const good = join(dir, 'good.json');
     writeFileSync(good, JSON.stringify(POLICY));
-    expect(readPolicy(good)?.max_per_tx).toBe(100);
+    expect(readPolicy(good)?.caps.play?.max_per_tx).toBe(100);
 
     const bad = join(dir, 'bad.json');
     writeFileSync(bad, '{not json');
@@ -122,10 +221,8 @@ describe('normaliseVee', () => {
     expect(wei('12.5')).toBe(12_500_000_000_000_000_000n);
     expect(wei('1')).toBe(10n ** 18n);
     // The comparison the cap actually makes, at a value a float would fumble.
-    expect(chk({ ...POLICY, max_per_tx: 100 }, 'alpha.play', '100')).toBeNull();
-    expect(chk({ ...POLICY, max_per_tx: 100 }, 'alpha.play', '100.000000000000000001')).toBe(
-      'over_max_per_tx',
-    );
+    expect(chk(POLICY, 'alpha.play', '100')).toBeNull();
+    expect(chk(POLICY, 'alpha.play', '100.000000000000000001')).toBe('over_max_per_tx');
   });
 });
 
@@ -136,15 +233,17 @@ describe('normaliseVee', () => {
 // boundary rather than closed, so nothing would visibly break until a cap
 // silently stopped being pre-checked.
 describe('reading the policy chain-svc actually writes', () => {
-  it('accepts STRING caps', () => {
+  it('accepts STRING caps, per token', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pol-'));
     const file = join(dir, 'policy.json');
     writeFileSync(
       file,
       JSON.stringify({
         agentId: 'orch:a',
-        max_per_tx: '25',
-        max_per_stage: '100',
+        caps: {
+          play: { max_per_tx: '25', max_per_stage: '100' },
+          au: { max_per_tx: '2', max_per_stage: '8' },
+        },
         allow: ['*.play'],
         deny: ['treasury.play'],
         frozen: false,
@@ -153,20 +252,53 @@ describe('reading the policy chain-svc actually writes', () => {
 
     const policy = readPolicy(file);
     expect(policy).not.toBeNull();
-    expect(policy!.max_per_tx).toBe('25');
+    expect(policy!.caps.play!.max_per_tx).toBe('25');
     // And the cap it read actually enforces, in wei rather than as a float.
     expect(chk(policy, 'bob.play', '26')).toBe('over_max_per_tx');
     expect(chk(policy, 'bob.play', '25')).toBeNull();
+    // The OTHER token's cap, at its own precision: 2 GOLD is six places, and
+    // scaling it by eighteen would put it four orders of magnitude over its cap.
+    expect(chk(policy, 'bob.play', '2', GOLD)).toBeNull();
+    expect(chk(policy, 'bob.play', '2.000001', GOLD)).toBe('over_max_per_tx');
   });
 
-  it('still accepts numeric caps, so an older file keeps working', () => {
+  it('still accepts numeric caps, so a hand-written file keeps working', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pol-'));
     const file = join(dir, 'policy.json');
     writeFileSync(
       file,
-      JSON.stringify({ agentId: 'orch:a', max_per_tx: 25, max_per_stage: 100, allow: ['*.play'], deny: [], frozen: false }),
+      JSON.stringify({
+        agentId: 'orch:a',
+        caps: { play: { max_per_tx: 25, max_per_stage: 100 } },
+        allow: ['*.play'],
+        deny: [],
+        frozen: false,
+      }),
     );
     expect(chk(readPolicy(file), 'bob.play', '26')).toBe('over_max_per_tx');
+  });
+
+  // The PRE-MULTI-TOKEN file, with flat caps and no `caps` map. It reads as
+  // null, which means DEFER TO chain-svc - not "frozen", and not "no limit".
+  // chain-svc owns the migration and rewrites the file; a second migration here
+  // would be the same rule written twice, and failing closed instead would
+  // freeze every wallet for the length of an ordinary upgrade.
+  it('defers on a file written before caps were per token', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pol-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        agentId: 'orch:a',
+        max_per_tx: 25,
+        max_per_stage: 100,
+        allow: ['*.play'],
+        deny: [],
+        frozen: false,
+      }),
+    );
+    expect(readPolicy(file)).toBeNull();
+    expect(chk(readPolicy(file), 'bob.play', '999999')).toBeNull();
   });
 });
 
