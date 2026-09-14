@@ -27,28 +27,22 @@ operator's: mint, fund, spawn, freeze, rotate, set a balance, read anything.
 ## How the pieces fit
 
 Dashed boxes land with the next release; everything else is on `main` today.
+chain-svc reads the chain's logs back and posts every transfer, name change and
+anomaly to the operator's event sink (arrows omitted for legibility).
 
 ```mermaid
-flowchart TB
-  subgraph callers[" "]
-    direction LR
-    A[Agent] -- stdio --> W[wallet-mcp]
-    U[Consumer app]
-    O[Operator]
-  end
-  S["chain-svc<br/>keys · policy · intents · events"]
+flowchart LR
+  A[Agent] -- stdio --> W[wallet-mcp]
   W -- wallet token --> S
-  U -- wallet token --> S
-  O -- platform token --> S
-  subgraph chain["Chain (Anvil, private, zero gas)"]
-    direction LR
+  U[Consumer app] -- wallet token --> S
+  O[Operator] -- platform token --> S
+  S["chain-svc<br/>keys · policy · intents · events"] -- signed, zero-fee txs --> chain
+  subgraph chain["Chain (Anvil, private)"]
+    direction TB
     T[Tokens]
     N[NameRegistry]
     X[Custom contracts]
   end
-  S -- signed, zero-fee txs --> chain
-  chain -- logs --> S
-  S -- events --> O
   M[manifest.json] --> D[chain-deploy] --> chain
   classDef next stroke-dasharray: 5 5
   class M,T,X next
