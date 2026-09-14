@@ -132,6 +132,19 @@ const DONATE: CallEntry = {
   abiFunction: abiFunction('donate'),
 };
 
+/// An entry whose address parameter has NO rule. Legal to load - the loader
+/// does not require rules, because an admin-only entry genuinely needs none -
+/// and uncallable by a wallet, which is the property under test.
+const UNRULED: CallEntry = {
+  contract: 'converter',
+  function: 'donate',
+  kinds: ['agent'],
+  admin: false,
+  read: false,
+  addressArgs: {},
+  abiFunction: abiFunction('donate'),
+};
+
 const QUOTE: CallEntry = {
   contract: 'converter',
   function: 'quote',
@@ -176,7 +189,15 @@ class RecordingTreasury extends Treasury {
 
 async function harness(
   entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR],
-  opts: { reverted?: boolean; store?: Store; keystoreThrows?: boolean } = {},
+  opts: {
+    reverted?: boolean;
+    store?: Store;
+    keystoreThrows?: boolean;
+    /// Makes the name argument resolve to the SAME address as the deny entry
+    /// `treasury.{tld}`, which is how a deny is evaded in the real world: the
+    /// policy names one string and the caller uses another for the same wallet.
+    nameIsDenied?: boolean;
+  } = {},
 ): Promise<{ t: RecordingTreasury; store: Store }> {
   const store = opts.store ?? new Store(':memory:');
   store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
@@ -213,7 +234,11 @@ async function harness(
       // one address would make the identity pass refuse every call - correctly,
       // and for a reason that has nothing to do with what is under test.
       lookup: async (n: string) =>
-        n === 'treasury.play' ? null : { address: BOB, canonical: 'orch:bob' },
+        n === 'treasury.play'
+          ? opts.nameIsDenied
+            ? { address: BOB, canonical: 'treasury.play' }
+            : null
+          : { address: BOB, canonical: 'orch:bob' },
     } as unknown as Resolver,
     DEFAULTS,
     fixedCallPolicy(entries),
@@ -339,6 +364,51 @@ describe('arguments', () => {
     });
     const decoded = decodeFunctionData({ abi: CONVERTER_ABI, data: t.signed[0]!.data });
     expect((decoded.args as unknown[])[0]).toBe(BOB);
+  });
+
+  it('applies the deny list by IDENTITY to a name argument', async () => {
+    // THE DENY LIST IS ABOUT WHOM A PERSONA MAY PAY, and paying through a
+    // contract call is still paying. A deny that applied to `send` and not to
+    // `call` would be a deny with a documented bypass - and the bypass would be
+    // the interesting half of the game.
+    //
+    // By IDENTITY, not by string: the deny entry names `treasury.play` and the
+    // caller writes `bob`. Only resolving both and comparing addresses catches
+    // that, which is the same pass sign-transfer already makes.
+    const { t } = await harness([DONATE], { nameIsDenied: true });
+    expect(
+      await codeOf(() =>
+        t.call(asWallet('orch:a'), {
+          contract: 'converter',
+          function: 'donate',
+          args: [{ name: 'bob' }],
+          intentId: 'deny-1',
+        }),
+      ),
+    ).toBe('counterparty_denied');
+    expect(t.signed).toHaveLength(0);
+  });
+
+  it('refuses an address parameter that has no rule, for wallet scope', async () => {
+    // NOT DEFAULTED TO `any`. A default would open every address parameter of
+    // every future contract the moment it was added to the allowlist - the
+    // author writes one entry and gets a permission they did not write. The
+    // refusal says which argument and why, so the fix is to add the rule.
+    const { t } = await harness([UNRULED]);
+    let err: HttpError | undefined;
+    try {
+      await t.call(asWallet('orch:a'), {
+        contract: 'converter',
+        function: 'donate',
+        args: [{ name: 'bob' }],
+        intentId: 'u-1',
+      });
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('bad_args');
+    expect(err?.detail).toMatch(/argument 0 \(to\).*no addressArgs rule/);
+    expect(t.signed).toHaveLength(0);
   });
 
   it('refuses an argument count that does not match the abi minus the intent slot', async () => {
