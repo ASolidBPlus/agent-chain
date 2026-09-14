@@ -134,7 +134,8 @@ const CONVERT: CallEntry = {
   admin: false,
   read: false,
   amount: { arg: 2, token: { arg: 0 } },
-  perTxCap: '100',
+  // No `perTxCap`: retired. The bound for whichever token the {arg} form
+  // resolves to lives on the WALLET, per token.
   intentArg: 3,
   maxPerStage: 2,
   addressArgs: { 0: 'token', 1: 'token' },
@@ -527,9 +528,12 @@ describe('money', () => {
     expect(err?.detail).toBe('max_per_tx is 100 PLAY');
   });
 
-  it('applies the entry cap when the amount is in another token', async () => {
-    // gold -> play: the amount is in gold, which no wallet cap is denominated
-    // in. perTxCap is the only bound, and it is parsed in gold's own decimals.
+  it('applies THE WALLET\'S cap for the token that moved, not the default one', async () => {
+    // gold -> play: the amount is in GOLD, and the bound is the wallet's own
+    // GOLD cap. Before per-token caps this was the allowlist entry's
+    // `perTxCap`, because the wallet carried no bound for any currency but the
+    // default - which is the gap that field existed to paper over, and why it
+    // is retired rather than kept beside the real thing.
     const { t } = await harness();
     let err: HttpError | undefined;
     try {
@@ -538,20 +542,36 @@ describe('money', () => {
       err = e as HttpError;
     }
     expect(err?.code).toBe('over_max_per_tx');
-    // The ENTRY's cap, named as such and denominated in the token that moved.
-    expect(err?.detail).toBe("this call's per-transaction cap is 100 GOLD");
+    // GOLD's symbol, because a refusal naming PLAY would send a persona to look
+    // at the wrong balance.
+    expect(err?.detail).toMatch(/GOLD/);
     await expect(
       t.call(asWallet('orch:a'), convertBody({ args: [{ token: 'gold' }, { token: 'play' }, '99'] })),
     ).resolves.toBeDefined();
   });
 
-  it('takes a stage hold only for the default token', async () => {
+  it('takes a stage hold in WHICHEVER token moved, and leaves the others alone', async () => {
+    // THE RULE INVERTED BY PER-TOKEN CAPS. This used to take a hold only for
+    // the DEFAULT token, because that was the only currency a wallet had a
+    // per-stage bound for - which meant every other currency had an UNBOUNDED
+    // stage, and the allowlist entry's `perTxCap` was the paper over it.
+    //
+    // Now `stage_spend` is keyed by token and the wallet carries a bound for
+    // each, so a gold call takes a GOLD hold against a GOLD cap and the play
+    // budget is untouched. Both halves asserted: a hold that was taken, and a
+    // budget that was not.
     const { t, store } = await harness();
+    const stage = store.currentStage();
+
     await t.call(asWallet('orch:a'), convertBody({ args: [{ token: 'gold' }, { token: 'play' }, '5'] }));
-    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
+    expect(store.spentThisStage('orch:a', stage, 'gold')).toBe(5_000000n); // 6 dp
+    expect(store.spentThisStage('orch:a', stage, 'play')).toBe(0n);
 
     await t.call(asWallet('orch:a'), convertBody({ intentId: 'i-2', args: [{ token: 'play' }, { token: 'gold' }, '5'] }));
-    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(5000000000000000000n);
+    expect(store.spentThisStage('orch:a', stage, 'play')).toBe(5_000000000000000000n); // 18 dp
+    // AND THE GOLD HOLD IS STILL EXACTLY WHAT IT WAS: a second call in another
+    // currency must not disturb the first's budget.
+    expect(store.spentThisStage('orch:a', stage, 'gold')).toBe(5_000000n);
   });
 
   it('names the allow list when a contract is not an allowed counterparty', async () => {

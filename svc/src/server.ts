@@ -469,7 +469,6 @@ async function getCalls({ services, principal }: RouteContext): Promise<unknown>
         },
       ),
       ...(e.maxPerStage !== undefined ? { maxPerStage: e.maxPerStage } : {}),
-      ...(e.perTxCap !== undefined ? { perTxCap: e.perTxCap } : {}),
     })),
   };
 }

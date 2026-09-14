@@ -1203,8 +1203,17 @@ export class Treasury {
     const amount = parseVee(wireArgs[i], token.decimals, token.symbol, `argument ${i}`);
     if (amount <= 0n) throw new HttpError('invalid_amount', 'the amount must be greater than zero');
 
-    const isDefault = token.key === defaultToken(this.chain.modules).key;
-    if (isDefault) {
+    // EVERY TOKEN GOES THROUGH THE SAME CHECK NOW. This used to run only for
+    // the DEFAULT token, because caps were denominated in it and any other
+    // token had to be bounded by the allowlist entry's own `perTxCap`. Caps are
+    // per wallet per token, so the wallet carries a bound for every currency it
+    // may spend, and the entry has nothing left to say about it.
+    //
+    // The consequence is worth naming: a wallet with NO cap entry for this
+    // token now cannot spend it through a call either, because `capsFor`
+    // refuses inside `enforcePolicy` - the same fail-closed rule the transfer
+    // path follows, reached by the same function.
+    {
       // The wallet's own per-transaction cap, and the deny/allow lists - with
       // the CONTRACT KEY as the counterparty, so a policy can name contracts
       // the way it names wallets. enforcePolicy is pure string matching, so
@@ -1245,26 +1254,6 @@ export class Treasury {
         }
         throw err;
       }
-    }
-
-    if (entry.perTxCap !== undefined) {
-      const cap = parseVee(entry.perTxCap, token.decimals, token.symbol, 'perTxCap');
-      if (amount > cap) {
-        throw new HttpError(
-          'over_max_per_tx',
-          `this call's per-transaction cap is ${entry.perTxCap} ${token.symbol}`,
-        );
-      }
-    } else if (!isDefault && entry.uncapped !== true) {
-      // UNREACHABLE UNDER THE LOAD RULE, which refuses an entry whose amount is
-      // in a non-default token - or in the per-call {arg} form - unless it
-      // carries perTxCap or uncapped. Two lines on a money bound, kept because
-      // the alternative to an unreachable check here is an unbounded spend if
-      // the load rule ever narrows.
-      throw new HttpError(
-        'function_not_allowed',
-        `this call moves ${token.symbol}, which no cap in this deployment bounds`,
-      );
     }
 
     return { amount, token, index: i };
@@ -1396,13 +1385,12 @@ export class Treasury {
       // coordinate for its intents row, and the default is the honest one
       // there: nothing was held in any currency.
       token: money?.token.key ?? defaultToken(this.chain.modules).key,
-      // A hold is taken only when the amount is in the DEFAULT token, because
-      // the stage budget is denominated in it. An amount in another token is
-      // bounded by the entry's perTxCap and by nothing else until increment 4.
-      capWei:
-        money && money.token.key === defaultToken(this.chain.modules).key
-          ? stageCapWei(policy, money.token.key, money.token.decimals)
-          : null,
+      // A HOLD FOR WHICHEVER TOKEN MOVED. `stage_spend` is keyed by token, and
+      // the wallet carries a per-stage bound for each - so a call moving gold
+      // takes a gold hold against a gold cap, and leaves the play budget alone.
+      // Before per-token caps this could only be taken for the default token,
+      // which meant every other currency had an unbounded stage.
+      capWei: money ? stageCapWei(policy, money.token.key, money.token.decimals) : null,
       call: {
         contract: contract.key,
         function: entry.function,
