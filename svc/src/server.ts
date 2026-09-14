@@ -322,7 +322,11 @@ async function postStage({ services, body, principal }: RouteContext): Promise<u
 /// deployments should not see a difference that is only the manifest's order.
 /// The DEFAULT token's identity is carried by `/modules`, not by this.
 function healthModules(m: Modules): string[] {
-  return [...m.tokens.map((t) => `token:${t.key}`), ...(m.names ? ['names'] : [])].sort();
+  return [
+    ...m.tokens.map((t) => `token:${t.key}`),
+    ...(m.names ? ['names'] : []),
+    ...(m.converter ? ['converter'] : []),
+  ].sort();
 }
 
 /// What wallet-mcp reads at startup to decide which tools to advertise.
@@ -340,6 +344,7 @@ async function getModules({ services }: RouteContext): Promise<unknown> {
     defaultToken: m.tokens[0]?.key ?? null,
     tokens: m.tokens.map((t) => ({ key: t.key, address: t.address, symbol: t.symbol, decimals: t.decimals })),
     names: m.names ? { address: m.names.address, tld: m.names.tld } : null,
+    converter: m.converter ? { address: m.converter.address } : null,
   };
 }
 
