@@ -329,7 +329,10 @@ async function getHistory({ services, param, url, principal }: RouteContext): Pr
   if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
     throw new HttpError('invalid_request', 'limit must be an integer between 1 and 1000');
   }
-  return services.treasury.history(param, limit);
+  // `token` from the QUERY STRING, and through the same resolver a body's
+  // `token` goes through - §1's rule is about the ARGUMENT, not about where it
+  // arrives. Absent means the default token, which is this increment's one rule.
+  return services.treasury.history(param, limit, url.searchParams.get('token') ?? undefined);
 }
 
 async function postWallets({ services, body, principal }: RouteContext): Promise<unknown> {
