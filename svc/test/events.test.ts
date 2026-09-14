@@ -1064,3 +1064,87 @@ describe('a token event names its token', () => {
     store.close();
   });
 });
+
+// §8.7. THE foreign_token ANOMALY. Increment 2 issues intents for the default
+// token only, so an IntentTransfer from any OTHER instance quoting one of our
+// reserved ids is somebody spending a different money against our reservation -
+// the same class as a foreign sender, and detected in the same place.
+describe('an IntentTransfer from a token we did not issue for', () => {
+  const PLAY = { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 };
+  const GOLD = { key: 'gold', address: '0xgold', symbol: 'GOLD', decimals: 18 };
+  const TOPIC = `0x${'ab'.repeat(32)}`;
+  const WALLET = `0x${'99'.repeat(20)}`;
+
+  function chainEmitting(from: string, txHash: string): Chain {
+    return {
+      modules: { tokens: [PLAY, GOLD] },
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
+          address === '0xgold' && eventName === 'IntentTransfer'
+            ? [{ args: { intentId: TOPIC, from }, transactionHash: txHash }]
+            : [],
+      },
+    } as unknown as Chain;
+  }
+
+  function reserved(): Store {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', WALLET, null);
+    // `topic` is how the chain logs the id (keccak256 of it); the emission is
+    // matched on that, not on the id string. Passing it explicitly keeps the
+    // fixture honest about which of the two the poll compares.
+    store.reserve({
+      intentId: 'gold-anomaly', topic: TOPIC, agentId: 'orch:a', stage: store.currentStage(),
+      amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
+    });
+    return store;
+  }
+
+  it('raises chain.anomaly with reason foreign_token, and names the token', async () => {
+    const store = reserved();
+    await new EventTail({} as Config, chainEmitting(WALLET, '0xaaa'), store).pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string; reason?: string; token?: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0]?.reason).toBe('foreign_token');
+    expect(anomalies[0]?.token).toBe('GOLD');
+    store.close();
+  });
+
+  // ANCHORED ON THE DEDUPE, which is the reason the check sits after the
+  // intent_anomalies lookup rather than before it: the same transaction seen by
+  // two polls is one event, not one per poll.
+  it('reports the same transaction once, however many times the poll sees it', async () => {
+    const store = reserved();
+    const chain = chainEmitting(WALLET, '0xaaa');
+    const tail = new EventTail({} as Config, chain, store);
+
+    await tail.pollOnce();
+    store.setCursor('chain', 0n); // re-read the same window, as a crash-restart would
+    await tail.pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+    expect(anomalies).toHaveLength(1);
+    store.close();
+  });
+
+  // AND THE CASE THAT MUST NOT FIRE: an id this store never reserved. Without
+  // the check sitting after that early return, every ordinary transfer of a
+  // second token would be an anomaly.
+  it('says nothing about an intent id this store never reserved', async () => {
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chainEmitting(WALLET, '0xbbb'), store).pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+    expect(anomalies).toHaveLength(0);
+    store.close();
+  });
+});

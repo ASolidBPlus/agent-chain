@@ -288,6 +288,34 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
     expect(d.modules[1]?.tld).toBe('vee');
   });
 
+  // ALL FOUR SHIPPED EXAMPLES, because "accepts the shape" above asserts ONE
+  // shape and the four are what a deployment actually picks from. A loader that
+  // happened to require a names entry, or a token, would pass the case above
+  // and fail half of these.
+  it('accepts the local.json each example manifest produces', () => {
+    const shapes: Array<[string, Array<Record<string, unknown>>]> = [
+      ['token-and-names', [{ ...TOKEN_ENTRY, key: 'play' }, { ...NAMES_ENTRY, tld: 'play' }]],
+      ['token-only', [{ ...TOKEN_ENTRY, key: 'play' }]],
+      ['names-only', [{ ...NAMES_ENTRY, tld: 'play' }]],
+      [
+        'two-tokens',
+        [
+          { ...TOKEN_ENTRY, key: 'play' },
+          { ...TOKEN_ENTRY, key: 'gold', address: ADDR_B },
+          { ...NAMES_ENTRY, tld: 'play' },
+        ],
+      ],
+    ];
+
+    for (const [name, modules] of shapes) {
+      write({ schema: 1, chainId: 31337, treasury: ADDR_A, modules });
+      const d = load();
+      // The shape's name is in the failure via the module list itself; bun's
+      // expect takes no label argument.
+      expect(d.modules.map((m) => `${name}:${m.kind}`)).toEqual(modules.map((m) => `${name}:${m.kind as string}`));
+    }
+  });
+
   // The old four-key file is RETIRED rather than supported: reading it would
   // mean inventing a key and a TLD for contracts deployed before either
   // existed, and inventing them is how a wallet gets looked up under a name

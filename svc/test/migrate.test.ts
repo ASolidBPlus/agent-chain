@@ -602,6 +602,21 @@ describe('the v4 -> v5 deployment reshape', () => {
   // the end of migrate(), so a `version < 5` guard fires the reshape against a
   // table that never had `veebux` - measured, `no such column: veebux`, on
   // every fresh store.
+  // RE-ASSERTED AGAINST 5 EXPLICITLY, because the rule "a store from a newer
+  // build is refused" is only meaningful relative to the CURRENT version, and
+  // the v5 bump is exactly the kind of change that could have left the refusal
+  // comparing against a stale constant.
+  it('still refuses a store stamped by a build newer than this one', () => {
+    const s = new Store(dbPath());
+    s.close();
+    const db = new Database(dbPath());
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    db.close();
+
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(() => new Store(dbPath())).toThrow(/newer/i);
+  });
+
   it('does not run the reshape on a fresh store, which never had the old columns', () => {
     const s = new Store(dbPath());
     s.recordDeployment({ chainId: '31337', modules: [{ kind: 'token', key: 'vee', address: '0xA' }] });
