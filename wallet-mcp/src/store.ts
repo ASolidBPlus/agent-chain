@@ -22,6 +22,12 @@ export interface IntentResult {
   at: number;
   /// Transfer intents.
   vee?: string;
+  /// The token KEY this intent moved. Absent on an entry written before
+  /// multi-token, and the default token is the right reading for those: every
+  /// transfer was the default one then. Part of what makes "same id, different
+  /// send" a refusal - a replay under the same id in a DIFFERENT token is a
+  /// different send, not a retry.
+  token?: string;
   to?: string;
   /// Call intents. `argsHash` is of the WIRE arguments, hashed the same way
   /// chain-svc hashes them, so the local refusal and the server's authoritative
