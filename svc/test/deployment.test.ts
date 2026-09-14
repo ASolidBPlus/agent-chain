@@ -18,7 +18,7 @@ import type { HttpError } from '../src/errors.ts';
 const ADDR_A = '0x1111111111111111111111111111111111111111' as const;
 const ADDR_B = '0x2222222222222222222222222222222222222222' as const;
 
-const A: DeploymentIdentity = { chainId: '31337', modules: [{ kind: 'token' as const, key: 'vee', address: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }, { kind: 'names' as const, address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512' }] };
+const A: DeploymentIdentity = { chainId: '31337', modules: [{ kind: 'token' as const, key: 'play', address: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }, { kind: 'names' as const, address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512' }] };
 const B: DeploymentIdentity = {
   ...A,
   modules: [{ ...A.modules[0]!, address: '0x0000000000000000000000000000000000000BBB' }, A.modules[1]!],
@@ -196,7 +196,7 @@ describe('resolution without a names module', () => {
   const namesless = (store: Store) =>
     new Resolver(
       {
-        modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }] },
+        modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }] },
         publicClient: {
           readContract: () => {
             throw new Error('the chain must not be reached: there is no registry to read');
@@ -225,7 +225,7 @@ describe('resolution without a names module', () => {
     store.markSpawned('orch:a', ADDR_A, 'agent');
 
     expect(await namesless(store).lookup('a')).toBeNull();
-    expect(await namesless(store).lookup('alpha.vee')).toBeNull();
+    expect(await namesless(store).lookup('alpha.play')).toBeNull();
     store.close();
   });
 
@@ -250,7 +250,7 @@ describe('resolution without a names module', () => {
     const store = new Store(':memory:');
     let code = 'no-throw';
     try {
-      await namesless(store).registrantOf('alpha.vee');
+      await namesless(store).registrantOf('alpha.play');
     } catch (e) {
       code = (e as HttpError).code ?? 'not-an-HttpError';
     }
@@ -276,16 +276,16 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
   const write = (body: unknown) => writeFileSync(join(dir, 'local.json'), JSON.stringify(body));
   const load = () => loadDeployment(dir);
 
-  const TOKEN_ENTRY = { kind: 'token', key: 'vee', contract: 'Token', address: ADDR_A };
-  const NAMES_ENTRY = { kind: 'names', contract: 'NameRegistry', address: ADDR_B, tld: 'vee' };
+  const TOKEN_ENTRY = { kind: 'token', key: 'play', contract: 'Token', address: ADDR_A };
+  const NAMES_ENTRY = { kind: 'names', contract: 'NameRegistry', address: ADDR_B, tld: 'play' };
   const GOOD = { schema: 1, chainId: 31337, treasury: ADDR_A, modules: [TOKEN_ENTRY, NAMES_ENTRY] };
 
   it('accepts the shape chain-deploy writes', () => {
     write(GOOD);
     const d = load();
     expect(d.modules.map((m) => m.kind)).toEqual(['token', 'names']);
-    expect(d.modules[0]?.key).toBe('vee');
-    expect(d.modules[1]?.tld).toBe('vee');
+    expect(d.modules[0]?.key).toBe('play');
+    expect(d.modules[1]?.tld).toBe('play');
   });
 
   // ALL FOUR SHIPPED EXAMPLES, because "accepts the shape" above asserts ONE
@@ -344,7 +344,7 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
   // what is at that address.
   it('refuses a contract that is not the one its kind deploys', () => {
     write({ ...GOOD, modules: [{ ...TOKEN_ENTRY, contract: 'Foo' }] });
-    expect(() => load()).toThrow(/module "vee" is "Foo", expected "Token"/);
+    expect(() => load()).toThrow(/module "play" is "Foo", expected "Token"/);
   });
 
   it('refuses a token module with no key', () => {
@@ -356,7 +356,7 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
   // about whichever came first, silently.
   it('refuses a duplicate token key', () => {
     write({ ...GOOD, modules: [TOKEN_ENTRY, { ...TOKEN_ENTRY, address: ADDR_B }] });
-    expect(() => load()).toThrow(/duplicate token key "vee"/);
+    expect(() => load()).toThrow(/duplicate token key "play"/);
   });
 
   it('refuses a second names module', () => {

@@ -58,8 +58,8 @@ describe('bare ids resolve in the caller own namespace', () => {
   // An exactly registered name always wins, so this rule can never redirect a
   // name that already resolves.
   it('prefers an exactly registered name, reporting exact', async () => {
-    const r = await resolveBareName(registry({ 'treasury.vee': 'treasury.vee' }), 'treasury.vee', 'acme');
-    expect(r.canonical).toBe('treasury.vee');
+    const r = await resolveBareName(registry({ 'treasury.play': 'treasury.play' }), 'treasury.play', 'acme');
+    expect(r.canonical).toBe('treasury.play');
     expect(r.resolvedVia).toBe('exact');
   });
 
@@ -171,7 +171,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const PKG = new URL('..', import.meta.url).pathname;
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'vee');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
 
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));
@@ -189,7 +189,7 @@ function detector(entries: Record<string, string | null>) {
     { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json') } as Config,
     {
       viemChain: {},
-      deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] },
+      deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },
       publicClient: { waitForTransactionReceipt: async () => ({}) },
       walletClient: { writeContract: async () => '0xsent' },
     } as unknown as Chain,
@@ -209,8 +209,8 @@ describe('the bare-id detector', () => {
   // it must not read as ignorance - this is why the counter keys on "not an
   // exactly registered name" rather than on "no colon".
   it('does not count an exactly registered colon-less name', async () => {
-    const { t, store } = detector({ 'treasury.vee': 'treasury.vee' });
-    await send(t, 'treasury.vee', 'i1').catch(() => undefined);
+    const { t, store } = detector({ 'treasury.play': 'treasury.play' });
+    await send(t, 'treasury.play', 'i1').catch(() => undefined);
     expect(store.bareIdCount('acme:dana')).toBe(0);
     store.close();
   });

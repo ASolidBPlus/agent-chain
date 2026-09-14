@@ -36,7 +36,7 @@ function chainAt(
   logs: Array<{ args: { intentId: string; from?: string }; transactionHash: string }>,
 ): Chain {
   return {
-    deployment: {}, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }], names: { address: '0xreg', tld: 'vee' } },
+    deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
     publicClient: {
       getBlockNumber: async () => block,
       getContractEvents: async ({ eventName }: { eventName: string }) =>
@@ -237,7 +237,7 @@ describe('the intent anomaly', () => {
     intentLogs: Array<{ args: { intentId: string; from: string }; transactionHash: string }>,
   ): Chain {
     return {
-      deployment: {}, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }], names: { address: '0xreg', tld: 'vee' } },
+      deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
       publicClient: {
         getBlockNumber: async () => 1n,
         getContractEvents: async ({ eventName }: { eventName: string }) =>

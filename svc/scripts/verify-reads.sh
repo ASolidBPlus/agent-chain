@@ -48,6 +48,19 @@ DEPLOYMENTS="$CONTRACTS/../deployments"
 mkdir -p "$DEPLOYMENTS"
 rm -f "$DEPLOYMENTS/local.json"
 KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
+# The manifest this script's deployment declares. chain-deploy requires one and
+# has no built-in default, so a script that deploys must say what it deploys --
+# and the TLD here is the suffix every name below is registered under. Without
+# this the deploy refuses and every check afterwards is testing nothing.
+cat > "$DEPLOYMENTS/manifest.json" <<'MANIFEST_JSON'
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "token", "key": "play", "name": "Play Token", "symbol": "PLAY", "initialSupply": "1000000" },
+    { "kind": "names", "tld": "play" }
+  ]
+}
+MANIFEST_JSON
 ( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
     forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) \
   2>&1 | grep -E "^  Deploy: |ONCHAIN EXECUTION" | head -5
@@ -72,9 +85,9 @@ step "criterion 2, /supply half"
 SUPPLY=$(get /supply); echo "GET /supply -> $SUPPLY"
 
 step "reads by name"
-echo "GET /resolve/treasury.vee -> $(get /resolve/treasury.vee)"
-echo "GET /balance/treasury.vee -> $(get /balance/treasury.vee)"
-TREASURY=$(get /resolve/treasury.vee | sed 's/.*"address":"\([^"]*\)".*/\1/')
+echo "GET /resolve/treasury.play -> $(get /resolve/treasury.play)"
+echo "GET /balance/treasury.play -> $(get /balance/treasury.play)"
+TREASURY=$(get /resolve/treasury.play | sed 's/.*"address":"\([^"]*\)".*/\1/')
 echo "GET /reverse/$TREASURY -> $(get "/reverse/$TREASURY")"
 
 step "refusals"
@@ -84,7 +97,7 @@ echo "no token           -> $(code "http://127.0.0.1:$PORT/supply")"
 echo "wrong token        -> $(code -H "Authorization: Bearer wrong" "http://127.0.0.1:$PORT/supply")"
 echo "bare local id      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/client") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/client")"
 echo "two-colon origin   -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/orch%3Apod1%3Aalice") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/orch%3Apod1%3Aalice")"
-echo "unknown alias      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.vee") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.vee")"
+echo "unknown alias      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.play") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.play")"
 
 step "verdict"
 case "$SUPPLY" in

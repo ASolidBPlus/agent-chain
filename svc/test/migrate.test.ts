@@ -555,6 +555,8 @@ describe('the v4 -> v5 deployment reshape', () => {
     expect(recorded).toEqual({
       chainId: '31337',
       modules: [
+        // 'vee' is not a fixture here: it is what the BACKFILL writes, because
+        // that is the only key a v4 store could have meant.
         { kind: 'token', key: 'vee', address: '0xVEE' },
         { kind: 'names', address: '0xREG' },
       ],
@@ -619,11 +621,11 @@ describe('the v4 -> v5 deployment reshape', () => {
 
   it('does not run the reshape on a fresh store, which never had the old columns', () => {
     const s = new Store(dbPath());
-    s.recordDeployment({ chainId: '31337', modules: [{ kind: 'token', key: 'vee', address: '0xA' }] });
+    s.recordDeployment({ chainId: '31337', modules: [{ kind: 'token', key: 'play', address: '0xA' }] });
     const recorded = s.recordedDeployment();
     s.close();
 
-    expect(recorded?.modules).toEqual([{ kind: 'token', key: 'vee', address: '0xA' }]);
+    expect(recorded?.modules).toEqual([{ kind: 'token', key: 'play', address: '0xA' }]);
     expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 });

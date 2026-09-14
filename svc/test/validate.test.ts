@@ -71,9 +71,9 @@ describe('canonical agent ids', () => {
 
 describe('vanity aliases', () => {
   it('preserves case, because lookalikes are the game mechanic', () => {
-    expect(assertAlias('aIpha.vee')).toBe('aIpha.vee');
-    expect(assertAlias('alpha.vee')).toBe('alpha.vee');
-    expect(assertAlias('aIpha.vee')).not.toBe(assertAlias('alpha.vee'));
+    expect(assertAlias('aIpha.play')).toBe('aIpha.play');
+    expect(assertAlias('alpha.play')).toBe('alpha.play');
+    expect(assertAlias('aIpha.play')).not.toBe(assertAlias('alpha.play'));
   });
 
   // An alias with a colon could impersonate a namespaced canonical id.
@@ -91,7 +91,7 @@ describe('vanity aliases', () => {
 describe('lookup names', () => {
   it('accepts a canonical id or an alias', () => {
     expect(assertLookupName('orch:vendor')).toBe('orch:vendor');
-    expect(assertLookupName('alpha.vee')).toBe('alpha.vee');
+    expect(assertLookupName('alpha.play')).toBe('alpha.play');
   });
 
   // A bare local id is SYNTACTICALLY a valid alias, so it is the registry
@@ -108,33 +108,33 @@ describe('lookup names', () => {
 
 describe('amounts', () => {
   it('accepts numbers and decimal strings alike', () => {
-    expect(parseVee(250, 18, 'VEE')).toBe(250n * 10n ** 18n);
-    expect(parseVee('250', 18, 'VEE')).toBe(250n * 10n ** 18n);
-    expect(parseVee('0.5', 18, 'VEE')).toBe(5n * 10n ** 17n);
-    expect(parseVee(0, 18, 'VEE')).toBe(0n);
+    expect(parseVee(250, 18, 'PLAY')).toBe(250n * 10n ** 18n);
+    expect(parseVee('250', 18, 'PLAY')).toBe(250n * 10n ** 18n);
+    expect(parseVee('0.5', 18, 'PLAY')).toBe(5n * 10n ** 17n);
+    expect(parseVee(0, 18, 'PLAY')).toBe(0n);
   });
 
   it('round-trips through the output format', () => {
-    expect(formatVee(parseVee('1000000', 18, 'VEE'), 18)).toBe('1000000');
-    expect(formatVee(parseVee('0.000000000000000001', 18, 'VEE'), 18)).toBe('0.000000000000000001');
+    expect(formatVee(parseVee('1000000', 18, 'PLAY'), 18)).toBe('1000000');
+    expect(formatVee(parseVee('0.000000000000000001', 18, 'PLAY'), 18)).toBe('0.000000000000000001');
   });
 
   it('rejects more than 18 decimal places', () => {
-    expect(codeOf(() => parseVee('0.0000000000000000001', 18, 'VEE'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('0.0000000000000000001', 18, 'PLAY'))).toBe('invalid_amount');
   });
 
   it('rejects negatives, junk and non-finite numbers', () => {
-    expect(codeOf(() => parseVee('-1', 18, 'VEE'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee('abc', 18, 'VEE'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(Number.NaN, 18, 'VEE'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(Number.POSITIVE_INFINITY, 18, 'VEE'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(null, 18, 'VEE'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('-1', 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('abc', 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(Number.NaN, 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(Number.POSITIVE_INFINITY, 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(null, 18, 'PLAY'))).toBe('invalid_amount');
   });
 
   // A JS number big enough to render as 1e+21 cannot be handed to parseUnits.
   // Refusing beats silently rounding the game's money.
   it('rejects a number that renders in exponent form', () => {
-    expect(codeOf(() => parseVee(1e21, 18, 'VEE'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(1e21, 18, 'PLAY'))).toBe('invalid_amount');
   });
 });
 

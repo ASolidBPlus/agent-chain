@@ -172,28 +172,28 @@ describe('the route table', () => {
 });
 
 describe('policy enforcement', () => {
-  const policy: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.vee'], deny: ['treasury.vee'] };
+  const policy: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.play'], deny: ['treasury.play'] };
   const vee = (n: number) => BigInt(n) * 10n ** 18n;
 
   it('matches only the patterns the game config can express', () => {
     expect(matchesPattern('*', 'anything')).toBe(true);
-    expect(matchesPattern('*.vee', 'alpha.vee')).toBe(true);
-    expect(matchesPattern('*.vee', 'alpha.veex')).toBe(false);
-    expect(matchesPattern('treasury.vee', 'treasury.vee')).toBe(true);
-    expect(matchesPattern('treasury.vee', 'alpha.vee')).toBe(false);
+    expect(matchesPattern('*.play', 'alpha.play')).toBe(true);
+    expect(matchesPattern('*.play', 'alpha.playx')).toBe(false);
+    expect(matchesPattern('treasury.play', 'treasury.play')).toBe(true);
+    expect(matchesPattern('treasury.play', 'alpha.play')).toBe(false);
   });
 
   it('refuses over max_per_tx and a denied counterparty', () => {
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(150), decimals: 18, symbol: 'VEE' }))).toBe('over_max_per_tx');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.vee', amount: vee(1), decimals: 18, symbol: 'VEE' }))).toBe('counterparty_denied');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(100), decimals: 18, symbol: 'VEE' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(150), decimals: 18, symbol: 'PLAY' }))).toBe('over_max_per_tx');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY' }))).toBe('counterparty_denied');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(100), decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
   });
 
   // Deny wins: a name matching both lists is refused, because deny is what an
   // author writes to stop something specific.
   it('lets deny beat allow', () => {
-    const both: AgentPolicy = { ...policy, allow: ['*'], deny: ['treasury.vee'] };
-    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.vee', amount: vee(1), decimals: 18, symbol: 'VEE' }))).toBe(
+    const both: AgentPolicy = { ...policy, allow: ['*'], deny: ['treasury.play'] };
+    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY' }))).toBe(
       'counterparty_denied',
     );
   });
@@ -480,16 +480,16 @@ describe('deny matches the resolved principal, not just the requested name', () 
     max_per_tx: 1000,
     max_per_stage: 5000,
     allow: ['*'],
-    deny: ['mark.vee'],
+    deny: ['mark.play'],
     frozen: false,
   };
   const oneVee = 10n ** 18n; // the `vee` helper is scoped to the describe above
-  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee, decimals: 18, symbol: 'VEE' }));
+  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee, decimals: 18, symbol: 'PLAY' }));
   const toResolved = (name: string, canonical: string) =>
-    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee, decimals: 18, symbol: 'VEE' }));
+    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee, decimals: 18, symbol: 'PLAY' }));
 
   it('refuses the denied name', () => {
-    expect(to('mark.vee')).toBe('counterparty_denied');
+    expect(to('mark.play')).toBe('counterparty_denied');
   });
 
   // THE BYPASS THIS CLOSES. `addAlias` registers an alias with
@@ -498,29 +498,29 @@ describe('deny matches the resolved principal, not just the requested name', () 
   // reachable under the other - no registrar write, no privilege, no attack,
   // just the name that is always there.
   it('refuses the same wallet reached by its canonical id', () => {
-    expect(toResolved('mark.vee', 'orch:mark')).toBe('counterparty_denied');
+    expect(toResolved('mark.play', 'orch:mark')).toBe('counterparty_denied');
   });
 
-  // The ruled test: deny treasury.vee, register treasure.vee as a
-  // treasury alias, send to treasure.vee. The registry keeps the FIRST
+  // The ruled test: deny treasury.play, register treasure.play as a
+  // treasury alias, send to treasure.play. The registry keeps the FIRST
   // registered name as `reverse[target]`, so the alias resolves canonical to
-  // treasury.vee and the deny entry bites.
+  // treasury.play and the deny entry bites.
   it('refuses a treasury alias when the deny list names the treasury', () => {
-    const p = { ...denied, deny: ['treasury.vee'] };
+    const p = { ...denied, deny: ['treasury.play'] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'treasure.vee', canonical: 'treasury.vee', amount: oneVee, decimals: 18, symbol: 'VEE' }),
+      enforcePolicy({ policy: p, to: 'treasure.play', canonical: 'treasury.play', amount: oneVee, decimals: 18, symbol: 'PLAY' }),
     );
     expect(code).toBe('counterparty_denied');
   });
 
   // ALLOW must NOT be evaluated against the canonical alone. Measured: the
-  // default agent allow list is ["*.vee"] and canonical ids look like
+  // default agent allow list is ["*.play"] and canonical ids look like
   // `orch:bob`, so canonical-only matching matches nothing and every send in
   // the game is refused. Widening deny is safe; narrowing allow is not.
   it('still allows an ordinary send whose canonical does not match the allow list', () => {
-    const p = { ...denied, allow: ['*.vee'], deny: [] };
+    const p = { ...denied, allow: ['*.play'], deny: [] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'bob.vee', canonical: 'orch:bob', amount: oneVee, decimals: 18, symbol: 'VEE' }),
+      enforcePolicy({ policy: p, to: 'bob.play', canonical: 'orch:bob', amount: oneVee, decimals: 18, symbol: 'PLAY' }),
     );
     expect(code).toBe('no-error');
   });

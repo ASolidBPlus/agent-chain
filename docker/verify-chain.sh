@@ -60,6 +60,19 @@ echo "treasury: $(cast wallet address --private-key "$KEY")"
 
 step "deploy"
 cd "$CONTRACTS_DIR"
+# The manifest this script's deployment declares. chain-deploy requires one and
+# has no built-in default, so a script that deploys must say what it deploys --
+# and the TLD here is the suffix every name below is registered under. Without
+# this the deploy refuses and every check afterwards is testing nothing.
+cat > "$CONTRACTS_DIR/../deployments/manifest.json" <<'MANIFEST_JSON'
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "token", "key": "play", "name": "Play Token", "symbol": "PLAY", "initialSupply": "1000000" },
+    { "kind": "names", "tld": "play" }
+  ]
+}
+MANIFEST_JSON
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|Compiler run|ONCHAIN EXECUTION|Error" | head -10
 cat ../deployments/local.json
 
@@ -69,10 +82,10 @@ TREASURY=$(cast wallet address --private-key "$KEY")
 
 supply_before=$(cast call "$VEE" "totalSupply()(uint256)" --rpc-url "$RPC")
 balance_before=$(cast call "$VEE" "balanceOf(address)(uint256)" "$TREASURY" --rpc-url "$RPC")
-resolve_before=$(cast call "$REG" "resolve(string)(address)" "treasury.vee" --rpc-url "$RPC")
+resolve_before=$(cast call "$REG" "resolve(string)(address)" "treasury.play" --rpc-url "$RPC")
 echo "totalSupply: $supply_before"
 echo "treasury balance: $balance_before"
-echo "resolve(treasury.vee): $resolve_before"
+echo "resolve(treasury.play): $resolve_before"
 
 step "second run is idempotent (must NOT redeploy)"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|nothing to do" | head -5
@@ -131,16 +144,16 @@ echo "health after restart: $(docker inspect -f '{{.State.Health.Status}}' "$NAM
 code_len=$(cast code "$VEE" --rpc-url "$RPC" | wc -c)
 supply_after=$(cast call "$VEE" "totalSupply()(uint256)" --rpc-url "$RPC")
 balance_after=$(cast call "$VEE" "balanceOf(address)(uint256)" "$TREASURY" --rpc-url "$RPC")
-resolve_after=$(cast call "$REG" "resolve(string)(address)" "treasury.vee" --rpc-url "$RPC")
+resolve_after=$(cast call "$REG" "resolve(string)(address)" "treasury.play" --rpc-url "$RPC")
 echo "token code bytes after restart: $code_len"
 echo "totalSupply: $supply_after"
 echo "treasury balance: $balance_after"
-echo "resolve(treasury.vee): $resolve_after"
+echo "resolve(treasury.play): $resolve_after"
 
 step "verdict"
 fail=0
 [ "$supply_before"  = "$supply_after"  ] || { echo "FAIL: totalSupply changed"; fail=1; }
 [ "$balance_before" = "$balance_after" ] || { echo "FAIL: treasury balance changed"; fail=1; }
-[ "$resolve_before" = "$resolve_after" ] || { echo "FAIL: treasury.vee resolution changed"; fail=1; }
+[ "$resolve_before" = "$resolve_after" ] || { echo "FAIL: treasury.play resolution changed"; fail=1; }
 [ "$code_len" -gt 10 ] || { echo "FAIL: token has no code after restart"; fail=1; }
 [ "$fail" = 0 ] && echo "PASS: state survived the restart" || exit 1

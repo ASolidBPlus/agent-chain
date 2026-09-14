@@ -66,6 +66,19 @@ for _ in $(seq 1 30); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' "$NAME")" = healthy ] && break; sleep 1
 done
 rm -f "$DEPLOYMENTS/local.json"
+# The manifest this script's deployment declares. chain-deploy requires one and
+# has no built-in default, so a script that deploys must say what it deploys --
+# and the TLD here is the suffix every name below is registered under. Without
+# this the deploy refuses and every check afterwards is testing nothing.
+cat > "$DEPLOYMENTS/manifest.json" <<'MANIFEST_JSON'
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "token", "key": "play", "name": "Play Token", "symbol": "PLAY", "initialSupply": "1000000" },
+    { "kind": "names", "tld": "play" }
+  ]
+}
+MANIFEST_JSON
 KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
 ( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
     forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) >/dev/null 2>&1
@@ -89,7 +102,7 @@ step "criterion 3 - spawn a named, funded wallet"
 TIMES=""
 for who in vendor timing1 timing2; do
   START=$(date +%s%N)
-  RESULT=$(api -X POST "$U/wallets" -d "{\"agentId\":\"orch:$who\",\"fundVee\":250,\"kind\":\"agent\",\"alias\":\"$who.vee\"}")
+  RESULT=$(api -X POST "$U/wallets" -d "{\"agentId\":\"orch:$who\",\"fundVee\":250,\"kind\":\"agent\",\"alias\":\"$who.play\"}")
   [ "$who" = vendor ] && SB_TOKEN=$(echo "$RESULT" | jget "['walletToken']")
   MS=$(( ($(date +%s%N) - START) / 1000000 ))
   TIMES="$TIMES $MS"
@@ -105,12 +118,12 @@ ADDR=$(echo "$SPAWN" | jget "['address']")
 
 check "balance"            "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "250"
 check "resolve canonical"  "$(api "$U/resolve/orch%3Avendor" | jget "['address']")" "$ADDR"
-check "resolve alias"      "$(api "$U/resolve/vendor.vee"    | jget "['address']")" "$ADDR"
+check "resolve alias"      "$(api "$U/resolve/vendor.play"    | jget "['address']")" "$ADDR"
 check "reverse"            "$(api "$U/reverse/$ADDR" | jget "['canonical']")" "orch:vendor"
-check "reverse aliases"    "$(api "$U/reverse/$ADDR" | jget "['aliases'][0]")" "vendor.vee"
+check "reverse aliases"    "$(api "$U/reverse/$ADDR" | jget "['aliases'][0]")" "vendor.play"
 
 step "criterion 3 - a repeat spawn must not mint money"
-AGAIN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":250,"kind":"agent","alias":"vendor.vee"}')
+AGAIN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":250,"kind":"agent","alias":"vendor.play"}')
 check "same address"       "$(echo "$AGAIN" | jget "['address']")" "$ADDR"
 check "balance unchanged"  "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "250"
 check "no token on repeat" "$(echo "$AGAIN" | python3 -c "import sys,json;print('walletToken' in json.load(sys.stdin))")" "False"
@@ -122,32 +135,32 @@ check "bare local id"      "$(code -X POST "$U/wallets" -d '{"agentId":"client",
 check "uppercase id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:Vendor","kind":"agent"}')" "400"
 
 step "transfer by name, with a memo (wallet credential)"
-api -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
-TX=$(wbody "$SB_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":50,"memo":"for the stream job","intentId":"a1"}')
+api -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.play"}' >/dev/null
+TX=$(wbody "$SB_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":50,"memo":"for the stream job","intentId":"a1"}')
 echo "  POST /sign-transfer -> $TX"
 check "sender balance"     "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "200"
-check "recipient balance"  "$(api "$U/balance/alpha.vee"           | jget "['vee']")" "60"
+check "recipient balance"  "$(api "$U/balance/alpha.play"           | jget "['vee']")" "60"
 HIST=$(api "$U/history/orch%3Avendor?limit=10")
 check "history memo"       "$(echo "$HIST" | jget "[0]['memo']")" "for the stream job"
 check "history counterparty" "$(echo "$HIST" | jget "[0]['to']")" "alpha:client"
 
 step "criterion 7 - lookalike names coexist"
 SC_TOKEN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:scammer","fundVee":5,"kind":"agent"}' | jget "['walletToken']")
-api -X POST "$U/aliases" -d '{"agentId":"orch:scammer","alias":"aIpha.vee"}' >/dev/null
-LOOK=$(api "$U/resolve/aIpha.vee"); REAL=$(api "$U/resolve/alpha.vee")
-echo "  aIpha.vee -> $LOOK"
-echo "  alpha.vee -> $REAL"
+api -X POST "$U/aliases" -d '{"agentId":"orch:scammer","alias":"aIpha.play"}' >/dev/null
+LOOK=$(api "$U/resolve/aIpha.play"); REAL=$(api "$U/resolve/alpha.play")
+echo "  aIpha.play -> $LOOK"
+echo "  alpha.play -> $REAL"
 [ "$(echo "$LOOK" | jget "['address']")" != "$(echo "$REAL" | jget "['address']")" ] \
   && echo "  ok   different addresses" || { echo "  FAIL same address"; FAIL=1; }
 check "lookalike canonical" "$(echo "$LOOK" | jget "['canonical']")" "orch:scammer"
 
 step "criterion 11 - authorisation (C2d)"
-VICTIM=$(api -X POST "$U/wallets" -d '{"agentId":"orch:victim","fundVee":500,"kind":"agent","alias":"victim.vee"}')
-PERSONA=$(api -X POST "$U/wallets" -d '{"agentId":"orch:persona","fundVee":10,"kind":"agent","alias":"persona.vee"}')
+VICTIM=$(api -X POST "$U/wallets" -d '{"agentId":"orch:victim","fundVee":500,"kind":"agent","alias":"victim.play"}')
+PERSONA=$(api -X POST "$U/wallets" -d '{"agentId":"orch:persona","fundVee":10,"kind":"agent","alias":"persona.play"}')
 P_TOKEN=$(echo "$PERSONA" | jget "['walletToken']")
 echo "  the drain that was demonstrated before C2d existed:"
-check "sign as another wallet" "$(wcode "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.vee","vee":400}')" "403"
-echo "    $(wbody "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.vee","vee":400}')"
+check "sign as another wallet" "$(wcode "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.play","vee":400}')" "403"
+echo "    $(wbody "$P_TOKEN" -X POST "$U/sign-transfer" -d '{"fromAgentId":"orch:victim","to":"persona.play","vee":400}')"
 check "victim untouched"       "$(api "$U/balance/orch%3Avictim" | jget "['vee']")" "500"
 check "self-mint refused"      "$(wcode "$P_TOKEN" -X POST "$U/wallets" -d '{"agentId":"orch:selfminted","fundVee":9999,"kind":"org"}')" "403"
 echo "    $(wbody "$P_TOKEN" -X POST "$U/wallets" -d '{"agentId":"orch:selfminted","fundVee":9999,"kind":"org"}')"
@@ -161,29 +174,29 @@ echo "  caps enforced AT CHAIN-SVC, with no wallet-mcp in the loop:"
 # rejects an overdraft. The first version funded 400 and the fifth send failed
 # 502 (insufficient balance) instead of 409 - a test that looked like a cap
 # failure and was not.
-CAP=$(api -X POST "$U/wallets" -d '{"agentId":"orch:capcheck","fundVee":1000,"kind":"agent","alias":"capcheck.vee"}')
+CAP=$(api -X POST "$U/wallets" -d '{"agentId":"orch:capcheck","fundVee":1000,"kind":"agent","alias":"capcheck.play"}')
 C_TOKEN=$(echo "$CAP" | jget "['walletToken']")
-check "max_per_tx 100, send 300" "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":300}')" "409"
-echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":300}')"
+check "max_per_tx 100, send 300" "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":300}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":300}')"
 check "balance untouched"        "$(api "$U/balance/orch%3Acapcheck" | jget "['vee']")" "1000"
-check "denied counterparty"      "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.vee","vee":1}')" "409"
-echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.vee","vee":1}')"
+check "denied counterparty"      "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.play","vee":1}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"treasury.play","vee":1}')"
 
 # Criterion 4's exact arithmetic: 50 + 4x100 = 450, under max_per_stage 500;
 # the next 100 would reach 550 and is refused.
 echo "  stage cap (max_per_stage 500), platform POST /stage drives the stage:"
 api -X POST "$U/stage" -d '{"stage":"s1"}' >/dev/null
-check "opening send of 50"       "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":50}')" "200"
+check "opening send of 50"       "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":50}')" "200"
 for i in 1 2 3 4; do
-  R=$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')
+  R=$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":100}')
   echo "    send $i of 100 -> $R  (stage total $((50 + i * 100)))"
   [ "$R" != 200 ] && { echo "  FAIL send $i should have been accepted"; FAIL=1; FAILED_CHECKS="$FAILED_CHECKS
     - stage send $i: got '$R' want '200'"; }
 done
-check "next 100 trips the cap"   "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')" "409"
-echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":100}')"
+check "next 100 trips the cap"   "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":100}')" "409"
+echo "    $(wbody "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":100}')"
 api -X POST "$U/stage" -d '{"stage":"s2"}' >/dev/null
-check "new stage resets the cap"  "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.vee","vee":1}')" "200"
+check "new stage resets the cap"  "$(wcode "$C_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"persona.play","vee":1}')" "200"
 
 echo "  rotation revokes the old credential:"
 NEW=$(api -X POST "$U/wallets/orch%3Apersona/rotate" | jget "['walletToken']")
@@ -192,9 +205,9 @@ check "new token works"          "$(wcode "$NEW" "$U/balance/orch%3Apersona")" "
 
 step "criterion 8 - retirement"
 check "delete"             "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"
-check "spend refused"      "$(wcode "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":1,"intentId":"z1"}')" "409"
-echo "    $(wbody "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":1,"intentId":"z2"}')"
-check "alias stops resolving" "$(code "$U/resolve/aIpha.vee")" "404"
+check "spend refused"      "$(wcode "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":1,"intentId":"z1"}')" "409"
+echo "    $(wbody "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":1,"intentId":"z2"}')"
+check "alias stops resolving" "$(code "$U/resolve/aIpha.play")" "404"
 check "canonical survives"    "$(code "$U/resolve/orch%3Ascammer")" "200"
 check "policy file frozen"    "$(python3 -c "import json;print(json.load(open('$WORK/policies/orch%3Ascammer.json'))['frozen'])")" "True"
 check "delete is idempotent"  "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"

@@ -26,8 +26,8 @@ function codeOf(fn: () => unknown): string {
 describe('the pattern dialect', () => {
   const CASES: Array<[string, string, boolean]> = [
     ['*', 'anything', true],
-    ['*.vee', 'runner1.vee', true],
-    ['*.vee', 'orch:runner1', false],
+    ['*.play', 'runner1.play', true],
+    ['*.play', 'orch:runner1', false],
     ['acme:*', 'acme:runner1', true],
     ['acme:*', 'acme:', true],
     ['acme:*', 'orch:runner1', false],
@@ -52,16 +52,16 @@ describe('the pattern dialect', () => {
   // consume it differently and the deny direction is the one that fails quietly.
   it('a trailing-star deny entry actually denies', () => {
     const p = { ...POLICY, allow: ['*'], deny: ['acme:*'] };
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n, decimals: 18, symbol: 'VEE' }))).toBe(
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n, decimals: 18, symbol: 'PLAY' }))).toBe(
       'counterparty_denied',
     );
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n, decimals: 18, symbol: 'VEE' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n, decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
   });
 
   it('a trailing-star allow entry actually allows', () => {
     const p = { ...POLICY, allow: ['acme:*'], deny: [] };
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n, decimals: 18, symbol: 'VEE' }))).toBe('no-error');
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n, decimals: 18, symbol: 'VEE' }))).toBe(
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n, decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n, decimals: 18, symbol: 'PLAY' }))).toBe(
       'counterparty_denied',
     );
   });
@@ -76,7 +76,7 @@ describe('the pattern dialect', () => {
   });
 
   it('accepts every form the dialect does implement', () => {
-    expect(() => assertPatternsUsable(['*', '*.vee', 'acme:*', 'orch:mark'], 'allow')).not.toThrow();
+    expect(() => assertPatternsUsable(['*', '*.play', 'acme:*', 'orch:mark'], 'allow')).not.toThrow();
   });
 });
 
@@ -85,10 +85,10 @@ describe('the pattern dialect', () => {
 // to defaults, while sending a strictly MORE SPECIFIC one - allow/deny with the
 // caps left to the defaults, the harness's whole use - was refused outright.
 describe('a caller-supplied policy is a patch over the kind defaults', () => {
-  const DEF: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.vee'], deny: ['treasury.vee'] };
+  const DEF: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.play'], deny: ['treasury.play'] };
 
   it('accepts the shape the harness sends: allow and deny, no caps', () => {
-    const p = mergePolicy({ allow: ['acme:*'], deny: ['treasury.vee'] }, DEF);
+    const p = mergePolicy({ allow: ['acme:*'], deny: ['treasury.play'] }, DEF);
     expect(p.allow).toEqual(['acme:*']);
     expect(p.max_per_tx).toBe(100); // fell to the default
     expect(p.max_per_stage).toBe(500);
@@ -120,8 +120,8 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
   // string form exists: this value is exact in wei and not as a double.
   it('enforces a fractional cap exactly', () => {
     const p = mergePolicy({ max_per_tx: '0.3' }, DEF);
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'a.vee', amount: capToWei('0.3', 18), decimals: 18, symbol: 'VEE' }))).toBe('no-error');
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'a.vee', amount: capToWei('0.3', 18) + 1n, decimals: 18, symbol: 'VEE' }))).toBe(
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'a.play', amount: capToWei('0.3', 18), decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'a.play', amount: capToWei('0.3', 18) + 1n, decimals: 18, symbol: 'PLAY' }))).toBe(
       'over_max_per_tx',
     );
   });
@@ -148,17 +148,17 @@ describe('a zero-VEE transfer is refused at the boundary', () => {
   const P: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*'], deny: [] };
 
   it('refuses zero', () => {
-    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.vee', amount: 0n, decimals: 18, symbol: 'VEE' }))).toBe('invalid_amount');
+    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.play', amount: 0n, decimals: 18, symbol: 'PLAY' }))).toBe('invalid_amount');
   });
 
   it('still admits the smallest real amount', () => {
-    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.vee', amount: 1n, decimals: 18, symbol: 'VEE' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy: P, to: 'a.play', amount: 1n, decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
   });
 
   // Refused BEFORE the cap check, so the reason a caller sees is the true one
   // rather than whichever check happens to run first.
   it('reports the amount, not the cap, for a zero over an exhausted policy', () => {
     const tiny: AgentPolicy = { ...P, max_per_tx: 1 };
-    expect(codeOf(() => enforcePolicy({ policy: tiny, to: 'a.vee', amount: 0n, decimals: 18, symbol: 'VEE' }))).toBe('invalid_amount');
+    expect(codeOf(() => enforcePolicy({ policy: tiny, to: 'a.play', amount: 0n, decimals: 18, symbol: 'PLAY' }))).toBe('invalid_amount');
   });
 });

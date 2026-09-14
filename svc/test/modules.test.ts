@@ -208,7 +208,7 @@ import { Keystore } from '../src/keystore.ts';
 import { loadPolicyDefaults } from '../src/policy.ts';
 import { asChainError } from '../src/chain.ts';
 import { Resolver } from '../src/resolver.ts';
-import { Treasury } from '../src/treasury.ts';
+import { Treasury, skippedDenyEntriesLogged } from '../src/treasury.ts';
 import { HttpError } from '../src/errors.ts';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -345,6 +345,39 @@ describe('deny entries without a names module', () => {
       await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'd1' })),
     ).toBe('counterparty_denied');
     store.close();
+  });
+
+  // ONCE PER DISTINCT ENTRY PER PROCESS, across two sends from two DIFFERENT
+  // agents. Per-agent would print it once per wallet on a names-less
+  // deployment, because every agent without its own policy file inherits the
+  // same defaults; per-send would print it on every transfer, because policyFor
+  // re-reads the file each time by design.
+  it('says an unresolvable deny entry is skipped exactly once, whoever sends', async () => {
+    skippedDenyEntriesLogged.clear();
+    const lines: string[] = [];
+    const warn = console.warn;
+    console.warn = (m: string) => lines.push(m);
+    try {
+      // The send must RESOLVE for the deny loop to run at all: a send TO the
+      // unresolvable name fails at resolution first, before any deny entry is
+      // considered. So both sends go to a spawned agent, and it is the deny
+      // ENTRY that cannot resolve.
+      const a = treasuryWith(['treasury.play'], 'orch:a');
+      await code(() =>
+        a.t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'x1' }),
+      );
+      a.store.close();
+
+      const b = treasuryWith(['treasury.play'], 'orch:c');
+      await code(() =>
+        b.t.signTransfer({ scope: 'wallet', agentId: 'orch:c' }, { to: 'orch:b', vee: '1', intentId: 'x2' }),
+      );
+      b.store.close();
+    } finally {
+      console.warn = warn;
+    }
+
+    expect(lines.filter((l) => l.includes('treasury.play'))).toHaveLength(1);
   });
 
   // A NAME CANNOT RESOLVE, so the entry is skipped - and the send fails for the
