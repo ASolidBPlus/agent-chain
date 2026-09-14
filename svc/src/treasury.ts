@@ -5,10 +5,22 @@
 // whole of the addressing rule (spec S0/S5) and it lives here because this is
 // the file that can move funds.
 
-import { createWalletClient, encodeFunctionData, http, keccak256, toBytes, type Address } from 'viem';
+import {
+  createWalletClient,
+  encodeFunctionData,
+  getAddress,
+  http,
+  keccak256,
+  toBytes,
+  type AbiFunction,
+  type AbiParameter,
+  type Address,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { TokenAbi } from './abi.ts';
+import { validateArgs, type EncodableArg, type WireAddress } from './callargs.ts';
+import type { Allowlist, CallEntry, CallPolicySource } from './calls.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
@@ -26,7 +38,55 @@ import {
   type PolicyDefaults,
 } from './policy.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from './validate.ts';
-import { defaultToken } from './modules.ts';
+import {
+  defaultToken,
+  requireContract,
+  type RegisteredContract,
+  type TokenModule,
+} from './modules.ts';
+
+/// §3.4. A serialised read result over this is REFUSED rather than truncated:
+/// a view returning an unbounded array is a contract design problem, and a
+/// truncated answer hides it behind a result that looks complete.
+const MAX_READ_BYTES = 64 * 1024;
+
+/// A contract's return value, as JSON a model can read.
+///
+/// EVERY LOSSY TYPE IS CONVERTED AT ITS OWN LEVEL rather than by a JSON
+/// replacer at the top: a bigint has no JSON form, an address has a canonical
+/// spelling that is not the one the chain returns, and a struct arrives from
+/// viem as an object keyed by component name already. Recursion is what makes
+/// a tuple inside an array inside a struct come out right.
+export function serialiseResult(value: unknown, fn: AbiFunction): unknown {
+  const outputs = fn.outputs as readonly AbiParameter[];
+  // A function with one return value returns THE VALUE, not a one-element
+  // list: `quote(...)` answering `["40"]` would make every caller index into
+  // it, and viem's own shape is the reason - it returns the bare value.
+  if (outputs.length === 1) return serialiseOne(value, outputs[0]!);
+  return (value as unknown[]).map((v, i) => serialiseOne(v, outputs[i]!));
+}
+
+function serialiseOne(value: unknown, param: AbiParameter): unknown {
+  const type = param.type;
+  const array = /^(.*)\[\d*\]$/.exec(type);
+  if (array) {
+    return (value as unknown[]).map((v) => serialiseOne(v, { ...param, type: array[1]! } as AbiParameter));
+  }
+  if (type === 'tuple') {
+    const components = (param as { components?: readonly AbiParameter[] }).components ?? [];
+    const out: Record<string, unknown> = {};
+    for (const c of components) {
+      out[c.name ?? ''] = serialiseOne((value as Record<string, unknown>)[c.name ?? ''], c);
+    }
+    return out;
+  }
+  if (typeof value === 'bigint') return value.toString();
+  // CHECKSUMMED, because that is the spelling every other address on these
+  // wires carries and a reader comparing two of them should not have to
+  // normalise first.
+  if (type === 'address' && typeof value === 'string') return getAddress(value);
+  return value;
+}
 
 /// Which path a spend arrived by, for the `agent.spend` event.
 ///
@@ -96,6 +156,9 @@ export class Treasury {
     private readonly store: Store,
     private readonly resolver: Resolver,
     private readonly policyDefaults: PolicyDefaults,
+    /// The generic call op's allowlist. Read per request through `snapshot()`,
+    /// never held: the file is hub-set and may be rewritten between turns.
+    private readonly calls: CallPolicySource,
   ) {}
 
   async currentStage(): Promise<string> {
@@ -864,5 +927,686 @@ export class Treasury {
       });
     }
     return out;
+  }
+
+  // ── §3.2-§3.4. THE GENERIC CALL OP ─────────────────────────────────────
+  //
+  // Three operations, one shape: `call` signs with the caller's own key,
+  // `admin-call` signs with the treasury's, and `read` signs nothing. They live
+  // beside signTransfer rather than in a file of their own because they ARE
+  // signTransfer, step for step, with the allowlist where the token used to be
+  // hard-coded - and because the release rule, the reservation and the
+  // principal derivation are the same three things that must not be rewritten.
+
+  /// The ABI inputs a CALLER supplies, which is every input except the one the
+  /// server fills with the intent id.
+  ///
+  /// Two index spaces exist from here on and confusing them is the bug this
+  /// function is meant to make obvious: `calls.json` counts ABI indices - it is
+  /// written against the contract - while the caller's `args` array has the
+  /// intentArg slot missing. Every refusal quotes the CALLER's index, because
+  /// that is the one they can act on.
+  private static callerInputs(entry: CallEntry): {
+    inputs: AbiParameter[];
+    /// caller index -> ABI index.
+    abiIndex: (i: number) => number;
+    /// ABI index -> caller index, or null for the slot the server fills.
+    callerIndex: (i: number) => number | null;
+  } {
+    const all = entry.abiFunction.inputs as readonly AbiParameter[];
+    const skip = entry.intentArg;
+    if (skip === undefined) {
+      return { inputs: [...all], abiIndex: (i) => i, callerIndex: (i) => i };
+    }
+    return {
+      inputs: all.filter((_, i) => i !== skip),
+      abiIndex: (i) => (i < skip ? i : i + 1),
+      callerIndex: (i) => (i === skip ? null : i < skip ? i : i - 1),
+    };
+  }
+
+  /// §3.2 step 5. Turns the wire forms the validator accepted into addresses,
+  /// applying the entry's per-index rule.
+  ///
+  /// THE VALIDATOR SAID THE SHAPE WAS ONE SOME RULE COULD TAKE; this says
+  /// whether it is the one THIS index takes, and what it resolves to. Two
+  /// layers because only the allowlist knows the rule and only the ABI knows
+  /// the type - and the refusals share one detail format so a persona sees one
+  /// shape of answer whichever layer produced it.
+  private async resolveAddressArgs(
+    entry: CallEntry,
+    args: EncodableArg[],
+    fromAgentId: string,
+    policy: AgentPolicy,
+  ): Promise<{ resolved: EncodableArg[]; named: Map<number, string> }> {
+    const { inputs, abiIndex } = Treasury.callerInputs(entry);
+    const resolved = [...args];
+    /// What the caller CALLED each resolved address, for the event: the event
+    /// reports the names and keys a persona used, never the addresses.
+    const named = new Map<number, string>();
+
+    for (let i = 0; i < inputs.length; i++) {
+      if (inputs[i]!.type !== 'address') continue;
+      const where = `argument ${i} (${inputs[i]!.name ?? ''})`;
+      const rule = entry.addressArgs[abiIndex(i)];
+      if (rule === undefined) {
+        // WALLET SCOPE NEVER PASSES A RAW ADDRESS, and an address parameter
+        // with no rule has no form it could take. Refused rather than defaulted
+        // to `any`: a default would open every address parameter of every
+        // future contract the moment it was added to the allowlist.
+        throw new HttpError(
+          'bad_args',
+          `${where}: this function's address arguments are not callable by a wallet; ` +
+            `no addressArgs rule for it`,
+        );
+      }
+      const wire = args[i] as WireAddress;
+      const key = Object.keys(wire)[0] as 'token' | 'contract' | 'name';
+      const value = (wire as Record<string, string>)[key]!;
+
+      if (rule === 'token' && key !== 'token') throw new HttpError('bad_args', `${where}: expected a token key`);
+      if (rule === 'contract' && key !== 'contract') {
+        throw new HttpError('bad_args', `${where}: expected a contract key`);
+      }
+      if (rule === 'name' && key !== 'name') throw new HttpError('bad_args', `${where}: expected a name`);
+
+      if (key === 'token') {
+        const token = this.chain.modules.tokens.find((t) => t.key === value);
+        if (!token) throw new HttpError('bad_args', `${where}: expected a token key`);
+        resolved[i] = token.address;
+        named.set(i, value);
+      } else if (key === 'contract') {
+        // requireContract's own refusal is `unknown_contract`, which is the
+        // right code when the CONTRACT is the subject of the request. Here the
+        // contract key is an ARGUMENT, so the subject is the argument - and a
+        // persona that gets `unknown_contract` for a call to a contract that
+        // plainly exists would go looking in the wrong place.
+        const found = this.chain.modules.byKey.get(value);
+        if (!found) throw new HttpError('bad_args', `${where}: expected a contract key`);
+        resolved[i] = found.address;
+        named.set(i, value);
+      } else {
+        // A NAME, resolved exactly as sign-transfer resolves `to` - bare-id
+        // rules included - and subject to the SAME deny list. A persona's deny
+        // list is about whom it may pay, and paying through a contract call is
+        // still paying: a deny that applied to `send` and not to `call` would
+        // be a deny with a documented bypass.
+        const target = await this.resolveTo(assertLookupName(value), fromAgentId);
+        await this.assertNotDeniedByIdentity(policy, target.address, value);
+        resolved[i] = target.address;
+        named.set(i, target.canonical ?? value);
+      }
+    }
+    return { resolved, named };
+  }
+
+  /// §3.2 step 6. Which token this call moves and how much, and every cap that
+  /// applies to it.
+  ///
+  /// TWO BOUNDS CAN HOLD AT ONCE and both are checked. When the amount is in
+  /// the DEFAULT token the wallet's own `max_per_tx` applies, because that cap
+  /// is denominated in it. When the entry carries a `perTxCap` that applies
+  /// too, in the resolved token's own decimals - and for the `{arg}` form the
+  /// entry MUST carry one, because which token it names is chosen per call and
+  /// `gold -> play` would otherwise be bounded by nothing at all.
+  private callAmount(
+    entry: CallEntry,
+    args: EncodableArg[],
+    wireArgs: unknown[],
+    policy: AgentPolicy,
+  ): { amount: bigint; token: TokenModule; index: number } | null {
+    if (!entry.amount) return null;
+    const { callerIndex } = Treasury.callerInputs(entry);
+
+    const i = callerIndex(entry.amount.arg);
+    if (i === null) {
+      // The allowlist put the amount in the slot the server fills. Refused at
+      // load, so this is unreachable - and it is an internal_error rather than
+      // a bad_args, because the caller did nothing wrong.
+      throw new HttpError('internal_error', `calls.json: amount.arg is the intentArg slot`);
+    }
+
+    const tokens = this.chain.modules.tokens;
+    let token: TokenModule | undefined;
+    if (typeof entry.amount.token === 'string') {
+      token = tokens.find((t) => t.key === entry.amount!.token);
+    } else {
+      // The token whose ADDRESS is that argument - resolved by step 5 already,
+      // so this reads an address rather than a wire form.
+      const at = callerIndex(entry.amount.token.arg);
+      const address = at === null ? undefined : (args[at] as string);
+      token = tokens.find((t) => t.address.toLowerCase() === String(address).toLowerCase());
+    }
+    if (!token) {
+      // Reachable: the caller named a contract key that IS in the registry and
+      // is not a token, in a slot the entry calls the amount's token. A fact
+      // about their own input.
+      throw new HttpError(
+        'bad_args',
+        `argument ${callerIndex(
+          typeof entry.amount.token === 'string' ? entry.amount.arg : entry.amount.token.arg,
+        )}: expected a token this deployment carries`,
+      );
+    }
+
+    // AN AMOUNT IS IN WHOLE UNITS ON THE WIRE AND IN THE TOKEN'S SMALLEST UNIT
+    // IN THE CALLDATA, and this is where the two meet. The validator saw a
+    // uint256 and produced `40n`, which is the right reading of an ordinary
+    // uint argument and the WRONG one for money: `"40"` from a persona means 40
+    // PLAY, and the contract takes 40e18. So the amount slot is re-parsed, with
+    // the DECIMALS OF THE TOKEN THAT ACTUALLY RESOLVED - the scale differs per
+    // token (PLAY 18, GOLD 6), and using the default token's would multiply a
+    // gold amount by a trillion.
+    //
+    // Re-parsed from the WIRE value rather than scaled from the validator's
+    // bigint, so there is exactly one conversion and no chance of a double one.
+    const amount = parseVee(wireArgs[i], token.decimals, token.symbol, `argument ${i}`);
+    if (amount <= 0n) throw new HttpError('invalid_amount', 'the amount must be greater than zero');
+
+    const isDefault = token.key === defaultToken(this.chain.modules).key;
+    if (isDefault) {
+      // The wallet's own per-transaction cap, and the deny/allow lists - with
+      // the CONTRACT KEY as the counterparty, so a policy can name contracts
+      // the way it names wallets. enforcePolicy is pure string matching, so
+      // this works mechanically; the consequence is a standing rule, written
+      // in policy-defaults.json: a kind whose allow list is not ["*"] must name
+      // every contract key its callers may pay through.
+      enforcePolicy({
+        policy,
+        to: entry.contract,
+        canonical: entry.contract,
+        amount,
+        decimals: token.decimals,
+        symbol: token.symbol,
+      });
+    }
+
+    if (entry.perTxCap !== undefined) {
+      const cap = parseVee(entry.perTxCap, token.decimals, token.symbol, 'perTxCap');
+      if (amount > cap) {
+        throw new HttpError(
+          'over_max_per_tx',
+          `this call's per-transaction cap is ${entry.perTxCap} ${token.symbol}`,
+        );
+      }
+    } else if (!isDefault && entry.uncapped !== true) {
+      // UNREACHABLE UNDER THE LOAD RULE, which refuses an entry whose amount is
+      // in a non-default token - or in the per-call {arg} form - unless it
+      // carries perTxCap or uncapped. Two lines on a money bound, kept because
+      // the alternative to an unreachable check here is an unbounded spend if
+      // the load rule ever narrows.
+      throw new HttpError(
+        'function_not_allowed',
+        `this call moves ${token.symbol}, which no cap in this deployment bounds`,
+      );
+    }
+
+    return { amount, token, index: i };
+  }
+
+  /// The allowlist entry for this request, or the one refusal that covers every
+  /// way there is not one.
+  ///
+  /// ONE CODE FOR ALL OF THEM, deliberately: no entry, an entry of the wrong
+  /// sort, and an entry this wallet's kind is not in are all
+  /// `function_not_allowed`. Distinguishing them would tell a persona what
+  /// OTHER kinds of wallet are permitted to do, which is the one thing the
+  /// allowlist is keeping from it.
+  private entryFor(
+    snapshot: Allowlist,
+    contractKey: string,
+    fn: unknown,
+    want: 'call' | 'read' | 'admin',
+  ): CallEntry {
+    if (typeof fn !== 'string' || fn === '') {
+      throw new HttpError('invalid_request', 'function must be a string');
+    }
+    const entry = snapshot.find(contractKey, fn);
+    const refuse = (): never => {
+      throw new HttpError('function_not_allowed', `${fn} is not callable on ${contractKey}`);
+    };
+    if (!entry) refuse();
+    if (want === 'read' && !entry!.read) refuse();
+    if (want !== 'read' && entry!.read) refuse();
+    if (want === 'admin' && !entry!.admin) refuse();
+    return entry!;
+  }
+
+  /// sha256 of the canonical JSON of the validated wire arguments.
+  ///
+  /// OF THE WIRE FORM, not of the resolved addresses, and the two differ: the
+  /// same `{"name":"alpha"}` resolves to a different address if alpha's wallet
+  /// is respawned. The replay check asks "is this the same CALL", and the call
+  /// is what the caller wrote. wallet-mcp hashes the same thing on its side, so
+  /// its local `duplicate_intent` and this cannot disagree.
+  private static argsHash(args: unknown[]): string {
+    const canonical = JSON.stringify(args, (_k, v) =>
+      typeof v === 'bigint' ? `${v}#bigint` : v,
+    );
+    return createHash('sha256').update(canonical).digest('hex');
+  }
+
+  /// §3.2. A wallet calls a contract with its own key.
+  async call(
+    principal: Principal,
+    body: { fromAgentId?: unknown; contract?: unknown; function?: unknown; args?: unknown; intentId?: unknown },
+    clientMarker?: string,
+  ): Promise<{ txHash: string; intentId: string; intentIdSource: 'caller' | 'server' }> {
+    // 1. WHO. Derived from the credential, never from the body; a body
+    //    fromAgentId is tolerated only when it agrees.
+    const fromAgentId = walletPrincipal(principal, body.fromAgentId);
+
+    // 2. WHAT. One snapshot for the whole request, so a reload between two
+    //    checks cannot apply one version to the kinds and another to the caps.
+    const snapshot = this.calls.snapshot();
+    if (typeof body.contract !== 'string') {
+      throw new HttpError('invalid_request', 'contract must be a string');
+    }
+    const contract = requireContract(this.chain.modules, body.contract);
+    const entry = this.entryFor(snapshot, contract.key, body.function, 'call');
+
+    // 3. FROZEN. The store is the single truth; wallet-mcp's copy is a
+    //    courtesy and loses any disagreement.
+    if (this.store.isFrozen(fromAgentId)) {
+      throw new HttpError('wallet_frozen', `${fromAgentId} is frozen`);
+    }
+
+    // 4. KIND. A pre-v4 wallet has a null kind and is read as `agent` HERE, at
+    //    request time, for this decision only. That is not the backfill
+    //    migrate.ts forbids: nothing is written, and `spawns.kind` still says
+    //    "this wallet was spawned before chain-svc recorded kinds", which stays
+    //    the true answer to a different question.
+    const kind = this.store.walletRow(fromAgentId)?.kind ?? 'agent';
+    if (!entry.kinds.includes(kind)) {
+      throw new HttpError('function_not_allowed', `${entry.function} is not callable on ${contract.key}`);
+    }
+
+    // 5. ARGUMENTS. Shape first, against the ABI; then the entry's per-index
+    //    address rules, which resolve names through the registry and apply this
+    //    wallet's deny list.
+    const supplied = Array.isArray(body.args) ? body.args : null;
+    if (supplied === null) throw new HttpError('bad_args', 'args must be an array');
+    const { inputs } = Treasury.callerInputs(entry);
+    const shaped = validateArgs(inputs, supplied, 'wallet');
+    const policy = await this.policyFor(fromAgentId);
+    const { resolved, named } = await this.resolveAddressArgs(entry, shaped, fromAgentId, policy);
+
+    // 6. MONEY. Null when the entry declares no amount - which is the
+    //    push-only rule holding: a function that PULLED funds would need an
+    //    allowance, and this service has none to give.
+    const money = this.callAmount(entry, resolved, supplied, policy);
+    // The scaled amount is what the contract is called with. Written back here
+    // rather than inside callAmount so that "which argument the calldata
+    // carries" is visible at the call site rather than as a side effect.
+    if (money) resolved[money.index] = money.amount;
+
+    // 7-8. THE RESERVATION, covering the intent, the stage hold and the
+    //    per-entry count in one transaction, before anything is signed.
+    const stage = await this.currentStage();
+    const suppliedId = typeof body.intentId === 'string' && body.intentId !== '';
+    const idSource = suppliedId ? ('caller' as const) : ('server' as const);
+    const intentId = suppliedId ? (body.intentId as string) : `chain-svc:${randomUUID()}`;
+    const argsHash = Treasury.argsHash(supplied);
+
+    const reservation = this.store.reserve({
+      intentId,
+      topic: intentTopic(intentId),
+      reservedAtBlock: this.store.observedHead() ?? undefined,
+      idSource,
+      agentId: fromAgentId,
+      stage,
+      amount: money?.amount ?? 0n,
+      // A hold is taken only when the amount is in the DEFAULT token, because
+      // the stage budget is denominated in it. An amount in another token is
+      // bounded by the entry's perTxCap and by nothing else until increment 4.
+      capWei:
+        money && money.token.key === defaultToken(this.chain.modules).key
+          ? stageCapWei(policy, money.token.decimals)
+          : null,
+      call: {
+        contract: contract.key,
+        function: entry.function,
+        argsHash,
+        maxPerStage: entry.maxPerStage,
+      },
+    });
+
+    if (reservation.outcome === 'over_stage_cap') {
+      throw new HttpError(
+        'over_stage_cap',
+        entry.maxPerStage !== undefined && !money
+          ? `${entry.function} may be called ${entry.maxPerStage} times per stage`
+          : `max_per_stage is ${policy.max_per_stage} for this stage`,
+      );
+    }
+    if (reservation.outcome === 'duplicate') {
+      // A REPLAY IS ONLY A REPLAY IF IT IS THE SAME CALL. chain-svc answers a
+      // repeated intent id with the original transaction hash, which is right
+      // for a retry and wrong for a DIFFERENT call wearing a used id - that
+      // caller would be told their second call had succeeded.
+      const first = this.store.intentCall(intentId);
+      if (first && (first.contract !== contract.key || first.function !== entry.function || first.argsHash !== argsHash)) {
+        throw new HttpError(
+          'invalid_request',
+          `intent_id reused with a different call: ${intentId} was reserved for ` +
+            `${first.function} on ${first.contract}`,
+        );
+      }
+      if (reservation.txHash) {
+        return { txHash: reservation.txHash, intentId, intentIdSource: idSource };
+      }
+      throw new HttpError(
+        'intent_unresolved',
+        `intent ${intentId} is reserved with no recorded transaction: an earlier attempt reached ` +
+          `the broadcast and its outcome is unknown. Reconcile against the chain using THIS intent ` +
+          `id - never retry with a fresh one, which would call a second time.`,
+      );
+    }
+
+    // 9. SIGN AND SEND.
+    const finalArgs = Treasury.withIntentArg(entry, resolved, intentId);
+
+    // --- PROVABLY BEFORE THE BROADCAST ------------------------------------
+    // Loading the key, building the client and preparing the request are local
+    // or read-only; none of them can put a transaction on the wire. A failure
+    // here therefore provably precedes the broadcast, and this is the ONLY
+    // thing in this method that may release.
+    let serializedTransaction: `0x${string}`;
+    let wallet: Signer;
+    try {
+      const { privateKey } = await this.keystore.load(fromAgentId);
+      const account = privateKeyToAccount(privateKey);
+      wallet = this.signerFor(account);
+      const data = encodeFunctionData({
+        abi: contract.abi,
+        functionName: entry.function,
+        args: finalArgs as never,
+      });
+      const request = await wallet.prepareTransactionRequest({
+        account,
+        chain: this.chain.viemChain,
+        to: contract.address,
+        data,
+        ...ZERO_FEES,
+      });
+      serializedTransaction = await wallet.signTransaction(request as never);
+    } catch (err) {
+      this.store.release(intentId);
+      throw asChainError(err);
+    }
+
+    // --- AT OR AFTER THE BROADCAST ----------------------------------------
+    // From here the reservation STANDS whatever happens - including a mined
+    // revert, which keeps its stage slot because it was mined.
+    const txHash = await this.broadcastCall({
+      wallet,
+      serializedTransaction,
+      intentId,
+      contract,
+      entry,
+      wireArgs: supplied,
+      named,
+      money,
+      actor: { kind: 'agent.call', name: fromAgentId, agentKind: kind },
+      via: spendVia(clientMarker),
+    });
+    return { txHash, intentId, intentIdSource: idSource };
+  }
+
+  /// The intent id goes into the slot the entry named, and the caller may not
+  /// supply it: a value there is a caller trying to choose the id the chain
+  /// will log, which is the join the anomaly detector reads.
+  private static withIntentArg(
+    entry: CallEntry,
+    args: EncodableArg[],
+    intentId: string,
+  ): EncodableArg[] {
+    if (entry.intentArg === undefined) return args;
+    const out = [...args];
+    out.splice(entry.intentArg, 0, intentTopic(intentId));
+    return out;
+  }
+
+  /// The post-broadcast tail for a call, extracted for the same reason
+  /// `broadcast` is: the release rule above needs exactly one catch to live in,
+  /// and this one must not quietly grow a second.
+  private async broadcastCall(args: {
+    wallet: Pick<Signer, 'sendRawTransaction'>;
+    serializedTransaction: `0x${string}`;
+    intentId: string;
+    contract: RegisteredContract;
+    entry: CallEntry;
+    wireArgs: unknown[];
+    named: Map<number, string>;
+    money: { amount: bigint; token: TokenModule } | null;
+    actor: { kind: 'agent.call'; name: string; agentKind: string };
+    via: string;
+  }): Promise<string> {
+    const hash = await args.wallet.sendRawTransaction({
+      serializedTransaction: args.serializedTransaction,
+    });
+    // Recorded as soon as there IS a hash, before the receipt: a crash while
+    // waiting must still leave the retry able to find the original call.
+    this.store.completeIntent(args.intentId, hash);
+    const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
+    const reverted = receipt.status === 'reverted';
+
+    // THE EVENT IS EMITTED FOR BOTH OUTCOMES. A reverted call is a thing the
+    // persona did - it reached the chain, it cost a stage slot - and a feed
+    // that showed only the successes would show a persona trying nothing when
+    // it was trying repeatedly.
+    this.store.enqueueEvent(args.actor.kind, {
+      kind: args.actor.kind,
+      name: args.actor.name,
+      contract: args.contract.key,
+      function: args.entry.function,
+      // THE NAMES AND KEYS THE CALLER USED, never the addresses they resolved
+      // to. The feed is read by the facilitator and mirrors what the persona
+      // believes it did.
+      args: args.wireArgs,
+      intent_id: args.intentId,
+      via: args.via,
+      txHash: hash,
+      status: reverted ? 'reverted' : 'ok',
+      ...(args.money
+        ? {
+            amount: {
+              value: formatVee(args.money.amount, args.money.token.decimals),
+              token: args.money.token.key,
+            },
+          }
+        : {}),
+    });
+
+    if (reverted) {
+      // THE CODE CROSSES TO THE PERSONA AND THE REASON DOES NOT. It must know
+      // its call did nothing, or it will act as though it worked; the revert
+      // string is the contract's internal state talking, and a game's
+      // machinery is not a player's to read.
+      //
+      // The reservation STANDS - the call was mined, so the release rule keeps
+      // it, and the stage slot it consumed stays consumed.
+      console.warn(
+        `[chain-svc] ${args.entry.function} on ${args.contract.key} reverted for ` +
+          `${args.actor.name} (intent ${args.intentId}, tx ${hash})`,
+      );
+      throw new HttpError('revert', 'the call was mined and reverted; nothing changed');
+    }
+    return hash;
+  }
+
+  /// §3.3. The hub calls a contract with the treasury's key.
+  ///
+  /// NO KIND, FROZEN, CAP, COUNT OR ADDRESS RULE: platform scope is the
+  /// operator, and per-stage counting is a persona budget rather than an
+  /// operator one. What DOES apply is the entry: `admin: true` must be written
+  /// in calls.json, so the hub's powers are on the record beside the personas'.
+  async adminCall(body: {
+    contract?: unknown;
+    function?: unknown;
+    args?: unknown;
+    intentId?: unknown;
+  }): Promise<{ txHash: string; intentId: string }> {
+    const snapshot = this.calls.snapshot();
+    if (typeof body.contract !== 'string') {
+      throw new HttpError('invalid_request', 'contract must be a string');
+    }
+    const contract = requireContract(this.chain.modules, body.contract);
+    const entry = this.entryFor(snapshot, contract.key, body.function, 'admin');
+
+    const supplied = Array.isArray(body.args) ? body.args : null;
+    if (supplied === null) throw new HttpError('bad_args', 'args must be an array');
+    const { inputs } = Treasury.callerInputs(entry);
+    const shaped = validateArgs(inputs, supplied, 'platform');
+
+    const stage = await this.currentStage();
+    const intentId =
+      typeof body.intentId === 'string' && body.intentId !== ''
+        ? body.intentId
+        : `chain-svc:${randomUUID()}`;
+    const argsHash = Treasury.argsHash(supplied);
+
+    // THE SAME RESERVATION, for the idempotency half only: `capWei: null`
+    // because the treasury has no stage cap, and a fixed pseudo-id because
+    // `intents.agent_id` records WHO reserved it and the hub is not a wallet.
+    const reservation = this.store.reserve({
+      intentId,
+      topic: intentTopic(intentId),
+      idSource: typeof body.intentId === 'string' ? 'caller' : 'server',
+      agentId: 'platform',
+      stage,
+      amount: 0n,
+      capWei: null,
+      call: { contract: contract.key, function: entry.function, argsHash },
+    });
+    if (reservation.outcome === 'duplicate') {
+      const first = this.store.intentCall(intentId);
+      if (first && (first.contract !== contract.key || first.function !== entry.function || first.argsHash !== argsHash)) {
+        throw new HttpError(
+          'invalid_request',
+          `intent_id reused with a different call: ${intentId} was reserved for ` +
+            `${first.function} on ${first.contract}`,
+        );
+      }
+      if (reservation.txHash) return { txHash: reservation.txHash, intentId };
+      throw new HttpError(
+        'intent_unresolved',
+        `intent ${intentId} is reserved with no recorded transaction; reconcile against the chain ` +
+          `using THIS intent id`,
+      );
+    }
+
+    const finalArgs = Treasury.withIntentArg(entry, shaped, intentId);
+    let hash: `0x${string}`;
+    try {
+      hash = await this.chain.walletClient.writeContract({
+        account: this.chain.walletClient.account!,
+        chain: this.chain.viemChain,
+        address: contract.address,
+        abi: contract.abi,
+        functionName: entry.function,
+        args: finalArgs as never,
+        ...ZERO_FEES,
+      });
+    } catch (err) {
+      // --- AT OR AFTER THE BROADCAST --------------------------------------
+      // NO RELEASE HERE, and it is not an omission. `writeContract` simulates
+      // AND sends, and a caller cannot tell from the outside which half threw:
+      // a simulation refusal provably precedes the broadcast, a send error does
+      // not, and "the call landed and the response was lost" is precisely the
+      // case an idempotency key exists for. The release rule takes the
+      // conservative branch for both.
+      //
+      // What that costs is small and worth naming: a simulation-time revert
+      // consumes the intent id, so a retry needs a fresh one. The hub generates
+      // one per request unless it supplies its own, so in practice this is the
+      // operator repeating a command rather than reconciling anything.
+      throw asChainError(err);
+    }
+    this.store.completeIntent(intentId, hash);
+    const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
+    const reverted = receipt.status === 'reverted';
+
+    this.store.enqueueEvent('hub.call', {
+      kind: 'hub.call',
+      contract: contract.key,
+      function: entry.function,
+      args: supplied,
+      intent_id: intentId,
+      txHash: hash,
+      status: reverted ? 'reverted' : 'ok',
+    });
+    if (reverted) {
+      console.warn(
+        `[chain-svc] admin-call ${entry.function} on ${contract.key} reverted ` +
+          `(intent ${intentId}, tx ${hash})`,
+      );
+      throw new HttpError('revert', 'the call was mined and reverted; nothing changed');
+    }
+    return { txHash: hash, intentId };
+  }
+
+  /// §3.4. A view function, for anyone with a credential.
+  ///
+  /// NO SCOPE CHECK BEYOND THE ALLOWLIST: a view on a registered contract is
+  /// public information on a private chain, and a persona could read the same
+  /// from an explorer if the game had one. It signs nothing, reserves nothing
+  /// and costs nothing, which is exactly why `read` first is the right advice
+  /// for a persona unsure whether a call would revert.
+  async read(
+    principal: Principal,
+    body: { contract?: unknown; function?: unknown; args?: unknown },
+  ): Promise<{ result: unknown }> {
+    const snapshot = this.calls.snapshot();
+    if (typeof body.contract !== 'string') {
+      throw new HttpError('invalid_request', 'contract must be a string');
+    }
+    const contract = requireContract(this.chain.modules, body.contract);
+    const entry = this.entryFor(snapshot, contract.key, body.function, 'read');
+
+    const platform = principal.scope === 'platform';
+    if (!platform) {
+      const agentId = walletPrincipal(principal, undefined);
+      const kind = this.store.walletRow(agentId)?.kind ?? 'agent';
+      if (!entry.kinds.includes(kind)) {
+        throw new HttpError('function_not_allowed', `${entry.function} is not readable on ${contract.key}`);
+      }
+    }
+
+    const supplied = Array.isArray(body.args) ? body.args : null;
+    if (supplied === null) throw new HttpError('bad_args', 'args must be an array');
+    const { inputs } = Treasury.callerInputs(entry);
+    const shaped = validateArgs(inputs, supplied, platform ? 'platform' : 'wallet');
+    const args = platform
+      ? shaped
+      : (await this.resolveAddressArgs(entry, shaped, walletPrincipal(principal, undefined), await this.policyFor(walletPrincipal(principal, undefined)))).resolved;
+
+    let raw: unknown;
+    try {
+      raw = await this.chain.publicClient.readContract({
+        address: contract.address,
+        abi: contract.abi,
+        functionName: entry.function,
+        args: args as never,
+      });
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      if (/revert/i.test(message)) {
+        console.warn(`[chain-svc] read ${entry.function} on ${contract.key} reverted: ${message.split('\n')[0]}`);
+        throw new HttpError('revert', 'the view reverted; it returned nothing');
+      }
+      throw asChainError(err);
+    }
+
+    const result = serialiseResult(raw, entry.abiFunction);
+    const size = JSON.stringify(result).length;
+    if (size > MAX_READ_BYTES) {
+      // REFUSED, NOT TRUNCATED. A view returning an unbounded array is a
+      // contract design problem, and a truncated answer hides it behind a
+      // result that looks complete.
+      throw new HttpError('bad_args', 'result too large; call a narrower view');
+    }
+    return { result };
   }
 }

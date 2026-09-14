@@ -214,6 +214,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { closedCallPolicy } from '../src/calls.ts';
 
 describe('spawning without a names module', () => {
   const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -324,6 +325,7 @@ describe('deny entries without a names module', () => {
       store,
       resolver,
       loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined),
+      closedCallPolicy(),
     );
     return { t, store };
   }

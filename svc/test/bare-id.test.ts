@@ -169,6 +169,7 @@ import type { Config } from '../src/config.ts';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = new URL('..', import.meta.url).pathname;
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
@@ -197,6 +198,7 @@ function detector(entries: Record<string, string | null>) {
     store,
     { lookup, require: async (n: string) => (await lookup(n))! } as unknown as Resolver,
     DEFAULTS,
+    closedCallPolicy(),
   );
   return { t, store };
 }

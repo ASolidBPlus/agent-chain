@@ -154,7 +154,13 @@ describe('every send site carries explicit zero fees', () => {
     // VANISHING, and cannot catch one MORE that the needles do not match, since
     // an unseen site contributes zero blocks and leaves the total unchanged.
     // The needles being unqualified is what covers the add direction.
-    expect(total).toBe(6);
+    //
+    // 6 -> 8 with the generic call op (§8.1): `call` prepares a transaction
+    // request with the caller's key and `admin-call` writes with the
+    // treasury's, and both spread ZERO_FEES. The number is the point of the
+    // assertion, so it moves only when a send site is genuinely added or
+    // removed - and it moving is what makes somebody look.
+    expect(total).toBe(8);
   });
 
   // THE SKIP, MADE VISIBLE - and this is the assertion the fix actually needs.

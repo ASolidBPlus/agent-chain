@@ -74,6 +74,27 @@ export interface Allowlist {
 
 const EMPTY: Allowlist = { entries: [], find: () => undefined };
 
+/// What the call op needs from the allowlist: one snapshot, per request.
+///
+/// AN INTERFACE RATHER THAN THE CLASS, so the thing that reads a file and the
+/// thing that answers questions are separable. A test of the call op should not
+/// need a directory, and a test of the loader should not need a chain.
+export interface CallPolicySource {
+  snapshot(): Allowlist;
+}
+
+/// The closed allowlist: nothing is callable. What a deployment with no
+/// calls.json has, and what a test that is not about the call op wants.
+export function closedCallPolicy(): CallPolicySource {
+  return { snapshot: () => EMPTY };
+}
+
+/// A fixed allowlist, for a test that IS about the call op.
+export function fixedCallPolicy(entries: CallEntry[]): CallPolicySource {
+  const byKey = new Map(entries.map((e) => [`${e.contract}.${e.function}`, e]));
+  return { snapshot: () => ({ entries, find: (c, f) => byKey.get(`${c}.${f}`) }) };
+}
+
 /// Whole units, as every other cap on these wires is written: a decimal string,
 /// digits only. `isCap` refuses a JSON number for the same reason.
 const WHOLE_UNITS = /^\d{1,30}$/;
@@ -321,7 +342,7 @@ function parseFile(text: string, modules: Modules): Allowlist {
 }
 
 /// Reads `calls.json` on demand, re-parsing only when the file changes.
-export class CallPolicy {
+export class CallPolicy implements CallPolicySource {
   private readonly path: string;
   private readonly modules: Modules;
   private readonly log: (line: string) => void;
