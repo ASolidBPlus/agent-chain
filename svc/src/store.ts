@@ -962,11 +962,21 @@ export class Store {
   /// goes into the calldata and comes back in the log - so a lookup by id
   /// cannot serve it. Null means "a transfer intent, or none of ours", and the
   /// caller separates those by whether it found an intent at all.
-  callContractForTopic(topic: string): string | null {
+  /// WHAT THE CHAIN'S LOG SHOULD HAVE COME FROM, by the topic it carries.
+  ///
+  /// ONE QUERY FOR BOTH COORDINATES, because they answer one question between
+  /// them: a CALL intent expects its emission from the contract it named, and a
+  /// TRANSFER intent expects it from the token it moved. Two queries would be
+  /// two chances for a caller to use one and forget the other - and the one
+  /// they would forget is the token, because it is the newer of the two.
+  ///
+  /// Null for an intent this store never reserved, which the caller separates
+  /// from "reserved with no token" by looking at whether either field came back.
+  intentRouting(topic: string): { callContract: string | null; token: string | null } | null {
     const row = this.db
-      .query(`SELECT call_contract FROM intents WHERE topic = ?`)
-      .get(topic) as { call_contract: string | null } | null;
-    return row?.call_contract ?? null;
+      .query(`SELECT call_contract, token FROM intents WHERE topic = ?`)
+      .get(topic) as { call_contract: string | null; token: string | null } | null;
+    return row ? { callContract: row.call_contract, token: row.token } : null;
   }
 
   /// Which wallet reserved the intent the chain logged under this topic, for

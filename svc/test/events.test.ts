@@ -1246,6 +1246,10 @@ describe('an IntentTransfer from a token we did not issue for', () => {
 // swallow it silently.
 describe('generic decoding', () => {
   const CONVERTER = '0xconv';
+  /// A second TOKEN's address, distinct from the converter and from the default
+  /// token - the fixture cannot test "which token did this intent move" unless
+  /// there are two to tell apart.
+  const GOLD_TOKEN = '0xgold';
   const CONVERTED_TOPIC = '0x1111111111111111111111111111111111111111111111111111111111111111';
   const INTENT = `0x${'cd'.repeat(32)}`;
 
@@ -1441,6 +1445,82 @@ describe('generic decoding', () => {
     });
 
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+
+    const anomaly = payloads(store).find((p) => p.kind === 'chain.anomaly')!;
+    expect(anomaly.reason).toBe('foreign_token');
+    store.close();
+  });
+
+  it('does not call a SECOND TOKEN\'s transfer foreign, when that is the token it moved', async () => {
+    // §4. The expected emitter for a TRANSFER intent is the token that intent
+    // MOVED, read from its own row - not the deployment's default. Before this,
+    // every non-default token's IntentTransfer was an anomaly by construction,
+    // so a game with two currencies would have reported every second-currency
+    // send as a foreign emission.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'gold-1',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 5n,
+      capWei: null,
+      token: 'gold',
+    });
+
+    // The emission comes from GOLD's contract, which is not the default token.
+    const chain = chainWithLogs([convertedLog({ address: GOLD_TOKEN })], {
+      tokens: [
+        { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 },
+        { key: 'gold', address: GOLD_TOKEN, symbol: 'GOLD', decimals: 6 },
+      ],
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+        { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI },
+      ],
+      byKey: new Map<string, unknown>([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+        ['gold', { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI }],
+      ]),
+    });
+    await new EventTail({} as Config, chain, store).pollOnce();
+
+    expect(payloads(store).filter((p) => p.kind === 'chain.anomaly')).toHaveLength(0);
+    store.close();
+  });
+
+  it('DOES call it foreign when the emission comes from a token the intent did not move', async () => {
+    // The mirror, and the reason the first test is not enough on its own: a
+    // check that answered "expected" for every token would pass it too.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'play-1',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 5n,
+      capWei: null,
+      token: 'play', // reserved in PLAY...
+    });
+
+    // ...but the emission comes from GOLD.
+    const chain = chainWithLogs([convertedLog({ address: GOLD_TOKEN })], {
+      tokens: [
+        { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 },
+        { key: 'gold', address: GOLD_TOKEN, symbol: 'GOLD', decimals: 6 },
+      ],
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+        { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI },
+      ],
+      byKey: new Map<string, unknown>([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+        ['gold', { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI }],
+      ]),
+    });
+    await new EventTail({} as Config, chain, store).pollOnce();
 
     const anomaly = payloads(store).find((p) => p.kind === 'chain.anomaly')!;
     expect(anomaly.reason).toBe('foreign_token');
