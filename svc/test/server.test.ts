@@ -51,6 +51,20 @@ const services = {
         ['converter', { key: 'converter', kind: 'converter', name: 'Converter', address: '0xconv', abi: [] }],
       ]),
     },
+    // REFUSES BY NAME rather than being absent. The assertions in this file are
+    // about ROUTING and AUTHORISATION, and none of them should need a chain -
+    // but /balance now reads every token's balance, so the property "no
+    // assertion here reaches the chain" has to be enforced rather than achieved
+    // by the handler happening to return first. A named throw keeps a silent
+    // pass against a mock impossible, which is what the absent client bought.
+    publicClient: {
+      readContract: () => {
+        throw new Error('the chain must not be reached in a routing test');
+      },
+      getBalance: () => {
+        throw new Error('the chain must not be reached in a routing test');
+      },
+    },
   },
   // The REAL Treasury's call op, as far as the router is concerned: these
   // three are what the four new routes reach. Built from the real classes -
@@ -495,5 +509,131 @@ describe('an intent is not an existence oracle', () => {
   it('lets platform scope read any', async () => {
     const res = await fetch(`${base}/intents/belongs-to-beta`, { headers: auth });
     expect(res.status).toBe(200);
+  });
+});
+
+// §1. THE WIRE RENAME, `vee` -> `amount`, with one release of overlap.
+//
+// A HARD CUT WOULD COUPLE TWO MERGES. The consumer is on its own bump cadence,
+// so `vee` is accepted as an alias for v0.5.0 and refused from v0.6.0 - and the
+// caller is TOLD, on the reply, rather than finding out at the removal.
+//
+// Normalised in ONE place. Five handlers read an amount, and five separate
+// alias checks would be five chances to spell the rule differently - which is
+// exactly how `vee` came to mean one deployment's currency in the first place.
+describe('the vee -> amount alias', () => {
+  const post = (path: string, payload: unknown) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+  it('accepts vee where amount is expected, and says it is deprecated', async () => {
+    const res = await post('/fund', { to: 'alpha.play', vee: '5' });
+    // The header is on the reply whatever the outcome: a caller that used the
+    // old name needs to be told even when the request fails for another reason.
+    expect(res.headers.get('deprecation')).toBe('true');
+    expect(res.headers.get('warning')).toBe('299 - "vee is deprecated; use amount"');
+  });
+
+  it('says nothing when the caller already uses amount', async () => {
+    // The warning must not become background noise on a correct request, or
+    // the one caller who still needs it stops reading it.
+    const res = await post('/fund', { to: 'alpha.play', amount: '5' });
+    expect(res.headers.get('deprecation')).toBeNull();
+    expect(res.headers.get('warning')).toBeNull();
+  });
+
+  it('refuses a request that sends BOTH, rather than picking one', async () => {
+    // Two names for one value is two values as far as a reader is concerned,
+    // and silently preferring either is a guess about which one the caller
+    // meant. The one case where a guess is cheap is the one where being wrong
+    // moves money.
+    const res = await post('/fund', { to: 'alpha.play', vee: '5', amount: '9' });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error).toBe('invalid_request');
+  });
+
+  it('leaves a body with neither alone', async () => {
+    const res = await post('/stage', { stage: 's2' });
+    expect(res.headers.get('deprecation')).toBeNull();
+  });
+});
+
+// §1. PER-TOKEN READ REPLIES.
+//
+// THE FIXTURE IS TWO TOKENS THAT DIFFER IN EVERY DIMENSION THE CODE FILTERS
+// ON - key, symbol-not-just-the-key-upper-cased, and decimals. One token, or
+// two that agree, and a reply that reported only the default would pass every
+// assertion below.
+//
+// The decimals half is not theoretical: increment 3 shipped a defect where an
+// amount was validated correctly and scaled by the DEFAULT token's decimals,
+// which is invisible when every token is 18 dp and a 1e12x error when one is 6.
+describe('per-token reads', () => {
+  const PLAY = { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 };
+  const AU = { key: 'au', address: '0xau', symbol: 'GOLD', decimals: 6 };
+
+  async function twoTokenServer(): Promise<{ server: Server; base: string }> {
+    const balances: Record<string, bigint> = {
+      '0xvee': 5_000000000000000000n, // 5 PLAY at 18 dp
+      '0xau': 7_000000n, //              7 GOLD at 6 dp
+    };
+    const svc = {
+      config: { token: TOKEN },
+      store,
+      chain: {
+        treasury: '0xtreasury',
+        deployment: { chainId: 31337, treasury: '0xtreasury' },
+        modules: {
+          tokens: [PLAY, AU],
+          names: { address: '0xreg', tld: 'play' },
+          contracts: [],
+          byKey: new Map(),
+        },
+        publicClient: {
+          readContract: async ({ address, functionName }: { address: string; functionName: string }) =>
+            functionName === 'totalSupply' ? balances[address]! * 2n : balances[address]!,
+          getBalance: async () => 1_000000000000000000n,
+        },
+      },
+      resolver: {
+        require: async () => ({ address: WALLET, canonical: 'alpha:client' }),
+        lookup: async () => ({ address: WALLET, canonical: 'alpha:client' }),
+      },
+    } as unknown as Services;
+
+    const s = createChainSvcServer(svc);
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+    return { server: s, base: `http://127.0.0.1:${(s.address() as { port: number }).port}` };
+  }
+
+  it('reports EVERY token on /balance, keyed by symbol, each at its own scale', async () => {
+    const { server: s, base: b } = await twoTokenServer();
+    const res = (await (await fetch(`${b}/balance/alpha.play`, { headers: auth })).json()) as Record<string, unknown>;
+    s.close();
+
+    // Each formatted at ITS OWN decimals: 5 PLAY at 18 dp and 7 GOLD at 6 dp
+    // are different numbers of wei and the same number of whole units.
+    expect(res.balances).toEqual({ PLAY: '5', GOLD: '7' });
+    expect(res.default).toBe('PLAY');
+    // `eth` stays top-level: the native gas balance is not a token.
+    expect(res.eth).toBe('1');
+    // The legacy single-token field survives for one release, for the DEFAULT
+    // token, so a v0.4.0 reader keeps working while it migrates.
+    expect(res.vee).toBe('5');
+  });
+
+  it('reports every token on /supply', async () => {
+    const { server: s, base: b } = await twoTokenServer();
+    const res = (await (await fetch(`${b}/supply`, { headers: auth })).json()) as Record<string, unknown>;
+    s.close();
+    expect(res.tokens).toEqual({
+      PLAY: { total: '10', treasury: '5', inPlay: '5' },
+      GOLD: { total: '14', treasury: '7', inPlay: '7' },
+    });
+    // The legacy top-level trio, for the default token, for one release.
+    expect(res.total).toBe('10');
   });
 });
