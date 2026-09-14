@@ -24,6 +24,10 @@ store.setWalletTokenHash('alpha:client', hashToken(WALLET_TOKEN));
 let server: Server;
 let base: string;
 
+/// Every body POST /fund handed to the treasury, in order. Read by the alias
+/// tests to prove the NORMALISATION happened, not merely that a header did.
+const fundCalls: Array<Record<string, unknown>> = [];
+
 // Enough of the services graph to reach routing and validation. Any handler
 // that needs the chain is covered by the integration suite instead, which runs
 // against a real Anvil - a mocked chain would only prove the mock works.
@@ -86,6 +90,18 @@ const services = {
       call: async (_p: unknown, b: Record<string, unknown>) => refuseFor(b.contract, b.function),
       adminCall: async (b: Record<string, unknown>) => refuseFor(b.contract, b.function),
       read: async (_p: unknown, b: Record<string, unknown>) => refuseFor(b.contract, b.function),
+      // RECORDS WHAT IT RECEIVED rather than only succeeding. The alias tests
+      // below assert that `vee` ARRIVES AS `amount`, and nothing but the body
+      // the handler actually passed on can show that. Without a `fund` here at
+      // all, every /fund request 500'd inside the handler and the alias tests
+      // still passed, because they only read headers - which are set before
+      // dispatch and survive the crash. It printed an unhandled error on every
+      // run, and a suite that prints one routinely is a suite where the next
+      // real one is invisible.
+      fund: async (b: Record<string, unknown>) => {
+        fundCalls.push(b);
+        return { ok: true };
+      },
     };
   })(),
   resolver: {
@@ -531,19 +547,33 @@ describe('the vee -> amount alias', () => {
     });
 
   it('accepts vee where amount is expected, and says it is deprecated', async () => {
+    fundCalls.length = 0;
     const res = await post('/fund', { to: 'alpha.play', vee: '5' });
     // The header is on the reply whatever the outcome: a caller that used the
     // old name needs to be told even when the request fails for another reason.
     expect(res.headers.get('deprecation')).toBe('true');
     expect(res.headers.get('warning')).toBe('299 - "vee is deprecated; use amount"');
+    // AND THAT IT WAS ACCEPTED, which is the first half of this test's own
+    // name and used not to be tested at all. The header proves the request was
+    // RECOGNISED as deprecated; only the body the handler passed on proves the
+    // value was CARRIED. Two facts, and the header is the one that survives
+    // the handler failing - which is exactly what it was doing here.
+    expect(res.status).toBe(200);
+    expect(fundCalls).toEqual([{ to: 'alpha.play', amount: '5' }]);
   });
 
   it('says nothing when the caller already uses amount', async () => {
     // The warning must not become background noise on a correct request, or
     // the one caller who still needs it stops reading it.
+    fundCalls.length = 0;
     const res = await post('/fund', { to: 'alpha.play', amount: '5' });
     expect(res.headers.get('deprecation')).toBeNull();
     expect(res.headers.get('warning')).toBeNull();
+    // ASSERTING AN ABSENCE NEEDS A LIVE REQUEST UNDERNEATH IT. A 500 carries no
+    // deprecation header either, so both expectations above were satisfied by
+    // the crash - this test would have passed with the alias code deleted.
+    expect(res.status).toBe(200);
+    expect(fundCalls).toEqual([{ to: 'alpha.play', amount: '5' }]);
   });
 
   it('refuses a request that sends BOTH, rather than picking one', async () => {
