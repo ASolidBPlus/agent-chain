@@ -544,7 +544,7 @@ describe('the release rule', () => {
   it('keeps the reservation when the broadcast fails', async () => {
     const store = new Store(':memory:');
     const t = treasury(store);
-    store.reserve({ intentId: 'i1', ...args });
+    store.reserve({ token: 'play', intentId: 'i1', ...args });
 
     const wallet = {
       sendRawTransaction: () => Promise.reject(new Error('socket hang up')),
@@ -559,8 +559,8 @@ describe('the release rule', () => {
       }),
     ).rejects.toThrow();
 
-    expect(store.spentThisStage('orch:a', 's1')).toBe(args.amount);
-    expect(store.reserve({ intentId: 'i1', ...args })).toEqual({ outcome: 'duplicate', txHash: null });
+    expect(store.spentThisStage('orch:a', 's1', 'play')).toBe(args.amount);
+    expect(store.reserve({ token: 'play', intentId: 'i1', ...args })).toEqual({ outcome: 'duplicate', txHash: null });
     store.close();
   });
 
@@ -571,7 +571,7 @@ describe('the release rule', () => {
   it('records the hash as soon as the send returns one, before the receipt', async () => {
     const store = new Store(':memory:');
     const t = treasury(store);
-    store.reserve({ intentId: 'i2', ...args });
+    store.reserve({ token: 'play', intentId: 'i2', ...args });
 
     // `chain` is the exploding proxy, so touching publicClient IS the failure
     // between the send and the receipt.
@@ -609,7 +609,7 @@ describe('the release rule', () => {
     const send = { fromAgentId: 'orch:a', to: 'bob.play', vee: '1', intentId: 'replay' };
     const seed = (store: Store) => {
       const stage = store.currentStage();
-      store.reserve({ intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
+      store.reserve({ token: 'play', intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
     };
 
     it('returns the ORIGINAL hash when the first send completed', async () => {
@@ -1216,7 +1216,7 @@ describe('POST /wallets/:agentId/balance', () => {
     const { t, store } = treasuryAt(vee(0));
     const res = await t.setBalance('orch:a', { vee: '100000', intentId: 'b-6' });
     expect(res.balance).toBe('100000');
-    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(0n);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
   }, 20_000);
 });
 

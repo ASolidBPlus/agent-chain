@@ -298,6 +298,7 @@ describe('the intent anomaly', () => {
   it('raises chain.anomaly when one intent id has two transfers', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-anom', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -331,6 +332,7 @@ describe('the intent anomaly', () => {
   it('counts an emission with no sender, recording the sender as null', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-nosender', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -369,6 +371,7 @@ describe('the intent anomaly', () => {
   it('raises chain.anomaly across TWO polls, not just within one', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-late', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -431,6 +434,7 @@ describe('the intent anomaly', () => {
   it('catches the split-brain double-spend: same id, same sender, two polls', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'shared-key', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -483,6 +487,7 @@ describe('the intent anomaly', () => {
   it('counts a third emission, across three polls', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'thrice', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -509,6 +514,7 @@ describe('the intent anomaly', () => {
   it('does not double-count a re-seen SECOND emission', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 're-second', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -534,6 +540,7 @@ describe('the intent anomaly', () => {
   it('does not double-count the same emission across a replayed window', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'replayed', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -558,6 +565,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: 'i-foreign', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -586,6 +594,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: `i-${idSource}`, topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n, idSource,
     });
@@ -607,6 +616,7 @@ describe('the intent anomaly', () => {
     const WALLET = '0x000000000000000000000000000000000000bEEF';
     store.markSpawned('orch:mark', WALLET, null);
     store.reserve({
+      token: 'play',
       intentId: 'i-ours', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -626,6 +636,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: 'i-case', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -646,6 +657,7 @@ describe('the intent anomaly', () => {
   it('makes no foreign judgement when the wallet is unknown', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-unknown', topic: TOPIC, agentId: 'orch:nowallet',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -695,6 +707,7 @@ describe('sweepOnce', () => {
   /// every assertion below would pass for the wrong reason.
   const reserve = (store: Store, intentId: string, block: bigint | undefined) =>
     store.reserve({
+      token: 'play',
       intentId, topic: TOPIC2, agentId: 'orch:mark', stage: store.currentStage(),
       amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: block,
     });
@@ -708,7 +721,7 @@ describe('sweepOnce', () => {
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
     expect(store.intentTxHash('landed')).toBe('0xaaa');
     // The money moved, so the budget stays spent.
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n);
     store.close();
   });
 
@@ -746,11 +759,12 @@ describe('sweepOnce', () => {
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
     // The hold stands...
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n);
     // ...and the id is still consumed, which is the half that matters: a retry
     // must be refused, not broadcast a second time.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'unlanded', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -820,6 +834,7 @@ describe('sweepOnce', () => {
     // property: an aged row that stops refusing a retry is a double-charge.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'ancient-by-clock', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -863,6 +878,7 @@ describe('sweepOnce', () => {
 
     // And one in the new stage, also landed.
     store.reserve({
+      token: 'play',
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
       stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
@@ -886,6 +902,7 @@ describe('sweepOnce', () => {
 
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'rolled', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -914,6 +931,7 @@ describe('sweepOnce', () => {
     // never admitted as a fresh reservation.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'terminal', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }),
@@ -930,7 +948,7 @@ describe('sweepOnce', () => {
     store.setCursor('chain-log-tail', 9_999_999n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n); // still held
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n); // still held
     store.close();
   });
 
@@ -1159,6 +1177,7 @@ describe('an IntentTransfer from a token we did not issue for', () => {
     // matched on that, not on the id string. Passing it explicitly keeps the
     // fixture honest about which of the two the poll compares.
     store.reserve({
+      token: 'play',
       intentId: 'gold-anomaly', topic: TOPIC, agentId: 'orch:a', stage: store.currentStage(),
       amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
@@ -1393,7 +1412,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null,
+      capWei: null, token: 'play',
       call: { contract: 'converter', function: 'convert', argsHash: 'h' },
     });
 
@@ -1417,7 +1436,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null,
+      capWei: null, token: 'play',
       call: { contract: 'play', function: 'transfer', argsHash: 'h' },
     });
 

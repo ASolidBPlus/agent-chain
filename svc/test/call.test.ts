@@ -527,10 +527,10 @@ describe('money', () => {
   it('takes a stage hold only for the default token', async () => {
     const { t, store } = await harness();
     await t.call(asWallet('orch:a'), convertBody({ args: [{ token: 'gold' }, { token: 'play' }, '5'] }));
-    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(0n);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
 
     await t.call(asWallet('orch:a'), convertBody({ intentId: 'i-2', args: [{ token: 'play' }, { token: 'gold' }, '5'] }));
-    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(5000000000000000000n);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(5000000000000000000n);
   });
 
   it('names the allow list when a contract is not an allowed counterparty', async () => {
@@ -586,7 +586,7 @@ describe('money', () => {
       args: [{ name: 'bob' }],
       intentId: 'd-1',
     });
-    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(0n);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
   });
 });
 

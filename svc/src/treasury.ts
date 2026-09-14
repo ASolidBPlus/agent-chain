@@ -415,6 +415,11 @@ export class Treasury {
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
       capWei: null,
+      // The default token until §1 gives this endpoint its own `token`
+      // argument. Named at the call site rather than defaulted inside
+      // `reserve`, so the day a second token reaches this path the omission is
+      // a compile error rather than a hold taken in the wrong currency.
+      token: defaultToken(this.chain.modules).key,
       idSource: suppliedId ? 'caller' : 'server',
     });
     if (reservation.outcome === 'duplicate') {
@@ -741,6 +746,11 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
+      // The default token until §1 gives this endpoint its own `token`
+      // argument, and it is the same key the cap below is read against - so the
+      // hold and the bound it is tested against cannot be in different
+      // currencies.
+      token: defaultToken(this.chain.modules).key,
       capWei: stageCapWei(policy, defaultToken(this.chain.modules).key, decimals),
     });
 
@@ -1323,6 +1333,10 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount: money?.amount ?? 0n,
+      // THE TOKEN THAT ACTUALLY RESOLVED. A call moving no money still needs a
+      // coordinate for its intents row, and the default is the honest one
+      // there: nothing was held in any currency.
+      token: money?.token.key ?? defaultToken(this.chain.modules).key,
       // A hold is taken only when the amount is in the DEFAULT token, because
       // the stage budget is denominated in it. An amount in another token is
       // bounded by the entry's perTxCap and by nothing else until increment 4.
@@ -1584,6 +1598,10 @@ export class Treasury {
       stage,
       amount: 0n,
       capWei: null,
+      // No money moves through admin-call's reservation - it is the
+      // idempotency half only - so this is a coordinate, not a claim that
+      // anything was held in that currency.
+      token: defaultToken(this.chain.modules).key,
       call: { contract: contract.key, function: entry.function, argsHash },
     });
     if (reservation.outcome === 'duplicate') {
