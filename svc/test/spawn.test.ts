@@ -237,7 +237,7 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
 
     const chain = {
       viemChain: { id: 31337 },
-      deployment: { VEEBux: '0x3', NameRegistry: '0x4', treasury: '0x5', chainId: 31337 }, modules: { tokens: [{ key: 'vee', address: '0x3', symbol: 'VEE', decimals: 18 }], names: { address: '0x4', tld: 'vee' } },
+      deployment: { treasury: '0x5', chainId: 31337 }, modules: { tokens: [{ key: 'vee', address: '0x3', symbol: 'VEE', decimals: 18 }], names: { address: '0x4', tld: 'vee' } },
       publicClient: {
         getBalance: async () => 10n ** 18n, // already endowed with its 1 ETH
         readContract: async () => seed, // already holds the full seed
@@ -494,7 +494,7 @@ describe('the reservation records a sound lower bound', () => {
     }
     const t = new FailingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x000000000000000000000000000000000000dEaD' }, modules: { tokens: [{ key: 'vee', address: '0x000000000000000000000000000000000000dEaD', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x000000000000000000000000000000000000dEaD', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       store,
       { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' })) } as unknown as Resolver,
@@ -708,7 +708,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
@@ -726,7 +726,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical })) } as unknown as Resolver,
@@ -768,7 +768,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     const addressOf = (n: string) => (sameAddress.includes(n) ? SHARED : OTHER);
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       {
@@ -818,7 +818,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       {
@@ -1020,7 +1020,7 @@ describe('POST /wallets/:agentId/balance', () => {
       { ...config, policyDir: '/tmp/none' } as Config,
       {
         viemChain: {},
-        deployment: { VEEBux: '0xvee', treasury: TREASURY }, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }] },
+        deployment: { treasury: TREASURY }, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }] },
         publicClient: {
           readContract: async () => t.balance,
           waitForTransactionReceipt: async () => ({}),
@@ -1299,7 +1299,7 @@ describe('spawn records the kind it enforced', () => {
     const address = '0x000000000000000000000000000000000000bEEF';
     const chain = {
       viemChain: {},
-      deployment: { VEEBux: '0x0', NameRegistry: '0x1' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }], names: { address: '0x1', tld: 'vee' } },
+      deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }], names: { address: '0x1', tld: 'vee' } },
       publicClient: {
         getBalance: async () => 10n ** 18n,      // already endowed
         readContract: async () => 10n ** 30n,    // already funded

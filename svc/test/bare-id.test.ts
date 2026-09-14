@@ -189,7 +189,7 @@ function detector(entries: Record<string, string | null>) {
     { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json') } as Config,
     {
       viemChain: {},
-      deployment: { VEEBux: '0x0' }, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] },
+      deployment: {}, modules: { tokens: [{ key: 'vee', address: '0x0', symbol: 'VEE', decimals: 18 }] },
       publicClient: { waitForTransactionReceipt: async () => ({}) },
       walletClient: { writeContract: async () => '0xsent' },
     } as unknown as Chain,

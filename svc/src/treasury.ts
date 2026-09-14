@@ -594,7 +594,7 @@ export class Treasury {
     // way - a decision and its durable record were not one operation - so the
     // cap was check-then-act (concurrent sends all read the same pre-spend
     // total) and the intent was act-then-record (a dropped response made the
-    // correct retry a second real transfer, because VEEBux is a plain ERC-20
+    // correct retry a second real transfer, because the token is a plain ERC-20
     // and a second identical transfer is a valid second transfer).
     const reservation = this.store.reserve({
       intentId,

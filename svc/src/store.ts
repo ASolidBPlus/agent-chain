@@ -605,7 +605,7 @@ export class Store {
   /// maybe-landed transfer. That is the conservative direction and it is the
   /// correct one.
   ///
-  /// This becomes answerable, not merely conservative, once VEEBux emits
+  /// This becomes answerable, not merely conservative, once the token emits
   /// IntentTransfer: the sweep can then resolve each reserved intent by event
   /// scan - landed means confirm and KEEP the hold, provably not landed means
   /// fail and release - so hold release and intent resolution become one
