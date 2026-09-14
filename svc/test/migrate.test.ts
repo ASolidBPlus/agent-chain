@@ -513,3 +513,102 @@ describe('the ledger lifetime control', () => {
     expect(() => assertLedgerLifetimeIntact(wiped)).toThrow();
   });
 });
+
+// §8.6. THE FIRST NUMBERED MIGRATION, and the first one that RESHAPES a table
+// rather than adding to it.
+//
+// A v4 store's `deployment` row held two address columns, because a deployment
+// was exactly one token and one registry. A v5 store holds a JSON list, because
+// it can be any number of modules in a declared order.
+describe('the v4 -> v5 deployment reshape', () => {
+  /// A v4 `deployment` table, built by running the OLD DDL by hand rather than
+  /// by checking out the old code: the point is to migrate the shape the
+  /// previous release actually wrote, and reconstructing it here is what makes
+  /// this a test of the migration rather than of `createTables()`.
+  function v4Store(path: string, chainId = '31337'): void {
+    const s = new Store(path); // current shape, then reshaped back to v4
+    s.close();
+    const db = new Database(path);
+    db.exec(`
+      DROP TABLE deployment;
+      CREATE TABLE deployment (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        chain_id       TEXT NOT NULL,
+        veebux         TEXT NOT NULL,
+        name_registry  TEXT NOT NULL,
+        recorded_at    INTEGER NOT NULL
+      );
+      INSERT INTO deployment (id, chain_id, veebux, name_registry, recorded_at)
+        VALUES (1, '${chainId}', '0xVEE', '0xREG', 1700000000000);
+      PRAGMA user_version = 4;
+    `);
+    db.close();
+  }
+
+  it('carries the two addresses into the module list, in order', () => {
+    v4Store(dbPath());
+
+    const s = new Store(dbPath());
+    const recorded = s.recordedDeployment();
+    s.close();
+
+    expect(recorded).toEqual({
+      chainId: '31337',
+      modules: [
+        { kind: 'token', key: 'vee', address: '0xVEE' },
+        { kind: 'names', address: '0xREG' },
+      ],
+    });
+  });
+
+  // THE BACKFILL IS TOTAL AND THAT IS WHY IT IS SOUND: every v4 store was
+  // written by a build whose deployment row could only ever be one token and
+  // one registry, so `vee` is the only key it could have meant. Nothing is
+  // invented; the shape is just restated.
+  it('stamps the store at 5, so a second boot does not refuse it as newer', () => {
+    v4Store(dbPath());
+
+    const first = new Store(dbPath());
+    first.close();
+    expect(userVersion(dbPath())).toBe(5);
+
+    // The refusal this guards against is "written by a NEWER chain-svc": with
+    // SCHEMA_VERSION left at 4, the first boot would stamp 5 and the second
+    // would read 5 > 4 and refuse the store it had just migrated.
+    const second = new Store(dbPath());
+    second.close();
+    expect(userVersion(dbPath())).toBe(5);
+  });
+
+  // A MIGRATED STORE AND A FRESH ONE MUST BE THE SAME STORE. Two paths reach
+  // the v5 shape - `createTables()` for a new store and the numbered migration
+  // for an old one - and nothing else would notice them drifting apart.
+  it('lands on the same schema as a store created fresh', () => {
+    v4Store(dbPath());
+    const migrated = new Store(dbPath());
+    migrated.close();
+    const migratedColumns = columns(dbPath(), 'deployment');
+
+    rmSync(dbPath(), { force: true });
+    const fresh = new Store(dbPath());
+    fresh.close();
+
+    expect(migratedColumns).toEqual(columns(dbPath(), 'deployment'));
+    expect(migratedColumns).toEqual(['id', 'chain_id', 'modules_json', 'recorded_at']);
+  });
+
+  // THE GUARD IS ON THE SCHEMA, NOT THE VERSION, and this is the case that
+  // proves why. A fresh store is created at the v5 shape and stamped 0 until
+  // the end of migrate(), so a `version < 5` guard fires the reshape against a
+  // table that never had `veebux` - measured, `no such column: veebux`, on
+  // every fresh store.
+  it('does not run the reshape on a fresh store, which never had the old columns', () => {
+    const s = new Store(dbPath());
+    s.recordDeployment({ chainId: '31337', modules: [{ kind: 'token', key: 'vee', address: '0xA' }] });
+    const recorded = s.recordedDeployment();
+    s.close();
+
+    expect(recorded?.modules).toEqual([{ kind: 'token', key: 'vee', address: '0xA' }]);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
+  });
+});
