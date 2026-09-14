@@ -146,6 +146,81 @@ contract DeployTest is Test {
         _clean(dir);
     }
 
+    // ── deterministic addresses ─────────────────────────────────────────────
+
+    /// WHICH DEPLOYER the CREATE2 address derives from, MEASURED, because the
+    /// obvious reading is wrong.
+    ///
+    /// `new X{salt: s}(...)` reads like a CREATE2 from the enclosing contract,
+    /// and that is what I expected inside `forge test` - the script contract is
+    /// just a contract there, with no broadcast to rewrite. It is not what
+    /// happens: forge routes salted creation through the canonical CREATE2
+    /// deployer in tests too. Measured, all three candidates computed side by
+    /// side, and the deployed address matched only this one:
+    ///
+    ///     actual                 0x3B5228AF…
+    ///     from script contract   0x38732cf2…   <- the expected answer, wrong
+    ///     from CREATE2 deployer  0x3B5228AF…   <- the measured answer
+    ///     from test contract     0x5DbFa66e…
+    ///
+    /// So the address is the same in `forge test` and under
+    /// `forge script --broadcast`, which is what makes the determinism property
+    /// testable here at all.
+    function test_AddressesAreCreate2FromTheSaltAndInitCode() public {
+        string memory dir = _dir("create2");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        d.deploy(dir, "");
+
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        address token = vm.parseJsonAddress(out, ".modules[0].address");
+        address registry = vm.parseJsonAddress(out, ".modules[1].address");
+
+        // Anvil predeploys this, measured present on a fresh node.
+        address CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+        bytes memory tokenInit =
+            abi.encodePacked(type(Token).creationCode, abi.encode("Play Token", "PLAY", treasury));
+        bytes memory registryInit = abi.encodePacked(type(NameRegistry).creationCode, abi.encode(treasury));
+
+        assertEq(token, vm.computeCreate2Address(d.saltFor("token", "play"), keccak256(tokenInit), CREATE2_DEPLOYER));
+        assertEq(
+            registry, vm.computeCreate2Address(d.saltFor("names", ""), keccak256(registryInit), CREATE2_DEPLOYER)
+        );
+
+        _clean(dir);
+    }
+
+    /// THE PROPERTY THE RULING IS ACTUALLY FOR: the same manifest deployed
+    /// twice, against two fresh chains, puts each module at the same address.
+    ///
+    /// `vm.createSelectFork` is not available here, so the two chains are two
+    /// `vm.revertTo` snapshots - a fresh state each time, which is what "fresh
+    /// chain" means for this property. The deploying contract is held constant
+    /// with `vm.etch`, because under `forge script` it is the fixed CREATE2
+    /// deployer and a test that let it vary would be measuring the test's own
+    /// nonce rather than the ruling.
+    function test_TheSameManifestTwiceGivesTheSameAddresses() public {
+        string memory dirA = _dir("determinism-a");
+        _write(dirA, _example("token-and-names.json"));
+        Deploy d = _script();
+
+        uint256 snap = vm.snapshotState();
+        d.deploy(dirA, "");
+        string memory first = vm.readFile(string.concat(dirA, "/local.json"));
+        address tokenA = vm.parseJsonAddress(first, ".modules[0].address");
+        address registryA = vm.parseJsonAddress(first, ".modules[1].address");
+        vm.removeFile(string.concat(dirA, "/local.json"));
+
+        vm.revertToState(snap);
+
+        d.deploy(dirA, "");
+        string memory second = vm.readFile(string.concat(dirA, "/local.json"));
+        assertEq(vm.parseJsonAddress(second, ".modules[0].address"), tokenA);
+        assertEq(vm.parseJsonAddress(second, ".modules[1].address"), registryA);
+
+        _clean(dirA);
+    }
+
     // ── refusals ────────────────────────────────────────────────────────────
 
     function test_AbsentManifestIsARefusal() public {

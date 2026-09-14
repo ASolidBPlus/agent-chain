@@ -125,12 +125,14 @@ contract Deploy is Script {
         vm.startBroadcast(deployerKey);
         for (uint256 i = 0; i < mods.length; i++) {
             if (_eq(mods[i].kind, KIND_TOKEN)) {
-                Token t = new Token(mods[i].name, mods[i].symbol, treasury);
+                Token t = new Token{salt: saltFor(mods[i].kind, mods[i].key)}(
+                    mods[i].name, mods[i].symbol, treasury
+                );
                 if (mods[i].initialSupply > 0) t.mint(treasury, mods[i].initialSupply * 1e18);
                 addrs[i] = address(t);
                 haveToken = true;
             } else {
-                NameRegistry r = new NameRegistry(treasury);
+                NameRegistry r = new NameRegistry{salt: saltFor(mods[i].kind, "")}(treasury);
                 addrs[i] = address(r);
                 namesAddr = address(r);
                 tld = mods[i].tld;
@@ -234,6 +236,27 @@ contract Deploy is Script {
             }
         }
         return mods;
+    }
+
+    /// The CREATE2 salt for a module: `kind:key` for a token, the bare kind for
+    /// a singleton like the registry.
+    ///
+    /// WHY DETERMINISTIC ADDRESSES AT ALL: with plain CREATE the address falls
+    /// out of the deployer's NONCE, so the same manifest deployed on two chains
+    /// - or in a different order on one - puts the same token at two addresses,
+    /// and anything that recorded the first is silently wrong about the second.
+    /// With CREATE2 the address depends only on the deployer, this salt and the
+    /// init code, so order and nonce drop out. A code or constructor-argument
+    /// change DOES move the address, and that is correct rather than a defect:
+    /// it is a different contract.
+    ///
+    /// Under `forge script --broadcast` these route through the CREATE2 deployer
+    /// Anvil predeploys at 0x4e59b44847b379578588920cA78FbF26c0B4956C - measured
+    /// present on a fresh node, not assumed.
+    function saltFor(string memory kind, string memory key) public pure returns (bytes32) {
+        return bytes(key).length == 0
+            ? keccak256(abi.encodePacked(kind))
+            : keccak256(abi.encodePacked(kind, ":", key));
     }
 
     function _bad(string memory key, string memory field) internal pure returns (string memory) {
