@@ -66,34 +66,23 @@ exchanges one token for another at operator-set rates.
 
 ## A payment, end to end
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant A as Agent
-  participant W as wallet-mcp
-  participant S as chain-svc
-  participant C as Chain
-  participant O as Operator (event sink)
-  A->>W: send to "seller", amount 5, intent_id
-  W->>S: POST /sign-transfer with the wallet token
-  S->>S: resolve the name, check policy and the intent id
-  alt refused
-    S-->>W: error, one of a closed set of reasons
-    W-->>A: ok false, with the reason
-  else allowed
-    S->>C: transferWithIntent, signed with the agent's own key
-    C-->>S: mined, logs emitted
-    S-->>W: txHash
-    W-->>A: ok true, with txHash
-    S->>O: event transfer (from, to, amount, intent_id)
-  end
-```
+1. The agent calls `send` on wallet-mcp: a **name** to pay, an amount, and an
+   intent id it chose.
+2. wallet-mcp posts `/sign-transfer` to chain-svc with its wallet token.
+3. chain-svc resolves the name to an address, checks the wallet's policy
+   (frozen? over its cap? this intent id already used?) and refuses with one of
+   a closed set of reasons if anything fails — the agent sees the reason, never
+   the address or the internals.
+4. Otherwise chain-svc signs `transferWithIntent` with the agent's own key at
+   zero fee and sends it; the chain mines it and emits the transfer logs.
+5. wallet-mcp returns the tx hash to the agent; chain-svc posts the transfer as
+   an event to the operator's sink.
 
-The agent never sees an address or a key. The intent id is the idempotency key
-on the service side: chain-svc refuses a second send under the same id, and the
-operator can check any claimed payment in one call. The contract itself records
-the id in its event and deliberately does not deduplicate, so a second emission
-under one id (from anywhere) is visible as an anomaly rather than suppressed.
+The intent id is the idempotency key on the service side: chain-svc refuses a
+second send under the same id, and the operator can check any claimed payment
+in one call. The contract records the id in its event and deliberately does not
+deduplicate, so a second emission under one id (from anywhere) is visible as an
+anomaly rather than suppressed.
 
 ## Layout
 
