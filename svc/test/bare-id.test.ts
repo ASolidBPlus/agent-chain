@@ -171,7 +171,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const PKG = new URL('..', import.meta.url).pathname;
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'));
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'vee');
 
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));

@@ -63,7 +63,58 @@ export type PolicyDefaults = Record<WalletKind, AgentPolicy>;
 /// (ruled). Read once at startup and FAILS LOUDLY if missing or
 /// malformed: a wallet spawned with no caps is an unbounded wallet, so this
 /// must not fall back to something permissive.
-export function loadPolicyDefaults(path: string): PolicyDefaults {
+/// Patterns in the defaults file are written with a `{tld}` placeholder
+/// (`*.{tld}`, `treasury.{tld}`) because the suffix is DEPLOYMENT DATA now, not
+/// a constant: a deployment declares its TLD in the manifest and the same
+/// defaults file has to serve all of them.
+///
+/// Without a names module the placeholder cannot be filled, and a pattern with
+/// no TLD can match nothing - so those entries are DROPPED at load rather than
+/// kept as literals containing `{tld}`, which would be a rule that silently
+/// matches nothing while reading as if it matches something.
+///
+/// Logged ONCE PER DISTINCT PATTERN PER PROCESS, not per agent and not per
+/// send: on a names-less deployment every agent without its own policy file
+/// inherits these, so a per-agent key would print the same fact once per
+/// wallet, and `policyFor` re-reads the file on every send by design. Once per
+/// process is the signal; once ever would need a store row, and a config
+/// oddity does not earn one.
+const TLD_PATTERN = /\{tld\}/;
+const droppedPatternsLogged = new Set<string>();
+
+function fillPatterns(
+  patterns: string[],
+  tld: string | undefined,
+  field: 'allow' | 'deny',
+  warn: (message: string) => void,
+): string[] {
+  const out: string[] = [];
+  for (const pattern of patterns) {
+    if (!TLD_PATTERN.test(pattern)) {
+      out.push(pattern);
+      continue;
+    }
+    if (tld === undefined) {
+      if (!droppedPatternsLogged.has(pattern)) {
+        droppedPatternsLogged.add(pattern);
+        warn(
+          `[chain-svc] policy default ${field} pattern ${JSON.stringify(pattern)} names a TLD and ` +
+            `this deployment has no names module, so it is dropped: it could match nothing. ` +
+            `Nothing here can be addressed by name, so the rule has nothing to say.`,
+        );
+      }
+      continue;
+    }
+    out.push(pattern.replace(TLD_PATTERN, tld));
+  }
+  return out;
+}
+
+export function loadPolicyDefaults(
+  path: string,
+  tld: string | undefined,
+  warn: (message: string) => void = console.warn,
+): PolicyDefaults {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -76,26 +127,37 @@ export function loadPolicyDefaults(path: string): PolicyDefaults {
     if (!isPolicy(entry)) {
       throw new Error(`chain-svc: policy defaults at ${path} have no valid "${kind}" entry`);
     }
-    out[kind] = entry;
+    out[kind] = {
+      ...entry,
+      allow: fillPatterns(entry.allow, tld, 'allow', warn),
+      deny: fillPatterns(entry.deny, tld, 'deny', warn),
+    };
   }
   return out;
 }
 
 /// A cap in wei, from either accepted form. One conversion for both, so a
 /// number and its string spelling can never compare differently.
-export function capToWei(cap: VeeCap): bigint {
+export function capToWei(cap: VeeCap, decimals: number): bigint {
   const text = typeof cap === 'number' ? String(cap) : cap;
   const [whole, frac = ''] = text.split('.');
-  return BigInt(whole + frac.padEnd(18, '0').slice(0, 18));
+  return BigInt(whole + frac.padEnd(decimals, '0').slice(0, decimals));
 }
 
 /// Is this a usable cap? A positive integer, or a positive decimal string with
-/// at most 18 places - the same shape `vee` takes on the wire.
-export function isCap(value: unknown): value is VeeCap {
+/// at most `decimals` places - the same shape `vee` takes on the wire.
+///
+/// `decimals` defaults to 18 for the SHAPE check alone, because a policy
+/// document is validated at spawn and PATCH time on deployments that may have
+/// no token at all. Without a token nothing can move, so a cap is stored as
+/// given and never enforced; validating its shape against the commonest scale
+/// is better than refusing to validate it, and better than inventing a scale
+/// for a token that is not there.
+export function isCap(value: unknown, decimals = 18): value is VeeCap {
   if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
   if (typeof value !== 'string') return false;
-  if (!/^\d+(\.\d{1,18})?$/.test(value)) return false;
-  return capToWei(value) > 0n;
+  if (!new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`).test(value)) return false;
+  return capToWei(value, decimals) > 0n;
 }
 
 const isNameList = (a: unknown): a is string[] =>
@@ -126,7 +188,7 @@ export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy 
       // malformed-request one. Same code `vee` gets for the same reason.
       throw new HttpError(
         'invalid_amount',
-        `${field} must be a decimal string of whole VEE, e.g. "25"; an integer number is ` +
+        `${field} must be a decimal string of whole units, e.g. "25"; an integer number is ` +
           `tolerated, a non-integer number is refused rather than rounded`,
       );
     }
@@ -238,8 +300,8 @@ export function isAllowed(policy: AgentPolicy, name: string): boolean {
 /// The stage cap in wei. Deliberately NOT checked by enforcePolicy: the check
 /// and the spend record have to be one atomic step, or concurrent sends all
 /// read the same pre-spend total and all pass. See Store.reserveStageSpend.
-export function stageCapWei(policy: AgentPolicy): bigint {
-  return capToWei(policy.max_per_stage);
+export function stageCapWei(policy: AgentPolicy, decimals: number): bigint {
+  return capToWei(policy.max_per_stage, decimals);
 }
 
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
@@ -274,9 +336,14 @@ export function enforcePolicy(args: {
   /// only `to` is the alias bypass this function used to have.
   canonical?: string;
   amount: bigint;
+  /// The default token's scale and symbol. Passed rather than assumed: a cap
+  /// is a decimal string in whole units, and comparing it to an amount needs
+  /// the scale the amount was parsed at.
+  decimals: number;
+  symbol: string;
 }): void {
-  const { policy, to, canonical, amount } = args;
-  const perTx = capToWei(policy.max_per_tx);
+  const { policy, to, canonical, amount, decimals, symbol } = args;
+  const perTx = capToWei(policy.max_per_tx, decimals);
 
   // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
   // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
@@ -290,7 +357,7 @@ export function enforcePolicy(args: {
     throw new HttpError('invalid_amount', 'vee must be greater than zero');
   }
   if (amount > perTx) {
-    throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} VEE`);
+    throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} ${symbol}`);
   }
 
   // BOTH NAMES, and the two lists use them differently ON PURPOSE (ruled).

@@ -88,7 +88,14 @@ async function main(): Promise<void> {
     store,
     keystore,
     spawner: new Spawner(config, chain, keystore, store, resolver),
-    treasury: new Treasury(config, chain, keystore, store, resolver, loadPolicyDefaults(config.policyDefaultsPath)),
+    treasury: new Treasury(
+      config,
+      chain,
+      keystore,
+      store,
+      resolver,
+      loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld),
+    ),
   };
 
   // Started before the server accepts requests, so a transfer cannot happen

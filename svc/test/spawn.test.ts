@@ -22,7 +22,7 @@ import type { Keystore } from '../src/keystore.ts';
 import type { Resolver } from '../src/resolver.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'));
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'vee');
 
 const config = {
   policyDir: '/tmp/does-not-exist',
@@ -346,10 +346,12 @@ describe('policy defaults', () => {
       // Compared in WEI, not as numbers: a cap may be a decimal string, and
       // comparing those numerically is the imprecision the string form exists
       // to prevent.
-      expect(capToWei(DEFAULTS[kind].max_per_tx)).toBeGreaterThan(0n);
-      expect(capToWei(DEFAULTS[kind].max_per_stage)).toBeGreaterThanOrEqual(
-        capToWei(DEFAULTS[kind].max_per_tx),
+      expect(capToWei(DEFAULTS[kind].max_per_tx, 18)).toBeGreaterThan(0n);
+      expect(capToWei(DEFAULTS[kind].max_per_stage, 18)).toBeGreaterThanOrEqual(
+        capToWei(DEFAULTS[kind].max_per_tx, 18),
       );
+      // The file ships `treasury.{tld}`; this is the substitution having
+      // happened, asserted through the value a wallet actually gets.
       expect(DEFAULTS[kind].deny).toContain('treasury.vee');
     }
   });
@@ -357,11 +359,44 @@ describe('policy defaults', () => {
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json')).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'vee')).toThrow(/cannot read policy defaults/);
+  });
+
+  // §4.7. A pattern naming a TLD can match nothing on a deployment that
+  // resolves no names, so it is DROPPED rather than kept as a literal
+  // containing `{tld}` - which would read as a rule and match nothing.
+  it('drops the TLD patterns when a deployment has no names module, and says so once', () => {
+    const lines: string[] = [];
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+
+    expect(defaults.agent.deny).toEqual([]);
+    expect(defaults.agent.allow).toEqual([]);
+    // `*` names no TLD, so it survives: the org default still allows anything.
+    expect(defaults.org.allow).toEqual(['*']);
+    expect(defaults.org.deny).toEqual([]);
+
+    // Nothing anywhere contains an unfilled placeholder.
+    for (const kind of ['org', 'agent', 'burner'] as const) {
+      for (const p of [...defaults[kind].allow, ...defaults[kind].deny]) {
+        expect(p).not.toContain('{tld}');
+      }
+    }
+
+    // ONE LINE PER DISTINCT PATTERN, not per kind and not per agent: three
+    // kinds share `treasury.{tld}` and two share `*.{tld}`.
+    expect(lines).toHaveLength(2);
+    expect(lines.filter((l) => l.includes('treasury.{tld}'))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes('*.{tld}'))).toHaveLength(1);
+  });
+
+  it('does not repeat the dropped-pattern line on a second load in the same process', () => {
+    const lines: string[] = [];
+    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(bad, JSON.stringify({ org: {}, agent: {}, burner: {} }));
-    expect(() => loadPolicyDefaults(bad)).toThrow(/no valid/);
+    expect(() => loadPolicyDefaults(bad, 'vee')).toThrow(/no valid/);
 
     const negative = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(
@@ -372,7 +407,7 @@ describe('policy defaults', () => {
         burner: DEFAULTS.burner,
       }),
     );
-    expect(() => loadPolicyDefaults(negative)).toThrow(/no valid "agent"/);
+    expect(() => loadPolicyDefaults(negative, 'vee')).toThrow(/no valid "agent"/);
   });
 
   // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an

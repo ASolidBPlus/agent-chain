@@ -55,7 +55,8 @@ export class Spawner {
     private readonly resolver: Resolver,
     policyDefaults?: PolicyDefaults,
   ) {
-    this.policyDefaults = policyDefaults ?? loadPolicyDefaults(config.policyDefaultsPath);
+    this.policyDefaults =
+      policyDefaults ?? loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld);
   }
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is

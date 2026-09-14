@@ -26,18 +26,18 @@
     "max_per_tx": "1000",
     "max_per_stage": "5000",
     "allow": ["*"],
-    "deny": ["treasury.vee"]
+    "deny": ["treasury.{tld}"]
   },
   "agent": {
     "max_per_tx": "100",
     "max_per_stage": "500",
-    "allow": ["*.vee"],
-    "deny": ["treasury.vee"]
+    "allow": ["*.{tld}"],
+    "deny": ["treasury.{tld}"]
   },
   "burner": {
     "max_per_tx": "50",
     "max_per_stage": "200",
-    "allow": ["*.vee"],
-    "deny": ["treasury.vee"]
+    "allow": ["*.{tld}"],
+    "deny": ["treasury.{tld}"]
   }
 }

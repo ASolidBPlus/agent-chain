@@ -567,7 +567,8 @@ export class Treasury {
     // itself derived from the credential a few lines above and never from the
     // body - so the fallback cannot be steered by the request.
     const target = await this.resolveTo(name, fromAgentId);
-    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount });
+    const { decimals, symbol } = defaultToken(this.chain.modules);
+    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount, decimals, symbol });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
 
@@ -611,11 +612,11 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
-      capWei: stageCapWei(policy),
+      capWei: stageCapWei(policy, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
-      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} VEE for this stage`);
+      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} ${symbol} for this stage`);
     }
     if (reservation.outcome === 'duplicate') {
       // The promise wallet-mcp makes to the model: a replay of the same send

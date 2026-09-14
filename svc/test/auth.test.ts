@@ -184,16 +184,16 @@ describe('policy enforcement', () => {
   });
 
   it('refuses over max_per_tx and a denied counterparty', () => {
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(150) }))).toBe('over_max_per_tx');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.vee', amount: vee(1) }))).toBe('counterparty_denied');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(100) }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(150), decimals: 18, symbol: 'VEE' }))).toBe('over_max_per_tx');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.vee', amount: vee(1), decimals: 18, symbol: 'VEE' }))).toBe('counterparty_denied');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.vee', amount: vee(100), decimals: 18, symbol: 'VEE' }))).toBe('no-error');
   });
 
   // Deny wins: a name matching both lists is refused, because deny is what an
   // author writes to stop something specific.
   it('lets deny beat allow', () => {
     const both: AgentPolicy = { ...policy, allow: ['*'], deny: ['treasury.vee'] };
-    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.vee', amount: vee(1) }))).toBe(
+    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.vee', amount: vee(1), decimals: 18, symbol: 'VEE' }))).toBe(
       'counterparty_denied',
     );
   });
@@ -206,7 +206,7 @@ describe('policy enforcement', () => {
   // the cap and the intent together, because they were the same defect twice:
   // a decision and its durable record that were not one operation.
   describe('the reservation', () => {
-    const cap = stageCapWei(policy); // 500 VEE
+    const cap = stageCapWei(policy, 18); // 500 VEE
     let n = 0;
     const uniq = () => `i${++n}`;
     const take = (store: Store, agentId: string, stage: string, amount: bigint, capWei: bigint) =>
@@ -484,9 +484,9 @@ describe('deny matches the resolved principal, not just the requested name', () 
     frozen: false,
   };
   const oneVee = 10n ** 18n; // the `vee` helper is scoped to the describe above
-  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee }));
+  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee, decimals: 18, symbol: 'VEE' }));
   const toResolved = (name: string, canonical: string) =>
-    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee }));
+    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee, decimals: 18, symbol: 'VEE' }));
 
   it('refuses the denied name', () => {
     expect(to('mark.vee')).toBe('counterparty_denied');
@@ -508,7 +508,7 @@ describe('deny matches the resolved principal, not just the requested name', () 
   it('refuses a treasury alias when the deny list names the treasury', () => {
     const p = { ...denied, deny: ['treasury.vee'] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'treasure.vee', canonical: 'treasury.vee', amount: oneVee }),
+      enforcePolicy({ policy: p, to: 'treasure.vee', canonical: 'treasury.vee', amount: oneVee, decimals: 18, symbol: 'VEE' }),
     );
     expect(code).toBe('counterparty_denied');
   });
@@ -520,7 +520,7 @@ describe('deny matches the resolved principal, not just the requested name', () 
   it('still allows an ordinary send whose canonical does not match the allow list', () => {
     const p = { ...denied, allow: ['*.vee'], deny: [] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'bob.vee', canonical: 'orch:bob', amount: oneVee }),
+      enforcePolicy({ policy: p, to: 'bob.vee', canonical: 'orch:bob', amount: oneVee, decimals: 18, symbol: 'VEE' }),
     );
     expect(code).toBe('no-error');
   });
