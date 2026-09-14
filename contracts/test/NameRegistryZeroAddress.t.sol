@@ -120,7 +120,7 @@ contract NameRegistryZeroAddressTest is Test {
 
     /// Driven here for the first time: every earlier `register` call passed
     /// `target == msg.sender`, so the caller-becomes-owner rule was never
-    /// actually tested against a target that differs. Seat 2's mutant
+    /// actually tested against a target that differs. The mutant
     /// `_register(name, target, target)` survives a suite that never varies it.
     function test_RegisterMakesTheCallerTheOwnerEvenForAForeignTarget() public {
         vm.prank(treasury);

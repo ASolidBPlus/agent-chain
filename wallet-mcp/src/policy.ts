@@ -65,14 +65,14 @@ export function readPolicy(path: string): WalletPolicy | null {
   return null;
 }
 
-/// `*` matches anything, `*.vee` a suffix, `arena:*` a prefix; anything else is
+/// `*` matches anything, `*.vee` a suffix, `acme:*` a prefix; anything else is
 /// a literal. THE SAME RESTRICTED DIALECT AS chain-svc, character for
 /// character, on purpose: two glob implementations that disagree would produce
 /// a local "allowed" and a server-side refusal, which reads to a model as the
 /// platform being broken - and in the other direction a local "allowed" over a
 /// pattern the boundary reads as a literal.
 ///
-/// The trailing-star form was added with chain-svc's (ruled 06:15). If you
+/// The trailing-star form was added with chain-svc's (ruled). If you
 /// change one of these, change both; `svc/test/policy.test.ts` asserts
 /// they agree across allow AND deny.
 ///
@@ -94,7 +94,7 @@ export function matchesPattern(pattern: string, name: string): boolean {
 /// last stage change, and this process has no stage source - hub-core's
 /// /session needs a platform credential, which by design never reaches the
 /// agent side. So `over_stage_cap` arrives from chain-svc and is surfaced
-/// verbatim. Flagged to powerout-planner: adding a stage source here would mean
+/// verbatim. Flagged for the spec: adding a stage source here would mean
 /// giving the persona something it currently cannot see.
 /// `vee` arrives as a DECIMAL STRING and is compared in wei, not as a float.
 /// Comparing `Number("12.5") > max_per_tx` would reintroduce, in the check

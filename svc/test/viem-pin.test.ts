@@ -49,7 +49,7 @@ describe('viem is pinned, not ranged', () => {
   });
 
   // THE PATH MATTERS AND IS THE REASON THIS TEST IS TRUSTWORTHY. viem is
-  // installed under svc, not at the repo root; seat 2's first version of
+  // installed under svc, not at the repo root; the first version of
   // this control read the root and BOTH ARMS FAILED IDENTICALLY on a missing
   // path - the pinned arm and the mutated arm alike. A CONTROL WHOSE HALVES
   // AGREE HAS MEASURED NOTHING. Reading the resolved module rather than a path

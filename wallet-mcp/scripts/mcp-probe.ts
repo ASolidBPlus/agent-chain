@@ -1,5 +1,5 @@
 // An MCP test client for spec S8 criterion 4: drives wallet-mcp over stdio, the
-// same transport mesh-agent uses, rather than calling the class directly.
+// same transport the harness uses, rather than calling the class directly.
 // Exercised by verify-wallet.sh, which brings up the chain and chain-svc first.
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   check('treasury.vee is denied', (await call('send', { to: 'treasury.vee', vee: 1, intent_id: 'c1' })).reason, 'counterparty_denied');
   check('nobody.vee is unknown', (await call('send', { to: 'nobody.vee', vee: 1, intent_id: 'd1' })).reason, 'unknown_name');
   // Criterion 9 at the tool: a bare local id is not a name the ledger knows.
-  check('a bare local id is unknown', (await call('send', { to: 'darknetclient', vee: 1, intent_id: 'd2' })).reason, 'unknown_name');
+  check('a bare local id is unknown', (await call('send', { to: 'client', vee: 1, intent_id: 'd2' })).reason, 'unknown_name');
 
   console.log('\n=== the other tools');
   const who = await call('whoami');

@@ -1,4 +1,4 @@
-# The private chain for Operation PowerOUT, profile "chain" (spec S7).
+# The private chain, profile "chain" (spec S7).
 #
 #
 # Run from this directory:  docker compose -f compose.chain.yml --profile chain up -d
@@ -8,7 +8,7 @@ services:
       # Relative to THIS FILE, not the working directory. Spec S7 writes
       # ./chain/docker, which is correct only if the compose file sits at the
       # hub-stack root; this file sits at the root of its own repo, so the
-      # context is ./docker. Flagged to powerout-planner.
+      # context is ./docker. Flagged for the spec to be corrected.
       context: ./docker
       dockerfile: anvil.Dockerfile
     profiles: [chain]
@@ -17,7 +17,7 @@ services:
       # whose treasury key came from an empty seed.
       # Note: `:?` makes every compose subcommand (ps, down, logs) require the
       # variable too. In the hub stack it comes from .env so this is invisible;
-      # standalone, export it first. Accepted 19:40 UTC: an empty phrase is a
+      # standalone, export it first. Accepted: an empty phrase is a
       # shared treasury key, which is worse than a startup error.
       ANVIL_MNEMONIC: "${ANVIL_MNEMONIC:?ANVIL_MNEMONIC must be set in the hub .env - it derives the treasury key}"
     volumes:
@@ -90,7 +90,7 @@ services:
     ports:
       - "127.0.0.1:7000:7000"
 
-  # The facilitator's block viewer (Joel, 20:30 UTC). Raw addresses, no auth
+  # The facilitator's block viewer. Raw addresses, no auth
   # beyond the host binding; the students' names-aware view is a later frontend
   # over /history, /resolve and /reverse.
   otterscan:

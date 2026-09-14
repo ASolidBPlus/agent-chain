@@ -29,14 +29,14 @@ import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from '.
 
 /// Which path a spend arrived by, for the `agent.spend` event.
 ///
-/// THE MARKER IS A CLAIM, NOT A BOUNDARY (ruled 21:27 UTC). A persona holding
+/// THE MARKER IS A CLAIM, NOT A BOUNDARY (ruled). A persona holding
 /// its own wallet token could send this header itself; nothing here stops it,
 /// and nothing should. The boundary is the caps and the principal-derived
 /// source, both enforced server-side. `via` is a purple-team signal for the
 /// facilitator - a `direct` spend says something skipped the sanctioned path -
 /// and must never be used as a control.
 ///
-/// Stated the way it has to be read downstream (spec S5, 21:46 UTC): `via` is a
+/// Stated the way it has to be read downstream (spec S5): `via` is a
 /// BEST-EFFORT DETECTION HINT, NEVER AN AUTHORISATION SIGNAL. A raw caller can
 /// forge `via: "mcp"`, so treat `via: "direct"` as "worth investigating" and
 /// never treat `via: "mcp"` as "cleared". The unspoofable fact is that an
@@ -160,7 +160,7 @@ export class Treasury {
       try {
         address = (await this.resolver.lookup(entry))?.address.toLowerCase() ?? null;
       } catch (err) {
-        // FAILS CLOSED on a transport error (ruled 05:29). NOT FOUND is an
+        // FAILS CLOSED on a transport error (ruled). NOT FOUND is an
         // answer - there is no such denied identity - and it is handled by
         // `address` being null below. READ FAILED is not an answer: admitting a
         // transfer we could not evaluate the deny list against errs in the one
@@ -195,7 +195,7 @@ export class Treasury {
   /// One silent transfer path and absence stops meaning anything, so the sweep
   /// could only ever confirm and never release, and holds would accumulate.
   ///
-  /// It takes NO CAP HOLD (ruled 04:05): the treasury has no stage cap, and a
+  /// It takes NO CAP HOLD (ruled): the treasury has no stage cap, and a
   /// facilitator top-up refused as over_stage_cap mid-game would be a bad
   /// failure. This is the one place the reservation's two halves come apart -
   /// the intent record is taken, the budget is not.
@@ -236,7 +236,7 @@ export class Treasury {
     }
   }
 
-  /// Set a wallet's balance to EXACTLY `vee` (arena spec S3). Platform scope.
+  /// Set a wallet's balance to EXACTLY `vee` (harness spec S3). Platform scope.
   ///
   /// Below target it funds the difference from the treasury. Above target it
   /// SWEEPS the difference back, signed from that wallet's own key. Equal is a
@@ -313,7 +313,7 @@ export class Treasury {
         // and `setBalance` is its only caller here; without this line a top-up
         // would record `intentId: null` while the sweep recorded the id - so a
         // top-up would be the one money movement whose intent cannot be joined
-        // from /history, and BOTH SIDES WOULD COMPILE. Seat 2 recorded the
+        // from /history, and BOTH SIDES WOULD COMPILE. Review recorded the
         // asymmetry against the pre-merge trees; this is where it dissolves.
         ? await this.fund({ to: agentId, vee: formatVee(target - current), reason, intentId })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId);
@@ -323,7 +323,7 @@ export class Treasury {
     // RE-READ. The reply reported `target` at both exits, which is the
     // INTENTION and not the OUTCOME: `current` was read several awaits before
     // the transfer landed, so the number was never measured after the fact. It
-    // is what the arena's Wallets panel shows, and a panel showing a number
+    // is what the harness's Wallets panel shows, and a panel showing a number
     // nobody observed is the observer reporting its own state as the subject's.
     const settled = (await this.chain.publicClient.readContract({
       address: this.chain.deployment.VEEBux,
@@ -455,7 +455,7 @@ export class Treasury {
   /// instead of arriving, recoverable only by someone opening the store. A
   /// VALUE NOTHING SURFACES IS NOT YET A SIGNAL.
   ///
-  /// Still count, don't accumulate (the 09:41 rule): the outbox DELIVERS and
+  /// Still count, don't accumulate (the retention rule): the outbox DELIVERS and
   /// drains, so this adds no retention. The running total travels with each
   /// event so a facilitator sees the trend without querying anything.
   private countAndSignalBareId(
@@ -549,7 +549,7 @@ export class Treasury {
       throw new HttpError('wallet_frozen', `${fromAgentId} is frozen`);
     }
 
-    // Caps are a BOUNDARY here, not just game balance (ruled 20:57). The same
+    // Caps are a BOUNDARY here, not just game balance (ruled). The same
     // checks exist in wallet-mcp for the model-facing message, but wallet-mcp
     // runs inside a persona designed to be socially engineered, so a check that
     // lives only there is bypassed by calling this endpoint directly.
@@ -738,7 +738,7 @@ export class Treasury {
 
       // `agent.spend` shows WHO DECIDED, where `chain.transfer` from the log
       // tail only shows what moved (spec S5). Emitted here rather than in
-      // wallet-mcp (ruled 21:27 UTC) so that money can never move without one:
+      // wallet-mcp (ruled) so that money can never move without one:
       // wallet-mcp runs inside the persona, and a persona calling this endpoint
       // directly would otherwise produce a transfer with nobody deciding it.
       //

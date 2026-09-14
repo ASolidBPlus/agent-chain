@@ -6,7 +6,7 @@ out = "out"
 libs = ["lib"]
 
 # Dependencies are git submodules pinned in foundry.lock. A plain `git clone`
-# of mesh-agent does NOT fetch them and `forge test` will fail on the imports:
+# of this repo does NOT fetch them and `forge test` will fail on the imports:
 #   git submodule update --init --recursive contracts/lib
 # Nothing outside contracts/ needs them - `bun test` is unaffected either way.
 

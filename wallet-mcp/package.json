@@ -1,5 +1,5 @@
 {
-  "name": "@powerout/wallet-mcp",
+  "name": "@agent-chain/wallet-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",

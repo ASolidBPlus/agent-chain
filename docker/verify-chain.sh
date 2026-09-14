@@ -6,9 +6,9 @@
 # Run it by hand and paste the output into the PR:  ./docker/verify-chain.sh
 set -euo pipefail
 
-IMAGE=${IMAGE:-powerout-anvil:dev}
-NAME=${NAME:-powerout-anvil-verify}
-VOLUME=${VOLUME:-powerout-chain-state-verify}
+IMAGE=${IMAGE:-agent-chain-anvil:dev}
+NAME=${NAME:-agent-chain-anvil-verify}
+VOLUME=${VOLUME:-agent-chain-state-verify}
 RPC=${RPC:-http://127.0.0.1:8545}
 # The canonical, publicly-published Foundry/Hardhat test phrase, for an ephemeral
 # container destroyed on exit. Deliberately a WELL-KNOWN value so nobody mistakes

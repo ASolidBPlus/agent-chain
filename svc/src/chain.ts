@@ -25,7 +25,7 @@ const RPC_TIMEOUT_MS = 10_000;
 /// Hardhat use 31337, Ganache 1337. chain-svc refuses to start against anything
 /// else, and that refusal is the point.
 ///
-/// PowerOUT's money is play money because the chain is a private Anvil with zero
+/// The money is play money because the chain is a private Anvil with zero
 /// gas and a treasury that mints from nothing (confirmed by the game owner,
 /// 2026-09-08). Left as configuration, that stays true only as long as nobody
 /// repoints RPC_URL - and the personas holding these wallets are DELIBERATELY
@@ -38,7 +38,7 @@ const RPC_TIMEOUT_MS = 10_000;
 /// this service - not an unused one, none. Do not add one; a disabled path is
 /// an enabled path with a flag in front of it.
 ///
-/// Ruled 20:12 UTC (spec S4, "Play money is structural, not configured").
+/// ruled (spec S4, "Play money is structural, not configured").
 const PRIVATE_CHAIN_ID = 31337;
 
 export interface Deployment {
@@ -123,7 +123,7 @@ export class Chain {
     // asserts on at boot, not whatever a library constant happens to say.
     this.viemChain = defineChain({
       id: PRIVATE_CHAIN_ID,
-      name: 'PowerOUT private chain',
+      name: 'private chain',
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
       rpcUrls: { default: { http: [config.rpcUrl] } },
     });

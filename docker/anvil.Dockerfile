@@ -1,4 +1,4 @@
-# The private chain for Operation PowerOUT: one Anvil node, zero gas, state on a
+# The private chain: one Anvil node, zero gas, state on a
 # volume so a restart does not wipe the game's balances.
 #
 # Pinned by tag AND digest (spec S3.2): the tag alone is mutable, so a rebuild

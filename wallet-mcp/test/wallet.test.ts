@@ -50,7 +50,7 @@ async function fakeChainSvc(): Promise<Fake> {
     ambiguous: [],
     resolveReply: null,
     names: {
-      'alpha.vee': { address: '0xaaa', canonical: 'alpha:darknetclient' },
+      'alpha.vee': { address: '0xaaa', canonical: 'alpha:client' },
       'treasury.vee': { address: '0xttt', canonical: 'treasury.vee' },
       [AGENT]: { address: '0xme', canonical: AGENT },
     },
@@ -86,8 +86,8 @@ async function fakeChainSvc(): Promise<Fake> {
       if (url.pathname.startsWith('/balance/')) return json(200, { vee: '250', eth: '1' });
       if (url.pathname.startsWith('/history/')) {
         return json(200, [
-          { txHash: '0xh1', from: AGENT, to: 'alpha:darknetclient', vee: '50', blockNumber: '7', memo: 'stream job' },
-          { txHash: '0xh2', from: 'alpha:darknetclient', to: AGENT, vee: '5', blockNumber: '6' },
+          { txHash: '0xh1', from: AGENT, to: 'alpha:client', vee: '50', blockNumber: '7', memo: 'stream job' },
+          { txHash: '0xh2', from: 'alpha:client', to: AGENT, vee: '5', blockNumber: '6' },
         ]);
       }
       if (url.pathname.startsWith('/intents/')) {
@@ -215,7 +215,7 @@ describe('send', () => {
       ok: false,
       reason: 'unknown_name',
     });
-    expect(await wallet.send({ to: 'darknetclient', vee: '1', intent_id: 'd2' })).toMatchObject({
+    expect(await wallet.send({ to: 'client', vee: '1', intent_id: 'd2' })).toMatchObject({
       ok: false,
       reason: 'unknown_name',
     });
@@ -409,20 +409,20 @@ describe('reads', () => {
     const { wallet } = walletWith(AGENT_POLICY);
     const entries = (await wallet.history()) as Array<Record<string, unknown>>;
 
-    expect(entries[0]).toMatchObject({ direction: 'out', counterparty: 'alpha:darknetclient', vee: '50' });
-    expect(entries[1]).toMatchObject({ direction: 'in', counterparty: 'alpha:darknetclient', vee: '5' });
+    expect(entries[0]).toMatchObject({ direction: 'out', counterparty: 'alpha:client', vee: '50' });
+    expect(entries[1]).toMatchObject({ direction: 'in', counterparty: 'alpha:client', vee: '5' });
   });
 
   it('resolves a name to an address and a canonical id', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.resolve('alpha.vee')).toEqual({ address: '0xaaa', canonical: 'alpha:darknetclient' });
+    expect(await wallet.resolve('alpha.vee')).toEqual({ address: '0xaaa', canonical: 'alpha:client' });
     expect(await wallet.resolve('nobody.vee')).toMatchObject({ error: expect.any(String) });
   });
 });
 
-// Spec S5 secret hygiene, tested rather than asserted. mesh-agent's transcript
+// Spec S5 secret hygiene, tested rather than asserted. the harness's transcript
 // redactor does NOT cover WALLET_TOKEN, so anything this returns is written to
-// the on-disk transcript in plaintext and streamed to the arena god-feed.
+// the on-disk transcript in plaintext and streamed to the harness event feed.
 describe('the wallet token never reaches the model', () => {
   it('appears in no tool result or error, on any path', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
@@ -467,7 +467,7 @@ describe('the wallet token never reaches the model', () => {
   });
 });
 
-// Spec S5, ruled 01:15 UTC. The model must never see the broadcast-to-record
+// Spec S5, ruled. The model must never see the broadcast-to-record
 // window, because the obvious action on it - send again - is the double charge.
 describe('reconciling an unresolved intent', () => {
   const send = { to: 'alpha.vee', vee: '10', intent_id: 'i-recon' };

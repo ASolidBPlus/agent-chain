@@ -4,7 +4,7 @@ pragma solidity ^0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
 
-/// @title Who controls an address's primary name (ruled 22:12 UTC, spec S3.2).
+/// @title Who controls an address's primary name (ruled, spec S3.2).
 /// @notice A primary name is the canonical id the REGISTRAR set, or nothing.
 /// `register` is forward-only: it makes names resolve and never touches
 /// `reverse`. Before that rule, a stranger could set the primary name of any
@@ -26,7 +26,7 @@ contract NameRegistryReverseControlTest is Test {
         registry = new NameRegistry(treasury);
     }
 
-    /// The outer gate (ruled 22:20): a stranger cannot take a name at all.
+    /// The outer gate (ruled): a stranger cannot take a name at all.
     /// This is the one that closes canonical-name squatting, because a name is
     /// a unique resource and a canonical id is derivable before its agent
     /// exists - so "forward-only" alone still let an attacker own `orch:victim`

@@ -3,7 +3,7 @@ pragma solidity ^0.8.30;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
-/// @title NameRegistry - names to addresses for Operation PowerOUT.
+/// @title NameRegistry - names to addresses.
 /// @notice A lookup laid ON TOP OF mesh identity, never a namespace beside it
 /// (spec S0). Two kinds of name live here:
 ///   * a CANONICAL name is a qualified agent id, `<org label>:<local id>`,
@@ -31,7 +31,7 @@ contract NameRegistry is AccessControl {
 
     /// @notice One primary name per address, keyed by TARGET - not by owner -
     /// and written only by `registerFor`.
-    /// @dev Ruled 19:15 UTC on spec S3.2: a Record has both an owner and a
+    /// @dev ruled on spec S3.2: a Record has both an owner and a
     /// target and at spawn they are the same wallet, so which one the reverse
     /// follows is not self-evident. It follows the TARGET, because reverseOf
     /// answers "what is the name of the thing AT this address".
@@ -84,7 +84,7 @@ contract NameRegistry is AccessControl {
     }
 
     /// @notice Register `name`, with the caller as its owner. FORWARD-ONLY.
-    /// @dev REGISTRAR-ONLY (ruled 22:20 UTC) as well as forward-only (22:12).
+    /// @dev REGISTRAR-ONLY (ruled) as well as forward-only (ruled).
     ///
     /// Forward-only was not enough. Names are unique and a canonical id is
     /// publicly derivable from an org label and a local id BEFORE the agent it
@@ -109,7 +109,7 @@ contract NameRegistry is AccessControl {
     }
 
     /// @notice Register `name` on someone else's behalf. Used by chain-svc at
-    /// spawn for canonical ids, and by the Broker after a darknet purchase.
+    /// spawn for canonical ids, and by the Broker after a purchase.
     function registerFor(string calldata name, address owner, address target)
         external
         onlyRole(REGISTRAR_ROLE)
@@ -120,7 +120,7 @@ contract NameRegistry is AccessControl {
     }
 
     /// @notice Hand a name to a new owner. Owner only; in-game this is a
-    /// darknet purchase the Broker executes with the seller's org key.
+    /// purchase the Broker executes with the previous owner's org key.
     function transfer(string calldata name, address newOwner) external {
         // transfer(name, address(0)) would otherwise be a silent RELEASE: the
         // record stays, resolve() keeps working, but every ownership check
@@ -137,7 +137,7 @@ contract NameRegistry is AccessControl {
         // "clears old reverse if it pointed here" (spec S3.2): a name that has
         // changed hands must stop being the primary name of the address it
         // still targets, or a sold alias keeps answering reverseOf for its
-        // seller.
+        // previous owner.
         if (reverse[rec.target] == key) {
             delete reverse[rec.target];
         }
@@ -155,7 +155,7 @@ contract NameRegistry is AccessControl {
     /// @notice Repoint a name as the registrar, without the owner's key.
     /// @dev Exists so retirement is a platform action: `DELETE /wallets` clears
     /// the targets of an agent's aliases, and must not depend on that agent's
-    /// keystore entry still being decryptable (ruled 19:15 UTC on spec S3.2).
+    /// keystore entry still being decryptable (ruled on spec S3.2).
     function setTargetFor(string calldata name, address target)
         external
         onlyRole(REGISTRAR_ROLE)
@@ -165,7 +165,7 @@ contract NameRegistry is AccessControl {
     }
 
     /// @notice Address a name points at, or address(0) if the name is unknown.
-    /// @dev Views never revert on a miss (ruled 19:15 UTC): chain-svc needs
+    /// @dev Views never revert on a miss (ruled): chain-svc needs
     /// "unknown" as a value it can turn into a 404, not a decode error.
     function resolve(string calldata name) external view returns (address) {
         return records[keccak256(bytes(name))].target;
@@ -188,7 +188,7 @@ contract NameRegistry is AccessControl {
         // The reverse is written HERE AND NOWHERE ELSE, only from registerFor,
         // and only when the target has no primary name yet - so a vanity alias
         // can never overwrite the canonical id, and the permissionless path can
-        // never write one at all (spec S3.2, ruled 22:12 UTC).
+        // never write one at all (spec S3.2, ruled).
         //
         // Deliberately NOT `owner == target`, which was the first fix proposed:
         // that would still let a self-owned first registration become primary,

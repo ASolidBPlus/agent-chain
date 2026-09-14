@@ -390,7 +390,7 @@ describe('policy enforcement', () => {
       store.close();
     });
 
-    // A5. Seat 2's two separations. `release` takes ONLY an intent id now, so
+    // A5. A review's two separations. `release` takes ONLY an intent id now, so
     // there is no caller coordinate left to be wrong - but these assert the
     // behaviour rather than the signature, because a future overload could
     // reintroduce either.
@@ -500,7 +500,7 @@ describe('deny matches the resolved principal, not just the requested name', () 
     expect(toResolved('mark.vee', 'orch:mark')).toBe('counterparty_denied');
   });
 
-  // The ruled test (04:05): deny treasury.vee, register treasure.vee as a
+  // The ruled test: deny treasury.vee, register treasure.vee as a
   // treasury alias, send to treasure.vee. The registry keeps the FIRST
   // registered name as `reverse[target]`, so the alias resolves canonical to
   // treasury.vee and the deny entry bites.

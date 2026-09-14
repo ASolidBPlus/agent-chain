@@ -9,7 +9,7 @@ const MAX_NAME_LENGTH = 48;
 
 /// A canonical id is `<org label>:<local id>`, exactly one colon, LOWERCASE.
 /// Lowercase is enforced here and nowhere else: the mesh's POST /agents checks
-/// only "no colon" (mesh-planner, 19:33 UTC), so this is a real guard rather
+/// only "no colon", so this is a real guard rather
 /// than a second copy of a fabric check. Never normalise - an uppercase id is
 /// rejected, because silently lowercasing it would key money under an id its
 /// caller did not ask for.
@@ -40,7 +40,7 @@ function assertLength(value: string, code: 'invalid_agent_id' | 'invalid_name'):
 ///
 /// THE CASE EDGE FALLS OUT RATHER THAN NEEDING ITS OWN RULE. Canonical ids are
 /// lowercase-only while aliases preserve case for the lookalike mechanic
-/// (S3.2), so `arena:aIpha` simply is not canonical and the §5 fallback skips
+/// (S3.2), so `acme:aIpha` simply is not canonical and the §5 fallback skips
 /// it. Lowercasing it is forbidden (`:14` - it would key money under an id the
 /// caller did not ask for) and rejecting the request would blame the caller for
 /// a string the server itself built.

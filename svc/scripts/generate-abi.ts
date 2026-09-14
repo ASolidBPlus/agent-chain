@@ -2,7 +2,7 @@
 //
 // The ABI is COMMITTED rather than read at runtime for two reasons: chain-svc's
 // image does not carry the contracts' build output, and `bun test` must run
-// without Foundry installed (mesh-agent's CI has no forge). The drift risk that
+// without Foundry installed (the harness's CI has no forge). The drift risk that
 // creates is covered by the forge CI job re-running this and failing on a diff.
 //
 //   bun run scripts/generate-abi.ts        # from svc, after `forge build`

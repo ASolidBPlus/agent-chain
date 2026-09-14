@@ -41,7 +41,7 @@ contract RegistryHandler is Test {
     /// primary name for the address it points at.
     uint256 public foreignRegisterWroteReverse;
 
-    /// Must stay zero: `register` is REGISTRAR-ONLY (ruled 22:20 UTC), so a
+    /// Must stay zero: `register` is REGISTRAR-ONLY (ruled), so a
     /// non-registrar taking a name is the squat that made canonical ids
     /// stealable.
     uint256 public strangerTookAName;
@@ -103,7 +103,7 @@ contract RegistryHandler is Test {
         registry.setTargetFor(name, _wallet(walletSeed));
     }
 
-    /// A name changing hands - in game, a darknet purchase.
+    /// A name changing hands - in game, a purchase between agents.
     function handOver(uint256 nameSeed, uint256 walletSeed) public {
         string memory name = _name(nameSeed);
         if (!_taken(name)) return;
@@ -167,7 +167,7 @@ contract RegistryHandler is Test {
     }
 
     /// `register` with a target that is NOT the caller - never driven anywhere
-    /// before build-triage asked. Seat 2's mutant `_register(name, target,
+    /// before review asked. The mutant `_register(name, target,
     /// target)` survives any suite that always passes target == msg.sender.
     ///
     /// The caller is the TREASURY, because register is registrar-only now; a

@@ -1,4 +1,4 @@
-// Server-side enforcement of a wallet's spending policy (spec S5, ruled 20:57).
+// Server-side enforcement of a wallet's spending policy (spec S5, ruled).
 //
 // wallet-mcp keeps its own copy of these checks as the model-facing fast path -
 // it produces the readable refusal the persona sees - but the AUTHORITY is
@@ -41,7 +41,7 @@ export function isWalletKind(value: unknown): value is WalletKind {
 /// enforces (spec S5).
 /// A cap, as a whole-VEE amount. NUMBER OR DECIMAL STRING, because a cap IS an
 /// amount and every other amount on these wires is a decimal string (ruled
-/// 03:55). A number is accepted for the same reason it is on `vee`: an integer
+/// ruled). A number is accepted for the same reason it is on `vee`: an integer
 /// is exactly representable, and a config author writes 25 as readily as "25".
 ///
 /// Never compared as a float. `Number("12.5") > max_per_tx` would reintroduce,
@@ -60,7 +60,7 @@ export type PolicyDefaults = Record<WalletKind, AgentPolicy>;
 
 /// Loaded from policy-defaults.json rather than held as a constant here, so the
 /// numbers are game balance the owner tunes and not something a builder chose
-/// (ruled 20:49 UTC). Read once at startup and FAILS LOUDLY if missing or
+/// (ruled). Read once at startup and FAILS LOUDLY if missing or
 /// malformed: a wallet spawned with no caps is an unbounded wallet, so this
 /// must not fall back to something permissive.
 export function loadPolicyDefaults(path: string): PolicyDefaults {
@@ -107,10 +107,10 @@ const isNameList = (a: unknown): a is string[] =>
 /// chain-svc's agent defaults").
 ///
 /// It used to demand all four, which produced an asymmetry nobody would design
-/// on purpose and which broke the arena: sending NO policy succeeded and fell
+/// on purpose and which broke the acme: sending NO policy succeeded and fell
 /// to defaults, while sending a strictly MORE SPECIFIC one - `allow`/`deny`
-/// with the caps left to the defaults, which is the arena's whole use - was
-/// refused outright. Found by mesh-agent-builder running the stack rather than
+/// with the caps left to the defaults, which is the harness's whole use - was
+/// refused outright. Found by running the stack rather than
 /// reading it.
 export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy {
   if (value === undefined || value === null) return defaults;
@@ -121,7 +121,7 @@ export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy 
 
   for (const field of ['max_per_tx', 'max_per_stage'] as const) {
     if (p[field] !== undefined && !isCap(p[field])) {
-      // invalid_amount, not invalid_request (ruled 07:58): a cap IS an amount,
+      // invalid_amount, not invalid_request (ruled): a cap IS an amount,
       // and a caller that sent 25.5 has made an amount mistake, not a
       // malformed-request one. Same code `vee` gets for the same reason.
       throw new HttpError(
@@ -175,15 +175,15 @@ export async function readPolicyFile(policyDir: string, agentId: string): Promis
 ///
 ///   `*`        matches anything
 ///   `*suffix`  matches any name ending `suffix`   (`*.vee`)
-///   `prefix*`  matches any name starting `prefix` (`arena:*`)
+///   `prefix*`  matches any name starting `prefix` (`acme:*`)
 ///   anything else is a LITERAL, compared whole.
 ///
 /// Still deliberately not a general glob: the patterns come from a game config,
 /// and a regex dialect nobody has specified is a way to write an allow rule
 /// that silently matches more than its author meant. The trailing-star form was
-/// added (ruled 06:15) because `arena:*` was needed and, until then, matched
+/// added (ruled) because `acme:*` was needed and, until then, matched
 /// NOTHING - it fell through to the literal comparison, so it was compared as
-/// the seven-character string `arena:*`. In an allow list that refuses
+/// the seven-character string `acme:*`. In an allow list that refuses
 /// everything, which is loud; in a DENY list it denies nothing, which is not.
 ///
 /// A star anywhere else (`a*b`, `**`, `a*b*c`) is REFUSED AT POLICY LOAD rather
@@ -215,7 +215,7 @@ export function assertPatternsUsable(patterns: string[], field: 'allow' | 'deny'
       throw new HttpError(
         'invalid_request',
         `${field} pattern ${JSON.stringify(p)} is not supported: a star is allowed only as the ` +
-          `whole pattern, a leading star (*.vee), or a trailing star (arena:*)`,
+          `whole pattern, a leading star (*.vee), or a trailing star (acme:*)`,
       );
     }
   }
@@ -254,7 +254,7 @@ export function stageCapWei(policy: AgentPolicy): bigint {
 ///
 /// This function closes it by NAME: deny matches the requested name OR the
 /// canonical, so a deny naming the canonical cannot be dodged with an alias.
-/// That is the ruled case (04:05) and the common one, because `reverse[target]`
+/// That is the ruled case and the common one, because `reverse[target]`
 /// keeps the first-registered name as the canonical.
 ///
 /// It CANNOT close a deny naming one alias while the caller uses another -
@@ -293,7 +293,7 @@ export function enforcePolicy(args: {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} VEE`);
   }
 
-  // BOTH NAMES, and the two lists use them differently ON PURPOSE (ruled 04:05).
+  // BOTH NAMES, and the two lists use them differently ON PURPOSE (ruled).
   //
   // DENY matches EITHER, so it is strictly harder to evade: a wallet holds more
   // than one name by design - `addAlias` registers an alias against the same

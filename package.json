@@ -1,9 +1,9 @@
 {
-  "name": "cyberlab-chain",
+  "name": "agent-chain",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The cyberlab private chain: Anvil, the VEE Bux and name registry contracts, chain-svc and wallet-mcp",
+  "description": "A private chain: Anvil, the token and name registry contracts, chain-svc and wallet-mcp",
   "workspaces": [
     "svc",
     "wallet-mcp"

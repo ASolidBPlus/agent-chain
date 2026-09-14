@@ -17,7 +17,7 @@ export interface Resolved {
   /// agent (`orch:shadowbroker`), a platform name for a platform account
   /// (`treasury.vee`), or null if it has none - a burner registers no names
   /// (spec S4). Named `canonical` rather than `agentId` because it is not
-  /// always an agent (ruled 20:07 UTC).
+  /// always an agent (ruled).
   canonical: string | null;
 }
 
@@ -37,7 +37,7 @@ export class Resolver {
 
   /// @returns null when the name is not registered. The registry returns
   /// address(0) rather than reverting on a miss, so "unknown" arrives as a
-  /// value and becomes a 404 here (ruled 19:15 UTC).
+  /// value and becomes a 404 here (ruled).
   async lookup(name: string): Promise<Resolved | null> {
     let target: Address;
     try {
@@ -136,7 +136,7 @@ export class Resolver {
       const args = log.args as { name?: string; owner?: Address; target?: Address };
       if (!args.name || !args.target || !args.owner) continue;
       if (args.target.toLowerCase() !== address.toLowerCase()) continue;
-      // A wallet's alias is a name it OWNS and points at itself (ruled 22:12
+      // A wallet's alias is a name it OWNS and points at itself (ruled
       // UTC).
       //
       // The threat this was originally written against is GONE: `register` was
@@ -164,7 +164,7 @@ export class Resolver {
 /// The §5 bare-id rule itself, over any `lookup`.
 ///
 /// A bare id resolves within the CALLER'S OWN NAMESPACE and nowhere else. dana
-/// was shown `attacker` by the mesh, the registry holds `arena:attacker`, and
+/// was shown `attacker` by the mesh, the registry holds `acme:attacker`, and
 /// returning an unsolicited bribe failed on the gap between the id a model SEES
 /// and the id the registry HOLDS.
 ///
@@ -225,13 +225,13 @@ export async function resolveBareName(
     // AMBIGUOUS MEANS THEY DISAGREE, NOT MERELY THAT BOTH EXIST.
     //
     // A wallet aliasing itself with its own local id is ordinary and harmless:
-    // `arena:toby` registering the alias `toby` makes both readings resolve, to
+    // `acme:toby` registering the alias `toby` makes both readings resolve, to
     // THE SAME ADDRESS. Refusing on existence alone made that a 409 whose advice
-    // named one id twice ("arena:toby and arena:toby; say which"), and raised a
+    // named one id twice ("acme:toby and acme:toby; say which"), and raised a
     // chain.name_collision against an agent that had done nothing - a false
     // positive on the signal path, where it costs most.
     //
-    // Worse, it refused the case this rule was written for: had `arena:attacker`
+    // Worse, it refused the case this rule was written for: had `acme:attacker`
     // aliased itself `attacker`, dana's return would have been refused by the
     // change made so it would not be.
     //
@@ -254,7 +254,7 @@ export async function resolveBareName(
 
     // BOTH ATTEMPTS NAMED. After this rule `unknown_name` covers two worlds,
     // and this is a game students DEBUG: "no wallet is registered as toby" with
-    // `arena:toby` sitting in the registry sends them hunting a registration
+    // `acme:toby` sitting in the registry sends them hunting a registration
     // bug that does not exist.
     throw new HttpError(
       'unknown_name',

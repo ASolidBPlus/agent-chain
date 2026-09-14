@@ -239,14 +239,14 @@ export function migrate(
 }
 
 /// THE SENTENCE. Every path that destroys the svc store prints exactly this -
-/// the CLI wrappers, the arena UI's Reset log, and the refusals in this module
+/// the CLI wrappers, the harness UI's Reset log, and the refusals in this module
 /// - so that what a wipe costs is stated in one place and cannot drift between
 /// them into three descriptions of different severities.
 ///
 /// IT NAMES BOTH COSTS, and that is load-bearing rather than thorough. It said
 /// only the idempotency half first, on the reasoning that an acknowledged reset
 /// is the fresh-game case where releasing freezes is intended. That reasoning
-/// was wrong (mesh-planner, 12:29): the acknowledged reset is ALSO the path a
+/// was wrong: the acknowledged reset is ALSO the path a
 /// facilitator takes to recover from a failure mid-game - which is exactly when
 /// a freeze is load-bearing, since freezing is the prescribed response to a
 /// chain.anomaly and S3 made unfreezing deliberately hard. AN ACKNOWLEDGEMENT
@@ -376,8 +376,8 @@ export class LedgerWipeError extends Error {
 /// neither keys nor contracts. It is not a heuristic - each conjunct rules out
 /// one legitimate way to arrive at an empty store.
 ///
-/// It refuses rather than warns, and that is the ruling (powerout-planner,
-/// 11:57): the loud-but-continuing failure is precisely what routed someone to
+/// It refuses rather than warns, and that is the ruling: the
+/// loud-but-continuing failure is precisely what routed someone to
 /// the wipe, and a warning at startup is read by nobody. The legitimate reset
 /// is not obstructed - it IS the acknowledgement flag, one documented step.
 export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {

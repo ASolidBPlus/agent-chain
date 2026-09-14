@@ -331,7 +331,7 @@ describe('gathering the facts', () => {
 });
 
 // THE SHARED SENTENCE ITSELF, pinned separately from every message that embeds
-// it. It is an interface: the CLI wrappers and the arena Reset log import it,
+// it. It is an interface: the CLI wrappers and the harness Reset log import it,
 // and an operator's acknowledgement is only informed consent if it names ALL of
 // what is destroyed. It understated the cost by half once already, so the
 // completeness is a test rather than a convention.

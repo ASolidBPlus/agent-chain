@@ -5,7 +5,7 @@
 # the reporting plan agreed. Needs Docker and Foundry.
 set -euo pipefail
 
-IMAGE=${IMAGE:-powerout-anvil:dev}; NAME=${NAME:-powerout-anvil-events}; VOLUME=${VOLUME:-powerout-events-state}
+IMAGE=${IMAGE:-agent-chain-anvil:dev}; NAME=${NAME:-agent-chain-anvil-events}; VOLUME=${VOLUME:-agent-chain-events-state}
 RPC=${RPC:-http://127.0.0.1:8545}; PORT=${PORT:-7003}; SINK_PORT=${SINK_PORT:-7004}
 TOKEN=${CHAIN_SVC_TOKEN:-events-token}
 MNEMONIC="test test test test test test test test test test test junk"
@@ -59,7 +59,7 @@ jget() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 step "spawn two wallets and make one accepted send"
 SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":250,"kind":"agent","alias":"shadowbroker.vee"}')
 SB_TOKEN=$(echo "$SB" | jget "['walletToken']")
-curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:darknetclient","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
+curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 # No X-Wallet-Client header: this is a caller going straight at chain-svc, the
 # shape a persona bypassing its own MCP would take.
 TX=$(curl -fsS -H "Authorization: Bearer $SB_TOKEN" -H 'content-type: application/json' \

@@ -1,4 +1,4 @@
-// Startup validation. The harness cannot do this: mesh-agent's ${VAR}
+// Startup validation. The harness cannot do this: the harness's ${VAR}
 // expansion substitutes an UNSET variable with an empty string, so a missing
 // WALLET_TOKEN would otherwise reach chain-svc as an empty bearer and come back
 // 401 - a config error wearing an auth error's clothes.
@@ -10,7 +10,7 @@ import { Wallet } from '../src/wallet.ts';
 const COMPLETE = {
   WALLET_AGENT_ID: 'orch:shadowbroker',
   CHAIN_SVC_URL: 'http://chain-svc:7000',
-  // 32 chars, not the 7-char 'a-token' this used to be. mesh-agent's
+  // 32 chars, not the 7-char 'a-token' this used to be. the harness's
   // transcript redactor does not redact values under 8 characters (it warns,
   // loudly, naming the variable), and a short fixture is the one most likely to
   // be copied into a real config. chain-svc issues 32-byte tokens, so a
@@ -61,7 +61,7 @@ describe('configuration', () => {
   });
 });
 
-// mesh-agent's transcript redactor declines to redact values under 8
+// the harness's transcript redactor declines to redact values under 8
 // characters, and this process's own redact() gets WORSE as the token gets
 // shorter - splitting on a two-letter value rewrites those letters wherever
 // they appear. chain-svc issues 32-byte tokens, so short means misconfigured.

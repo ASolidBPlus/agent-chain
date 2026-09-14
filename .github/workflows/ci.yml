@@ -1,5 +1,5 @@
-# Reproduced from mesh-agent's ci.yml at the split (dev @ 822bd20), minus the
-# two mesh-agent-only steps: the arena bundle check and gate.sh's self-test.
+# Reproduced from the harness ci.yml at the split, minus the
+# two harness-only steps: the bundle check and gate.sh's self-test.
 # Neither has anything in this repo to act on.
 #
 # NO `submodules:` here, and that is deliberate rather than an omission -

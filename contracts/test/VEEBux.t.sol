@@ -14,7 +14,7 @@ contract VEEBuxTest is Test {
 
     address internal treasury = makeAddr("treasury");
     address internal shadowbroker = makeAddr("shadowbroker");
-    address internal darknetclient = makeAddr("darknetclient");
+    address internal client = makeAddr("client");
 
     function setUp() public {
         vee = new VEEBux(treasury);
@@ -54,10 +54,10 @@ contract VEEBuxTest is Test {
         vee.mint(shadowbroker, 100 ether);
 
         vm.prank(shadowbroker);
-        vee.transfer(darknetclient, 40 ether);
+        vee.transfer(client, 40 ether);
 
         assertEq(vee.balanceOf(shadowbroker), 60 ether);
-        assertEq(vee.balanceOf(darknetclient), 40 ether);
+        assertEq(vee.balanceOf(client), 40 ether);
     }
 
     /// The admin can hand MINTER_ROLE to the facilitator API for mid-game
@@ -67,9 +67,9 @@ contract VEEBuxTest is Test {
         vee.grantRole(minterRole, shadowbroker);
 
         vm.prank(shadowbroker);
-        vee.mint(darknetclient, 5 ether);
+        vee.mint(client, 5 ether);
 
-        assertEq(vee.balanceOf(darknetclient), 5 ether);
+        assertEq(vee.balanceOf(client), 5 ether);
     }
 
     // ---- transferWithIntent -------------------------------------------------
@@ -88,14 +88,14 @@ contract VEEBuxTest is Test {
 
         // ALONGSIDE, not instead of: anything reading Transfer is unaffected.
         vm.expectEmit(true, true, false, true);
-        emit Transfer(shadowbroker, darknetclient, 40e18);
+        emit Transfer(shadowbroker, client, 40e18);
         vm.expectEmit(true, true, true, true);
-        emit IntentTransfer(intent, shadowbroker, darknetclient, 40e18);
+        emit IntentTransfer(intent, shadowbroker, client, 40e18);
 
         vm.prank(shadowbroker);
-        vee.transferWithIntent(darknetclient, 40e18, intent);
+        vee.transferWithIntent(client, 40e18, intent);
 
-        assertEq(vee.balanceOf(darknetclient), 40e18);
+        assertEq(vee.balanceOf(client), 40e18);
         assertEq(vee.balanceOf(shadowbroker), 60e18);
     }
 
@@ -104,11 +104,11 @@ contract VEEBuxTest is Test {
     function test_TransferWithIntentCannotSpendSomeoneElsesBalance() public {
         _fund(shadowbroker, 100e18);
         vm.prank(shadowbroker);
-        vee.approve(darknetclient, 100e18);
+        vee.approve(client, 100e18);
 
-        // darknetclient holds an allowance over shadowbroker, and it buys
+        // client holds an allowance over shadowbroker, and it buys
         // nothing here: it can only move its own (zero) balance.
-        vm.prank(darknetclient);
+        vm.prank(client);
         vm.expectRevert();
         vee.transferWithIntent(treasury, 1e18, keccak256(bytes("theft")));
 
@@ -125,18 +125,18 @@ contract VEEBuxTest is Test {
         bytes32 intent = keccak256(bytes("reused"));
 
         vm.prank(shadowbroker);
-        vee.transferWithIntent(darknetclient, 10e18, intent);
+        vee.transferWithIntent(client, 10e18, intent);
         vm.prank(shadowbroker);
-        vee.transferWithIntent(darknetclient, 10e18, intent);
+        vee.transferWithIntent(client, 10e18, intent);
 
-        assertEq(vee.balanceOf(darknetclient), 20e18);
+        assertEq(vee.balanceOf(client), 20e18);
     }
 
     function test_TransferWithIntentRespectsBalance() public {
         _fund(shadowbroker, 5e18);
         vm.prank(shadowbroker);
         vm.expectRevert();
-        vee.transferWithIntent(darknetclient, 6e18, keccak256(bytes("too-much")));
+        vee.transferWithIntent(client, 6e18, keccak256(bytes("too-much")));
     }
 
     /// The id is opaque to the contract: a zero id is a caller error, not a
@@ -145,8 +145,8 @@ contract VEEBuxTest is Test {
     function testFuzz_AnyIntentIdIsCarriedThrough(bytes32 intent) public {
         _fund(shadowbroker, 10e18);
         vm.expectEmit(true, true, true, true);
-        emit IntentTransfer(intent, shadowbroker, darknetclient, 1e18);
+        emit IntentTransfer(intent, shadowbroker, client, 1e18);
         vm.prank(shadowbroker);
-        vee.transferWithIntent(darknetclient, 1e18, intent);
+        vee.transferWithIntent(client, 1e18, intent);
     }
 }
