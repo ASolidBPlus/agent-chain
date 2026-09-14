@@ -122,6 +122,11 @@ const CONVERT = {
   function: 'convert',
   kinds: ['org', 'agent'],
   amount: { arg: 2, token: { arg: 0 } },
+  // The {arg} form carries a bound because it MIGHT resolve to a non-default
+  // token: `play -> gold` is bounded by max_per_tx, `gold -> play` by nothing
+  // the wallet holds. Decided from the entry's shape, so the operator meets it
+  // when they write the file.
+  perTxCap: '100',
   intentArg: 3,
   maxPerStage: 20,
   addressArgs: { '0': 'token', '1': 'token' },
@@ -367,6 +372,25 @@ describe('amount', () => {
     const p = await policy();
     expect(p.snapshot().entries).toHaveLength(0);
     expect(logged.join('\n')).toMatch(/needs "perTxCap" or "uncapped"/);
+  });
+
+  it('requires perTxCap or uncapped on the {arg} form, whatever it resolves to', async () => {
+    // THE HOLE THE SPEC'S OWN EXAMPLE WALKED THROUGH. `token: {arg: 0}` means
+    // "the token whose address is argument 0", chosen per call: for
+    // `convert(source, target, amountIn)`, `play -> gold` puts the amount in
+    // the default token and max_per_tx bounds it, while `gold -> play` puts it
+    // in gold, which NOTHING bounds - every wallet cap is denominated in the
+    // default token. So the bound is required from the entry's SHAPE, and the
+    // operator meets it when they write the file rather than a persona meeting
+    // it mid-game converting the wrong way round.
+    const { perTxCap: _dropped, ...noCap } = CONVERT;
+    write(only(noCap));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/needs "perTxCap" or "uncapped"/);
+
+    write(only({ ...noCap, uncapped: true }));
+    expect((await policy()).snapshot().entries).toHaveLength(1);
   });
 
   it('accepts uncapped: true as the written-out alternative', async () => {

@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export class SchemaError extends Error {
   constructor(
@@ -122,6 +122,23 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; dd
   // reintroduces null rows.
   { table: 'spawns', column: 'kind', ddl: 'TEXT' },
 
+  // v6, §3.2.7: WHAT THIS INTENT WAS RESERVED FOR, durably and readably.
+  //
+  // NULLABLE WITH NO DEFAULT, and the three travel together. Null is the TRUE
+  // value for a sign-transfer or fund intent - it was not a call - and also for
+  // every intent written before v6, and a default would collapse "this was not
+  // a call" and "we did not record it" into one answer. The same rule the
+  // `kind` column above is written under.
+  //
+  // They are not decoration. Two things read them: the replay check, which
+  // compares a repeated intent id against the call it was first reserved for
+  // (a replay with different arguments is invalid_request, not a duplicate),
+  // and `release`, which finds the call_counts row to give back FROM THE
+  // INTENT'S OWN ROW rather than from what the caller remembers - the shape
+  // `release(intentId)` already has for the stage hold.
+  { table: 'intents', column: 'call_contract', ddl: 'TEXT' },
+  { table: 'intents', column: 'call_function', ddl: 'TEXT' },
+  { table: 'intents', column: 'call_args_hash', ddl: 'TEXT' },
 ];
 
 /// Columns that arrived with a TABLE created after the first schema.
@@ -145,6 +162,15 @@ const NEW_TABLE_COLUMNS: ReadonlyArray<[string, string]> = [
   // ORIGINAL_COLUMNS, because `deployment` arrived at v3 and this shape at v5.
   ['deployment', 'modules_json'],
   ['deployment', 'recorded_at'],
+  // v6, §3.2.7: per-entry call counting, one row per (wallet, stage, contract,
+  // function). A NEW TABLE, so it arrives complete from `createTables` and
+  // needs classifying rather than ALTERing - `count` has a NOT NULL default and
+  // the primary key is composite, which ALTER TABLE cannot add.
+  ['call_counts', 'agent_id'],
+  ['call_counts', 'stage'],
+  ['call_counts', 'contract'],
+  ['call_counts', 'function'],
+  ['call_counts', 'count'],
 ];
 
 export function classifiedColumns(): Set<string> {

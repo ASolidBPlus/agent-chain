@@ -153,6 +153,20 @@ export class Store {
         -- a chain-svc:<uuid> it is not - different stories, and a facilitator
         -- should not need a second lookup to tell them apart.
         id_source  TEXT,
+        -- WHAT THIS INTENT WAS RESERVED FOR, when it was a generic call:
+        -- the registry key, the function name, and a hash of the validated
+        -- wire arguments. Null for a sign-transfer or fund intent, which is
+        -- the true value rather than a gap - see ADDITIVE_COLUMNS.
+        --
+        -- The hash is what makes a replay decidable. chain-svc answers a
+        -- repeated intent id with the ORIGINAL transaction hash, which is
+        -- correct only if the repeat is the same call; a repeat under the same
+        -- id with different arguments is a different call wearing a used id,
+        -- and returning the first call's hash would tell the caller their
+        -- second call succeeded.
+        call_contract  TEXT,
+        call_function  TEXT,
+        call_args_hash TEXT,
         created_at INTEGER NOT NULL
       );
       -- Only ever holds the SECOND and later emissions for one intent, so it is
@@ -163,6 +177,25 @@ export class Store {
         from_addr  TEXT,
         seen_at    INTEGER NOT NULL,
         PRIMARY KEY (topic, tx_hash)
+      );
+      -- HOW MANY TIMES THIS WALLET HAS CALLED THIS ENTRY THIS STAGE.
+      --
+      -- Keyed by (wallet, stage, contract, function) rather than by intent,
+      -- because the question it answers is "how many more may I make", and a
+      -- table of intents would have to be counted per request. Bounded by the
+      -- stage: a new stage is new rows, and the old ones are history.
+      --
+      -- WRITTEN ONLY FOR ENTRIES THAT DECLARE maxPerStage. An entry with no
+      -- limit writes no row and reads none: a counter nothing enforces is a
+      -- table that grows for the sake of it, and a row whose absence is
+      -- meaningful is easier to reason about than a row whose value is ignored.
+      CREATE TABLE IF NOT EXISTS call_counts (
+        agent_id TEXT NOT NULL,
+        stage    TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        function TEXT NOT NULL,
+        count    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, stage, contract, function)
       );
       CREATE TABLE IF NOT EXISTS stage_spend (
         agent_id TEXT NOT NULL,
@@ -511,8 +544,28 @@ export class Store {
     /// PARAMETER rather than a second method so that both halves stay in one
     /// transaction and the call site has to say which it wants.
     capWei: bigint | null;
+    /// A GENERIC CALL rather than a transfer (§3.2.7). Present for `call` and
+    /// `admin-call` intents and absent for `sign-transfer` and `fund`, which is
+    /// why the three columns are nullable: null is the true value, not a gap.
+    ///
+    /// A THIRD HALF OF THE SAME DECISION, for the same reason `capWei` is a
+    /// parameter: "may this call happen" is one question, and counting it in a
+    /// second transaction would admit a window where the intent is taken and
+    /// the count is not, or the reverse.
+    call?: {
+      contract: string;
+      function: string;
+      /// sha256 of the canonical JSON of the validated wire arguments. What
+      /// makes a replay decidable: the same id with different arguments is a
+      /// different call wearing a used id, not a duplicate.
+      argsHash: string;
+      /// The entry's per-stage limit, or absent for no limit - in which case no
+      /// `call_counts` row is written and none is read.
+      maxPerStage?: number;
+    };
   }): Reservation {
-    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei } = args;
+    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei, call } =
+      args;
 
     // ONE transaction covering BOTH the intent and the cap, because they are
     // one decision: "may this send happen". Two transactions would admit a
@@ -530,11 +583,25 @@ export class Store {
         return { outcome: 'over_stage_cap', txHash: null };
       }
 
+      // The per-entry limit, read inside the same transaction and for the same
+      // reason. BEFORE any write, so a refusal consumes nothing - least of all
+      // the intent id, which a caller may reasonably retry next stage. An id
+      // consumed by a refusal would answer `duplicate` with a null txHash,
+      // which reads as `intent_unresolved`: "it may have been sent".
+      const counted = call?.maxPerStage !== undefined;
+      const usedThisStage = counted
+        ? this.callCount(agentId, stage, call!.contract, call!.function)
+        : 0;
+      if (counted && usedThisStage + 1 > call!.maxPerStage!) {
+        return { outcome: 'over_stage_cap', txHash: null };
+      }
+
       this.db
         .query(
           `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic,
-                                reserved_at_block, id_source, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+                                reserved_at_block, id_source, call_contract, call_function,
+                                call_args_hash, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           intentId,
@@ -545,8 +612,21 @@ export class Store {
           topic ?? null,
           reservedAtBlock === undefined ? null : reservedAtBlock.toString(),
           idSource ?? null,
+          call?.contract ?? null,
+          call?.function ?? null,
+          call?.argsHash ?? null,
           Date.now(),
         );
+      if (counted) {
+        this.db
+          .query(
+            `INSERT INTO call_counts (agent_id, stage, contract, function, count)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(agent_id, stage, contract, function)
+               DO UPDATE SET count = excluded.count`,
+          )
+          .run(agentId, stage, call!.contract, call!.function, usedThisStage + 1);
+      }
       if (capWei !== null) {
         this.db
           .query(
@@ -903,8 +983,17 @@ export class Store {
   release(intentId: string): void {
     const undo = this.db.transaction((): void => {
       const row = this.db
-        .query(`SELECT agent_id, stage, held_wei FROM intents WHERE intent_id = ? AND tx_hash IS NULL`)
-        .get(intentId) as { agent_id: string; stage: string; held_wei: string } | null;
+        .query(
+          `SELECT agent_id, stage, held_wei, call_contract, call_function
+           FROM intents WHERE intent_id = ? AND tx_hash IS NULL`,
+        )
+        .get(intentId) as {
+        agent_id: string;
+        stage: string;
+        held_wei: string;
+        call_contract: string | null;
+        call_function: string | null;
+      } | null;
       if (!row) return;
 
       // The `tx_hash IS NULL` here is REDUNDANT with the SELECT above, which
@@ -917,8 +1006,68 @@ export class Store {
 
       const held = BigInt(row.held_wei);
       if (held > 0n) this.releaseStageSpend(row.agent_id, row.stage, held);
+
+      // THE THIRD HALF, found the same way as the other two: from the row, not
+      // from what the caller remembers. `release(intentId)` takes one
+      // coordinate on purpose - a caller that supplies its own idea of which
+      // entry was counted is a caller that can be wrong about it, and the row
+      // is the only record of what was actually reserved.
+      //
+      // An entry with no limit wrote no row, so this decrements nothing and the
+      // clamp handles it - as it does for an intent reserved before v6 and
+      // released after the upgrade.
+      if (row.call_contract !== null && row.call_function !== null) {
+        this.releaseCallCount(row.agent_id, row.stage, row.call_contract, row.call_function);
+      }
     });
     undo();
+  }
+
+  /// How many times this wallet has called this entry this stage. Zero when no
+  /// row exists, which is also what an entry with no limit always reports.
+  callCount(agentId: string, stage: string, contract: string, fn: string): number {
+    const row = this.db
+      .query(
+        `SELECT count FROM call_counts
+         WHERE agent_id = ? AND stage = ? AND contract = ? AND function = ?`,
+      )
+      .get(agentId, stage, contract, fn) as { count: number } | null;
+    return row?.count ?? 0;
+  }
+
+  /// What an intent was reserved FOR, or null when it was a transfer.
+  ///
+  /// The replay check reads this: chain-svc answers a repeated intent id with
+  /// the ORIGINAL transaction hash, which is right only if the repeat is the
+  /// same call. A repeat under the same id with different arguments is a
+  /// different call wearing a used id, and returning the first call's hash
+  /// would tell the caller their second call had succeeded.
+  intentCall(intentId: string): { contract: string; function: string; argsHash: string } | null {
+    const row = this.db
+      .query(`SELECT call_contract, call_function, call_args_hash FROM intents WHERE intent_id = ?`)
+      .get(intentId) as
+      | { call_contract: string | null; call_function: string | null; call_args_hash: string | null }
+      | null;
+    if (!row || row.call_contract === null || row.call_function === null) return null;
+    return {
+      contract: row.call_contract,
+      function: row.call_function,
+      argsHash: row.call_args_hash ?? '',
+    };
+  }
+
+  /// PRIVATE, for the reason `releaseStageSpend` is: `release` is the one door
+  /// the release rule guards, and a second public way to give a count back
+  /// would be a second door past a guard that cannot see it.
+  private releaseCallCount(agentId: string, stage: string, contract: string, fn: string): void {
+    const current = this.callCount(agentId, stage, contract, fn);
+    if (current <= 0) return;
+    this.db
+      .query(
+        `UPDATE call_counts SET count = ?
+         WHERE agent_id = ? AND stage = ? AND contract = ? AND function = ?`,
+      )
+      .run(current - 1, agentId, stage, contract, fn);
   }
 
   /// PRIVATE, and that is load-bearing rather than tidiness. `release` is the

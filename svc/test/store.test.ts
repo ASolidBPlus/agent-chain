@@ -86,3 +86,206 @@ describe('the event outbox', () => {
     store.close();
   }, 30_000);
 });
+
+// §3.2.7. PER-ENTRY CALL COUNTING, in the same transaction as the reservation.
+//
+// The count is taken AT RESERVATION, before the broadcast, exactly like the
+// stage hold - so a call that reaches the chain and reverts still costs its
+// slot. That is the honest cost of a call that happened: a persona can lose
+// stage budget to a paused pair, and `read` is free for anyone who is unsure.
+//
+// It rides `reserve` rather than sitting beside it because the two are one
+// decision - "may this call happen" - and two transactions would admit a window
+// where the intent is taken and the count is not, or the reverse. That is the
+// same argument the stage hold already won.
+describe('call counting', () => {
+  const CALL = { contract: 'converter', function: 'convert', argsHash: 'h1', maxPerStage: 2 };
+
+  it('records what the intent was reserved for', () => {
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-1',
+      agentId: 'orch:a',
+      stage: 's1',
+      amount: 0n,
+      capWei: null,
+      call: CALL,
+    });
+    expect(store.intentCall('i-1')).toEqual({
+      contract: 'converter',
+      function: 'convert',
+      argsHash: 'h1',
+    });
+    store.close();
+  });
+
+  it('leaves the call columns null for a transfer intent', () => {
+    const store = new Store(':memory:');
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null });
+    expect(store.intentCall('i-1')).toBeNull();
+    store.close();
+  });
+
+  it('counts up to the entry limit and refuses the one after', () => {
+    const store = new Store(':memory:');
+    const call = (id: string) =>
+      store.reserve({
+        intentId: id,
+        agentId: 'orch:a',
+        stage: 's1',
+        amount: 0n,
+        capWei: null,
+        call: CALL,
+      }).outcome;
+
+    expect(call('i-1')).toBe('reserved');
+    expect(call('i-2')).toBe('reserved');
+    expect(call('i-3')).toBe('over_stage_cap');
+    store.close();
+  });
+
+  it('writes NOTHING when the limit refuses', () => {
+    // The refusal must not consume the intent id it refused. A caller that
+    // retries next stage under the same id would otherwise be told `duplicate`
+    // about a call that never happened - and `duplicate` carries a null txHash,
+    // which reads as `intent_unresolved`: "it may have been sent".
+    const store = new Store(':memory:');
+    for (const id of ['i-1', 'i-2']) {
+      store.reserve({ intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    }
+    expect(
+      store.reserve({ intentId: 'i-3', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+        .outcome,
+    ).toBe('over_stage_cap');
+    expect(store.intentCall('i-3')).toBeNull();
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(2);
+    store.close();
+  });
+
+  it('counts per wallet, per stage, per contract and per function', () => {
+    // Four coordinates, and each one is a separate test of the primary key: a
+    // count keyed on fewer of them would let one wallet's calls limit another's,
+    // or one function's limit another's on the same contract.
+    const store = new Store(':memory:');
+    const call = (id: string, agent: string, stage: string, contract: string, fn: string) =>
+      store.reserve({
+        intentId: id,
+        agentId: agent,
+        stage,
+        amount: 0n,
+        capWei: null,
+        call: { contract, function: fn, argsHash: 'h', maxPerStage: 1 },
+      }).outcome;
+
+    expect(call('i-1', 'orch:a', 's1', 'converter', 'convert')).toBe('reserved');
+    expect(call('i-2', 'orch:b', 's1', 'converter', 'convert')).toBe('reserved'); // other wallet
+    expect(call('i-3', 'orch:a', 's2', 'converter', 'convert')).toBe('reserved'); // other stage
+    expect(call('i-4', 'orch:a', 's1', 'shop', 'convert')).toBe('reserved'); // other contract
+    expect(call('i-5', 'orch:a', 's1', 'converter', 'other')).toBe('reserved'); // other function
+    expect(call('i-6', 'orch:a', 's1', 'converter', 'convert')).toBe('over_stage_cap');
+    store.close();
+  });
+
+  it('counts nothing at all for an entry with no limit', () => {
+    // No row written and none read. A counter nothing enforces is a table that
+    // grows for the sake of it, and a row whose absence is meaningful is easier
+    // to reason about than a row whose value is ignored.
+    const store = new Store(':memory:');
+    const { maxPerStage: _none, ...noLimit } = CALL;
+    for (const id of ['i-1', 'i-2', 'i-3']) {
+      expect(
+        store.reserve({ intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: noLimit })
+          .outcome,
+      ).toBe('reserved');
+    }
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(0);
+    store.close();
+  });
+
+  it('gives the count back on release, found through the intent row', () => {
+    // `release(intentId)` takes ONE coordinate and reads every other from the
+    // row - which wallet, which stage, how much was held, and now which entry
+    // was counted. The caller does not get to say, because a caller that
+    // remembers its own coordinates is a caller that can be wrong about them.
+    const store = new Store(':memory:');
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
+
+    store.release('i-1');
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(0);
+    store.close();
+  });
+
+  it('frees the slot the release gave back, not merely the number', () => {
+    const store = new Store(':memory:');
+    const call = (id: string) =>
+      store.reserve({ intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+        .outcome;
+    expect(call('i-1')).toBe('reserved');
+    expect(call('i-2')).toBe('reserved');
+    expect(call('i-3')).toBe('over_stage_cap');
+
+    store.release('i-2');
+    expect(call('i-4')).toBe('reserved');
+    store.close();
+  });
+
+  it('does not give the count back once the intent has completed', () => {
+    // THE RELEASE RULE, unchanged and now covering a third thing. Release only
+    // on a failure that provably PRECEDES the broadcast; a completed intent has
+    // a tx_hash, so it is not released, and neither is its count. A reverted
+    // call has a hash too - it was mined - so it keeps its slot.
+    const store = new Store(':memory:');
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    store.completeIntent('i-1', '0xdead');
+
+    store.release('i-1');
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
+    store.close();
+  });
+
+  it('releases the stage hold and the call count together', () => {
+    // One reservation, two halves, one rule. A release that gave back the wei
+    // and kept the count - or the reverse - would be the two-rule shape the
+    // release rule exists to forbid.
+    const store = new Store(':memory:');
+    store.reserve({
+      intentId: 'i-1',
+      agentId: 'orch:a',
+      stage: 's1',
+      amount: 10n,
+      capWei: 100n,
+      call: CALL,
+    });
+    expect(store.spentThisStage('orch:a', 's1')).toBe(10n);
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
+
+    store.release('i-1');
+    expect(store.spentThisStage('orch:a', 's1')).toBe(0n);
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(0);
+    store.close();
+  });
+
+  it('does not go negative if a release arrives with no count row', () => {
+    // Reachable through a store that predates v6: an intent reserved before the
+    // table existed, released after the upgrade. A count clamped at zero is the
+    // same clamp the stage hold already has, for the same reason.
+    const store = new Store(':memory:');
+    const { maxPerStage: _none, ...noLimit } = CALL;
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: noLimit });
+    store.release('i-1');
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(0);
+    store.close();
+  });
+
+  it('refuses a duplicate intent id before it counts anything', () => {
+    const store = new Store(':memory:');
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    expect(
+      store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+        .outcome,
+    ).toBe('duplicate');
+    expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
+    store.close();
+  });
+});

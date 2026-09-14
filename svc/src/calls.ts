@@ -202,17 +202,22 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
   const capped = typeof e.perTxCap === 'string' || e.perTxCap !== undefined;
   const uncapped = e.uncapped === true;
   //
-  // STATIC KEYS ONLY AT LOAD, and the reason is that the rule is undecidable
-  // here for the other form. `amount.token: {arg: i}` says "the token whose
-  // address is argument i", which is chosen per call: the same entry can carry
-  // an amount in the default token on one call and in another token on the
-  // next, so no load-time answer is right for both. The spec's own example -
-  // `convert` with `token: {arg: 0}` and no perTxCap - is a file this must
-  // accept. What closes the hole for that form is the SAME check at request
-  // time, once the token is known (§3.2 step 6): a resolved token that is not
-  // the default, on an entry carrying neither field, refuses the call.
-  if (amount !== undefined && typeof amount.token === 'string') {
-    const isDefault = amount.token === defaultTokenKey(modules);
+  // THE {arg} FORM ALWAYS NEEDS A BOUND, and this is the case the rule was
+  // originally written without. `amount.token: {arg: i}` says "the token whose
+  // address is argument i", chosen per call - so one entry carries an amount in
+  // the default token on one call and in another token on the next. For
+  // `convert(source, target, amountIn)`, `play -> gold` puts the amount in
+  // `play` and `max_per_tx` bounds it; `gold -> play` puts it in `gold`, which
+  // nothing bounds, because every wallet cap is denominated in the default
+  // token. An entry loadable without a bound would be unbounded in exactly the
+  // direction nobody tested.
+  //
+  // DECIDED FROM THE ENTRY'S SHAPE, never from which token a call names:
+  // the point is that the operator meets this when they write the file, not
+  // that a persona meets it mid-game converting the wrong way round.
+  if (amount !== undefined) {
+    const isDefault =
+      typeof amount.token === 'string' && amount.token === defaultTokenKey(modules);
     if (!isDefault) {
       if (capped && uncapped) {
         // Two bounds, one of which says there is none. Whichever the code read
