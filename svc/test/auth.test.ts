@@ -157,8 +157,22 @@ describe('the route table', () => {
   });
 
   it('never leaves a mutating route open to any credential', () => {
-    const open = ROUTES.filter((r) => r.method !== 'GET' && r.scope === 'any');
+    // A POST that any credential may reach is how a wallet-scope caller
+    // performs an operator's action. The one exception is declared in the ROUTE
+    // TABLE rather than named here: `mutates: false` is a claim a reviewer
+    // reads beside the route, and a future POST that forgets it is still
+    // caught - which a list of exempt paths in this file would not be.
+    const open = ROUTES.filter(
+      (r) => r.method !== 'GET' && r.scope === 'any' && r.mutates !== false,
+    );
     expect(open.map((r) => `${r.method} ${r.path}`)).toEqual([]);
+  });
+
+  it('exempts nothing from that rule except a route that provably cannot write', () => {
+    // COMPARE TO A VALUE, not to emptiness: without this, deleting the
+    // exemption or adding a careless one both read as "fine".
+    const exempt = ROUTES.filter((r) => r.mutates === false).map((r) => `${r.method} ${r.path}`);
+    expect(exempt).toEqual(['POST /read']);
   });
 
   it('keeps every wallet-mutating platform action off the wallet scope', () => {

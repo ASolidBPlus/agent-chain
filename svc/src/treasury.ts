@@ -1186,6 +1186,16 @@ export class Treasury {
     return createHash('sha256').update(canonical).digest('hex');
   }
 
+  /// The allowlist as it stands right now, for `GET /calls`.
+  ///
+  /// A READ-ONLY ACCESSOR rather than exposing the source, so the route cannot
+  /// hold a snapshot across requests: the file is hub-set and may be rewritten
+  /// between turns, and a menu that lagged it would advertise calls that are no
+  /// longer permitted.
+  allowlist(): Allowlist {
+    return this.calls.snapshot();
+  }
+
   /// §3.2. A wallet calls a contract with its own key.
   async call(
     principal: Principal,

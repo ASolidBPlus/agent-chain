@@ -60,6 +60,17 @@ export interface Route {
   /// Either an exact path, or a prefix ending in '/' that captures one segment.
   path: string;
   prefix: boolean;
+  /// Set FALSE on a route whose method suggests it writes and which does not.
+  ///
+  /// The route table is checked by a test asserting that no non-GET route is
+  /// open to `any` scope, because a POST that any credential may reach is how a
+  /// wallet-scope caller performs an operator's action. `POST /read` is the one
+  /// honest exception - it is a POST because its arguments are structured JSON
+  /// rather than a path, and it reaches `publicClient.readContract`, which
+  /// cannot write - so the exception is declared HERE, in the table a reviewer
+  /// reads, rather than as a name in the test. A future POST that forgets this
+  /// field is still caught, which is the property worth keeping.
+  mutates?: false;
   handler: Handler;
   scope: Scope;
   /// For routes shaped /prefix/<param>/suffix, e.g. /wallets/<id>/rotate.
@@ -345,7 +356,74 @@ async function getModules({ services }: RouteContext): Promise<unknown> {
     tokens: m.tokens.map((t) => ({ key: t.key, address: t.address, symbol: t.symbol, decimals: t.decimals })),
     names: m.names ? { address: m.names.address, tld: m.names.tld } : null,
     converter: m.converter ? { address: m.converter.address } : null,
+    // §1.3. EVERY registered entry, flat, so a caller that wants to know what
+    // is callable does not have to reconstruct it from the typed slots. The
+    // ABI is NOT here: /calls carries the fragments a caller may actually use,
+    // and shipping every function of every contract would tell a persona about
+    // the ones the allowlist withholds.
+    contracts: m.contracts.map((c) => ({
+      key: c.key,
+      kind: c.kind,
+      name: c.name,
+      address: c.address,
+    })),
   };
+}
+
+/// §3.1. The allowlist AS THIS CALLER MAY USE IT.
+///
+/// FILTERED, NOT THE FILE. A persona reading the whole allowlist would learn
+/// what other wallet kinds may do and what the hub may do, which is exactly
+/// what `function_not_allowed` refuses to tell it one call at a time. Platform
+/// scope gets everything, including the admin entries, because the hub's view
+/// of its own powers is the point of writing them down.
+async function getCalls({ services, principal }: RouteContext): Promise<unknown> {
+  const snapshot = services.treasury.allowlist();
+  const platform = principal.scope === 'platform';
+  const kind = platform ? null : services.store.walletRow(principal.agentId!)?.kind ?? 'agent';
+
+  const visible = snapshot.entries.filter((e) => (platform ? true : kind && e.kinds.includes(kind)));
+  return {
+    calls: visible.map((e) => ({
+      contract: e.contract,
+      function: e.function,
+      read: e.read,
+      ...(platform ? { admin: e.admin, kinds: e.kinds } : {}),
+      params: (e.abiFunction.inputs as ReadonlyArray<{ name?: string; type: string }>).flatMap(
+        (input, i) => {
+          // The slot the SERVER fills is not a parameter this caller has: a
+          // menu that listed it would invite a model to supply it, and a value
+          // there is refused.
+          if (i === e.intentArg) return [];
+          return [
+            {
+              name: input.name ?? '',
+              type: input.type,
+              accepts:
+                e.amount && e.amount.arg === i
+                  ? `amount:${typeof e.amount.token === 'string' ? e.amount.token : 'per-call'}`
+                  : (e.addressArgs[i] ?? 'value'),
+            },
+          ];
+        },
+      ),
+      ...(e.maxPerStage !== undefined ? { maxPerStage: e.maxPerStage } : {}),
+      ...(e.perTxCap !== undefined ? { perTxCap: e.perTxCap } : {}),
+    })),
+  };
+}
+
+async function postCall({ services, body, principal, clientMarker }: RouteContext): Promise<unknown> {
+  return services.treasury.call(principal, body, clientMarker);
+}
+
+async function postAdminCall({ services, body, principal }: RouteContext): Promise<unknown> {
+  requirePlatform(principal, 'POST /admin-call');
+  return services.treasury.adminCall(body);
+}
+
+async function postRead({ services, body, principal }: RouteContext): Promise<unknown> {
+  return services.treasury.read(principal, body);
 }
 
 export const ROUTES: Route[] = [
@@ -371,6 +449,15 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/fund', prefix: false, scope: 'platform', handler: postFund, requires: ['token'] },
   { method: 'POST', path: '/stage', prefix: false, scope: 'platform', handler: postStage, requires: [] },
   { method: 'POST', path: '/sign-transfer', prefix: false, scope: 'wallet', handler: postSignTransfer, requires: ['token'] },
+  // §3.1. `requires: []` on all four, and that is not an oversight. The call op
+  // needs no MODULE - it is about whatever the manifest registered - and a
+  // deployment with no allowlist answers `function_not_allowed`, which is the
+  // honest answer rather than `module_not_deployed`: the op is there and
+  // nothing is permitted through it.
+  { method: 'GET', path: '/calls', prefix: false, scope: 'any', handler: getCalls, requires: [] },
+  { method: 'POST', path: '/call', prefix: false, scope: 'wallet', handler: postCall, requires: [] },
+  { method: 'POST', path: '/admin-call', prefix: false, scope: 'platform', handler: postAdminCall, requires: [] },
+  { method: 'POST', path: '/read', prefix: false, scope: 'any', handler: postRead, requires: [], mutates: false },
   { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },
 ];
 

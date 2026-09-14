@@ -31,7 +31,44 @@ interface Harness {
   store: Store;
 }
 
-async function serve(modules: Record<string, unknown>): Promise<Harness> {
+/// Fills in the FLAT VIEW from the typed slots the caller passed.
+///
+/// Derived rather than written out at each call site, for the reason the flat
+/// view exists at all: the two views are built from one manifest pass in
+/// `buildModules`, so a fixture that supplied them independently could describe
+/// a deployment that cannot happen - a token in `tokens` and not in `byKey`.
+function withRegistry(modules: Record<string, unknown>): Record<string, unknown> {
+  const entries: Array<Record<string, unknown>> = [];
+  for (const t of (modules.tokens as Array<Record<string, unknown>>) ?? []) {
+    entries.push({ key: t.key, kind: 'token', name: 'Token', address: t.address, abi: [] });
+  }
+  if (modules.names) {
+    entries.push({
+      key: 'names',
+      kind: 'names',
+      name: 'NameRegistry',
+      address: (modules.names as Record<string, unknown>).address,
+      abi: [],
+    });
+  }
+  if (modules.converter) {
+    entries.push({
+      key: 'converter',
+      kind: 'converter',
+      name: 'Converter',
+      address: (modules.converter as Record<string, unknown>).address,
+      abi: [],
+    });
+  }
+  return {
+    ...modules,
+    contracts: entries,
+    byKey: new Map(entries.map((e) => [e.key as string, e])),
+  };
+}
+
+async function serve(typedModules: Record<string, unknown>): Promise<Harness> {
+  const modules = withRegistry(typedModules);
   const store = new Store(':memory:');
   store.setWalletTokenHash(AGENT, hashToken(WALLET_TOKEN));
   store.markSpawned(AGENT, ADDRESS, 'agent');
