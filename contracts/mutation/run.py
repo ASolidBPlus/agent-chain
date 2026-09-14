@@ -245,14 +245,30 @@ def main():
         results.append(died)
 
     print("\n=== restored")
-    # CLEAR THE ARTEFACTS FIRST. Restoring the source is not enough: forge builds
-    # incrementally, so `out/` can still hold an artefact compiled from a mutant
-    # while the source on disk is the original. Any test that cross-checks an
-    # artefact against live bytecode then compares two different builds and fails
-    # on a tree that is actually clean - measured, the Converter's CREATE2 address
-    # assertion, which reads `type(Converter).creationCode` from the artefact and
-    # compares it with what the deploy just created. A restored-state check that
-    # can report a false failure is an instrument nobody can trust either way.
+    # CLEAR THE ARTEFACTS FIRST, AND DO NOT "OPTIMISE" THIS AWAY.
+    #
+    # THIS CHECK COMPARES A BUILD, NOT A SOURCE. What it is meant to assert is
+    # "the restored SOURCE compiles and passes", and that is only true if the
+    # artefacts were built from that source. `forge build` does not own `out/`;
+    # it only adds to it, so restoring the file on disk does not retire the
+    # artefact compiled from the mutant.
+    #
+    # BOTH DIRECTIONS ARE WRONG, and the quiet one is the expensive one:
+    #   * LOUD - a test that cross-checks an artefact against live bytecode
+    #     compares two different builds and fails on a tree that is actually
+    #     clean. Measured: the Converter's CREATE2 address assertion, which
+    #     reads `type(Converter).creationCode` from the artefact and compares it
+    #     with the address the deploy just created. Every mutant reported
+    #     KILLED, then PROBLEM on a tree `rm -rf out && forge build` turned
+    #     green with no source change. Cost: an hour of hunting.
+    #   * QUIET - a restored run that compiles against a MUTANT's artefact and
+    #     PASSES reports a green restore over a tree that was never rebuilt.
+    #     Nobody goes looking, because the instrument said the tree was fine.
+    #
+    # The same root as two other instruments fooled the same day: a compose
+    # smoke that reused a stale image, and `generate-abi.ts` reading the
+    # artefact of a contract that no longer existed. A build directory that
+    # outlives its source is the shape to distrust.
     shutil.rmtree(os.path.join(ROOT, "out"), ignore_errors=True)
     _, failed_after, _ = parse(run_tests())
     print(f"    failing: {sorted(failed_after) if failed_after else 'none'}")
