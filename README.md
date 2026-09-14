@@ -148,6 +148,28 @@ flowchart LR
   W -- reverseOf --> N1
 ```
 
+**Converter** (next release). One per deployment, holding a table of pairs the
+operator creates: `pairs[source][target] = {rate, paused}`. `setPair` creates or
+re-rates a pair (a loop guard refuses any pair whose rate times the reverse
+pair's rate exceeds 1, so no round trip can print value; a ceiling stops a typo
+overflowing); `setPaused` freezes one direction. `convert(source, target,
+amount, intentId)` acts only on the caller's own balance: it burns the source,
+mints `amount × rate` of the target (rounded down, the remainder burned), and
+emits `Converted`. It can do that because the deploy grants it the burn right on
+each source token and the mint right on each target; no approvals exist
+anywhere. Rates and pairs are public views.
+
+```mermaid
+flowchart LR
+  TR[Treasury] -- "setPair / setPaused" --> CV["Converter<br/>pairs[source][target] = rate, paused"]
+  W[Wallet] -- "convert(source, target, amount, intentId)" --> CV
+  CV -- "burnFrom (BURNER_ROLE)" --> TA[Token A]
+  CV -- "mint (MINTER_ROLE)" --> TB[Token B]
+  CV -. "emits Converted" .-> L[(logs)]
+  classDef next stroke-dasharray: 5 5
+  class CV next
+```
+
 Both contracts are deployed by `chain-deploy` from the treasury key, which is
 granted `MINTER_ROLE` and `REGISTRAR_ROLE` in the constructors. Their ABIs are
 generated into `svc/src/abi.ts` and drift-checked in CI.
