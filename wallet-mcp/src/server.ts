@@ -11,7 +11,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { loadWalletConfig } from './config.ts';
-import { Wallet } from './wallet.ts';
+import { Wallet, type LogSink } from './wallet.ts';
 
 function asToolResult(payload: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
@@ -92,10 +92,18 @@ export function buildServer(wallet: Wallet): McpServer {
   return server;
 }
 
+/// STDIO MODE'S SINK. wallet-mcp IS the process here, so stderr is its own -
+/// no other package shares it, and the harness above treats it as diagnostics.
+/// This is the one place that gets to make that assumption, which is why the
+/// library takes a sink instead of reaching for one (#99).
+const stderrLog: LogSink = (message) => {
+  process.stderr.write(`${message}\n`);
+};
+
 async function main(): Promise<void> {
   const config = loadWalletConfig();
-  Wallet.warnIfImplausiblyShort(config.walletToken);
-  const server = buildServer(new Wallet(config));
+  Wallet.warnIfImplausiblyShort(config.walletToken, stderrLog);
+  const server = buildServer(new Wallet(config, { log: stderrLog }));
   await server.connect(new StdioServerTransport());
   // Never log the config: WALLET_TOKEN is in it and stderr reaches the harness.
   //

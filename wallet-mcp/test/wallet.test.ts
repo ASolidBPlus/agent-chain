@@ -27,6 +27,11 @@ interface Fake {
   names: Record<string, { address: string; canonical: string }>;
   /// Bare names chain-svc refuses as ambiguous rather than resolving (§5).
   ambiguous: string[];
+  /// Overrides GET /resolve/:name entirely when set. The resolve path maps
+  /// error codes too, and `ambiguous_name` is persona-facing - so without a
+  /// way to make resolve answer a GENERIC code, the second mapping site has
+  /// no test that reaches its log line at all.
+  resolveReply: { status: number; body: unknown } | null;
 }
 
 async function fakeChainSvc(): Promise<Fake> {
@@ -43,6 +48,7 @@ async function fakeChainSvc(): Promise<Fake> {
     // answers 409 rather than picking one, and the fake has to model that or
     // wallet-mcp's half of the refusal is untested.
     ambiguous: [],
+    resolveReply: null,
     names: {
       'alpha.vee': { address: '0xaaa', canonical: 'alpha:darknetclient' },
       'treasury.vee': { address: '0xttt', canonical: 'treasury.vee' },
@@ -61,6 +67,7 @@ async function fakeChainSvc(): Promise<Fake> {
       };
 
       if (url.pathname.startsWith('/resolve/')) {
+        if (state.resolveReply) return json(state.resolveReply.status, state.resolveReply.body);
         const name = decodeURIComponent(url.pathname.slice('/resolve/'.length));
         if (state.ambiguous.includes(name)) {
           return json(409, {
@@ -107,7 +114,11 @@ async function fakeChainSvc(): Promise<Fake> {
 let fake: Fake;
 let dir: string;
 
-function walletWith(policy: Record<string, unknown> | null): { wallet: Wallet; config: WalletConfig } {
+function walletWith(policy: Record<string, unknown> | null): {
+  wallet: Wallet;
+  config: WalletConfig;
+  logs: string[];
+} {
   const policyFile = join(dir, 'policy.json');
   if (policy) writeFileSync(policyFile, JSON.stringify(policy));
   const config: WalletConfig = {
@@ -117,7 +128,8 @@ function walletWith(policy: Record<string, unknown> | null): { wallet: Wallet; c
     policyFile,
     stateFile: join(dir, 'state.json'),
   };
-  return { wallet: new Wallet(config), config };
+  const logs: string[] = [];
+  return { wallet: new Wallet(config, { log: (m) => logs.push(m) }), config, logs };
 }
 
 const AGENT_POLICY = {
@@ -286,6 +298,54 @@ describe('send', () => {
     const lines: string[] = [];
     expect(refusalFor('unknown_name', (m) => lines.push(m))).toBe('unknown_name');
     expect(lines).toHaveLength(0);
+  });
+
+  // #99. The two tests above prove the sink is USED when one is handed in.
+  // Neither proves the console is not used as well, and that is the whole
+  // question: org-core imports this as a library, so the global console is
+  // ORG-CORE's and is shared with every package in that process. A code
+  // withheld from the persona over the tool boundary must not come back on a
+  // channel the persona's neighbours can read.
+  //
+  // So this replaces console.error for the duration and asserts it stays
+  // untouched THROUGH A REAL SEND, not through refusalFor directly - the leak
+  // that shipped was at a call site, not in the function.
+  it('writes the facilitator line to the injected sink and NOT to the console', async () => {
+    const { wallet, logs } = walletWith(AGENT_POLICY);
+    fake.reply = { status: 403, body: { error: 'not_your_wallet', detail: 'orch:someone-else' } };
+
+    const original = console.error;
+    const stolen: unknown[] = [];
+    console.error = (...args: unknown[]) => { stolen.push(args); };
+    try {
+      await wallet.send({ to: 'alpha.vee', vee: '1', intent_id: 'log-1' });
+    } finally {
+      console.error = original;
+    }
+
+    expect(logs.some((l) => l.includes('not_your_wallet'))).toBe(true);
+    // An eavesdropping package in org-core's process learns nothing.
+    expect(stolen).toHaveLength(0);
+  });
+
+  // The resolve path maps codes too, and it is the site where the FIRST leak
+  // survived a fix aimed at the other one. A sink threaded into only one of
+  // the two call sites passes the test above.
+  it('routes the resolve path through the same sink', async () => {
+    const { wallet, logs } = walletWith(AGENT_POLICY);
+    fake.resolveReply = { status: 500, body: { error: 'internal_error' } };
+
+    const original = console.error;
+    const stolen: unknown[] = [];
+    console.error = (...args: unknown[]) => { stolen.push(args); };
+    try {
+      await wallet.send({ to: 'alpha.vee', vee: '1', intent_id: 'log-2' });
+    } finally {
+      console.error = original;
+    }
+
+    expect(logs.some((l) => l.includes('internal_error'))).toBe(true);
+    expect(stolen).toHaveLength(0);
   });
 
   it('refuses when the policy file says frozen', async () => {
@@ -482,7 +542,7 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
       walletToken: TOKEN,
       policyFile: join(dir, 'policy.json'),
       stateFile: join(dir, 'state-offline.json'),
-    });
+    }, { log: () => {} });
   }
 
   it('surfaces the transport failure instead of flattening to unknown_name', async () => {
