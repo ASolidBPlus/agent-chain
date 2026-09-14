@@ -112,6 +112,68 @@ export function requireNames(m: Modules): NamesModule {
 /// is withheld from personas because it describes the deployment's SHAPE - what
 /// the operator chose to run - whereas which keys exist is the registry, which
 /// the `contracts` tool lists in full to anyone who asks.
+/// The token a request names, by manifest KEY or by SYMBOL, case-insensitively -
+/// or the default token when it names none.
+///
+/// ONE RESOLVER, and every caller goes through it: request body or query
+/// string, writes or reads. Two would be two answers to one question the first
+/// time somebody added a rule to one of them - and the rule most likely to be
+/// added twice and spelled differently is precisely this one, case-insensitivity.
+///
+/// BOTH NAMESPACES, because a persona reads SYMBOLS in every reply - balances,
+/// history entries, refusal messages - and must be able to write back what it
+/// read. A resolver taking only keys would answer "unknown_token" to the exact
+/// string the service had just shown it. Symbols are unique by construction:
+/// buildModules refuses a deployment whose tokens report the same symbol.
+///
+/// THE KEY NAMESPACE WINS when a key and a symbol collide across two tokens.
+/// The key is the manifest's own name and is what chain-svc stores in
+/// `stage_spend` and `intents`, so resolving to anything else would mean the
+/// bookkeeping and the request disagreed about which token moved. A manifest
+/// that creates the ambiguity is the manifest's to fix.
+export function resolveToken(m: Modules, keyOrSymbol: unknown): TokenModule {
+  // The tokenless case answers FIRST and answers differently. "this deployment
+  // has no token module" is its shape, which is withheld from personas;
+  // "no such token" is its registry, which they may have. One code for both
+  // would have a names-only deployment tell a persona its currency does not
+  // exist.
+  if (m.tokens.length === 0) {
+    throw new HttpError('module_not_deployed', 'this deployment has no token module');
+  }
+  if (keyOrSymbol === undefined || keyOrSymbol === null || keyOrSymbol === '') {
+    return defaultToken(m);
+  }
+  if (typeof keyOrSymbol !== 'string') {
+    throw new HttpError('invalid_request', 'token must be a string: a manifest key or a symbol');
+  }
+
+  const wanted = keyOrSymbol.toLowerCase();
+  // `.toLowerCase()` ON THE KEY SIDE IS UNREACHABLE TODAY, and is kept. A
+  // manifest key must match MANIFEST_KEY (`^[a-z][a-z0-9]{0,15}$`), so every
+  // key is already lower case and comparing the lowered input to the raw key
+  // gives the same answer - a mutation removing it SURVIVES the suite, and that
+  // is correct rather than a coverage gap: the isolating test would need a
+  // mixed-case key, which loadDeployment refuses. It stays because the day
+  // MANIFEST_KEY widens, this is the line that would otherwise start answering
+  // `unknown_token` to a key the manifest accepted.
+  //
+  // The SYMBOL side is NOT in that position: a symbol is read from the chain,
+  // is any case the contract chose, and its mutant is killed by a fixture whose
+  // symbol is not its key in upper case.
+  const byKey = m.tokens.find((t) => t.key.toLowerCase() === wanted);
+  if (byKey) return byKey;
+  const bySymbol = m.tokens.find((t) => t.symbol.toLowerCase() === wanted);
+  if (bySymbol) return bySymbol;
+
+  // The detail LISTS what exists, because the caller is a model and the whole
+  // point of a persona-facing refusal is that it can fix its own call from it.
+  throw new HttpError(
+    'unknown_token',
+    `no token "${keyOrSymbol}" in this deployment; it has ` +
+      m.tokens.map((t) => `${t.key} (${t.symbol})`).join(', '),
+  );
+}
+
 export function requireContract(m: Modules, key: string): RegisteredContract {
   const found = m.byKey.get(key);
   if (!found) throw new HttpError('unknown_contract', `no contract "${key}" in this deployment`);

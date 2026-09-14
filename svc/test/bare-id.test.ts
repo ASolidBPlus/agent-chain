@@ -172,7 +172,7 @@ import { join } from 'node:path';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = new URL('..', import.meta.url).pathname;
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
 
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));

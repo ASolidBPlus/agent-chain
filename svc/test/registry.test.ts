@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import type { Abi } from 'viem';
-import { buildModules, requireContract, type Modules } from '../src/modules.ts';
+import { buildModules, requireContract, resolveToken, type Modules } from '../src/modules.ts';
 import type { Deployment, DeployedModule } from '../src/chain.ts';
 import { HttpError } from '../src/errors.ts';
 
@@ -176,5 +176,133 @@ describe('requireContract', () => {
     // lookup that accepted either would be ambiguous exactly when it mattered.
     const m = await build([custom('shop', 'Shop', SHOP)]);
     expect(() => requireContract(m, 'Shop')).toThrow(HttpError);
+  });
+});
+
+// §1. THE ONE TOKEN RESOLVER.
+//
+// A `token` argument may be the manifest KEY or the SYMBOL, case-insensitively,
+// and the reason is not convenience: a persona reads SYMBOLS in every reply -
+// balances, history entries, refusal messages - and must be able to write back
+// what it read. A resolver that took only keys would answer "unknown_token" to
+// the exact string the service had just shown it.
+//
+// ONE resolver, in modules.ts, and every caller goes through it: body or query
+// string, writes or reads. Two of them would be two answers to one question the
+// first time somebody added a rule to one - and the rule that matters here is
+// case-insensitivity, which is exactly the kind of thing that gets added twice
+// and spelled differently.
+describe('resolveToken', () => {
+  const twoTokens = () => build([token('play', PLAY), token('gold', GOLD), names(REG)]);
+
+  it('finds a token by its manifest key', async () => {
+    expect((await twoTokens().then((m) => resolveToken(m, 'gold'))).key).toBe('gold');
+  });
+
+  it('finds a token by its symbol', async () => {
+    expect((await twoTokens().then((m) => resolveToken(m, 'GOLD'))).key).toBe('gold');
+  });
+
+  it('is case-insensitive in both namespaces', async () => {
+    const m = await twoTokens();
+    for (const written of ['GOLD', 'gold', 'GoLd', 'Gold']) {
+      expect(resolveToken(m, written).key).toBe('gold');
+    }
+    // PLAY's key and symbol differ only in case, which is the ordinary shape:
+    // a manifest key is lower-case and a symbol is upper-case for the same
+    // token, so both spellings must land on it.
+    expect(resolveToken(m, 'PLAY').key).toBe('play');
+    expect(resolveToken(m, 'play').key).toBe('play');
+  });
+
+  it('prefers the KEY when one token\'s key is another\'s symbol', async () => {
+    // Pathological but constructible: a manifest may key a token `gold` while
+    // ANOTHER token's symbol is GOLD. The key namespace is the manifest's own
+    // and is what chain-svc stores, so it wins - and the ambiguity is the
+    // manifest author's to remove.
+    const m = await buildModules(
+      deployment([token('gold', GOLD), token('silver', PLAY)]),
+      async (a) => (a === GOLD ? { symbol: 'XAU', decimals: 6 } : { symbol: 'GOLD', decimals: 18 }),
+      ABIS,
+    );
+    expect(resolveToken(m, 'gold').key).toBe('gold');
+    expect(resolveToken(m, 'GOLD').key).toBe('gold');
+    expect(resolveToken(m, 'silver').key).toBe('silver');
+  });
+
+  it('resolves by SYMBOL when the symbol is not the key in another case', async () => {
+    // THE TEST THE FIRST DRAFT DID NOT HAVE, found by a mutant that made the
+    // symbol lookup case-sensitive and SURVIVED. Every token in the fixture
+    // had a symbol that was just its key in upper case - so `GOLD` resolved
+    // through the KEY path and the symbol path was never exercised at all.
+    //
+    // A key and a symbol that differ as WORDS is the ordinary case for a game
+    // currency: the manifest keys it `au` and the contract reports `GOLD`.
+    const m = await buildModules(
+      deployment([token('play', PLAY), token('au', GOLD)]),
+      async (a) => (a === PLAY ? { symbol: 'PLAY', decimals: 18 } : { symbol: 'GOLD', decimals: 6 }),
+      ABIS,
+    );
+    expect(resolveToken(m, 'GOLD').key).toBe('au');
+    expect(resolveToken(m, 'gold').key).toBe('au');
+    expect(resolveToken(m, 'GoLd').key).toBe('au');
+    expect(resolveToken(m, 'au').key).toBe('au');
+    expect(resolveToken(m, 'AU').key).toBe('au');
+  });
+
+  it('returns the DEFAULT token when no token is named', async () => {
+    // THE ONE RULE of this increment: a request that names no token behaves
+    // exactly as it did before there were two.
+    const m = await twoTokens();
+    for (const absent of [undefined, null, '']) {
+      expect(resolveToken(m, absent).key).toBe('play');
+    }
+  });
+
+  it('refuses a name that is neither a key nor a symbol, with unknown_token', async () => {
+    const m = await twoTokens();
+    let err: unknown;
+    try {
+      resolveToken(m, 'silver');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).code).toBe('unknown_token');
+    expect((err as HttpError).status).toBe(404);
+    // The detail LISTS what exists, because the caller is a model and the whole
+    // point of a persona-facing refusal is that it can fix its own call.
+    expect((err as HttpError).detail).toContain('play');
+    expect((err as HttpError).detail).toContain('gold');
+  });
+
+  it('refuses a non-string token as bad input, not as an unknown one', async () => {
+    const m = await twoTokens();
+    for (const bad of [42, true, {}, []]) {
+      expect(() => resolveToken(m, bad)).toThrow(HttpError);
+    }
+  });
+
+  it('answers module_not_deployed on a deployment with NO tokens', async () => {
+    // TWO DIFFERENT ABSENCES, TWO CODES. "this deployment has no token module"
+    // is a fact about the deployment's shape, withheld from personas; "no such
+    // token" is a fact about the public registry, which they may have. A single
+    // code would have made a names-only deployment tell a persona that PLAY
+    // does not exist.
+    const m = await build([names(REG)]);
+    let err: unknown;
+    try {
+      resolveToken(m, 'play');
+    } catch (e) {
+      err = e;
+    }
+    expect((err as HttpError).code).toBe('module_not_deployed');
+  });
+
+  it('answers module_not_deployed for an ABSENT token on a tokenless deployment too', async () => {
+    // The absent-argument path must not answer differently from the named one
+    // about the same missing module.
+    const m = await build([names(REG)]);
+    expect(() => resolveToken(m, undefined)).toThrow(/no token module/);
   });
 });

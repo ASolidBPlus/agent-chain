@@ -31,6 +31,7 @@ import type { Resolver, WalletResolution } from './resolver.ts';
 import type { Store } from './store.ts';
 import { walletPrincipal, type Principal } from './auth.ts';
 import {
+  capsFor,
   enforcePolicy,
   readPolicyFile,
   stageCapWei,
@@ -299,7 +300,8 @@ export class Treasury {
   /// The policy chain-svc ENFORCES is the same file it wrote for wallet-mcp to
   /// read, so the boundary and the model-facing fast path cannot drift apart.
   private async policyFor(agentId: string): Promise<AgentPolicy> {
-    return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
+    const key = this.chain.modules.tokens[0]?.key;
+    return (await readPolicyFile(this.config.policyDir, agentId, key)) ?? this.policyDefaults.agent;
   }
 
   /// Treasury -> wallet. Facilitator top-ups and bounty payouts (spec S4).
@@ -683,7 +685,19 @@ export class Treasury {
     // body - so the fallback cannot be steered by the request.
     const target = await this.resolveTo(name, fromAgentId);
     const { decimals, symbol } = defaultToken(this.chain.modules);
-    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount, decimals, symbol });
+    enforcePolicy({
+      policy,
+      to: name,
+      canonical: target.canonical ?? undefined,
+      amount,
+      decimals,
+      symbol,
+      // The default token until §3 gives this endpoint its own `token`
+      // argument. Named explicitly rather than defaulted inside enforcePolicy,
+      // so the day a second token reaches this path the omission is a
+      // compile error rather than a spend against the wrong cap.
+      tokenKey: defaultToken(this.chain.modules).key,
+    });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
 
@@ -727,11 +741,15 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
-      capWei: stageCapWei(policy, decimals),
+      capWei: stageCapWei(policy, defaultToken(this.chain.modules).key, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
-      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} ${symbol} for this stage`);
+      throw new HttpError(
+        'over_stage_cap',
+        `max_per_stage is ${capsFor(policy, defaultToken(this.chain.modules).key).max_per_stage} ` +
+          `${symbol} for this stage`,
+      );
     }
     if (reservation.outcome === 'duplicate') {
       // The promise wallet-mcp makes to the model: a replay of the same send
@@ -1132,6 +1150,9 @@ export class Treasury {
           amount,
           decimals: token.decimals,
           symbol: token.symbol,
+          // THE TOKEN THAT ACTUALLY RESOLVED, not the default: a call may move
+          // any registered token, and the cap that bounds it is that token's.
+          tokenKey: token.key,
         });
       } catch (err) {
         // THE ONE REFUSAL A SCENARIO AUTHOR WILL MEET AND MISREAD. The allow
@@ -1307,7 +1328,7 @@ export class Treasury {
       // bounded by the entry's perTxCap and by nothing else until increment 4.
       capWei:
         money && money.token.key === defaultToken(this.chain.modules).key
-          ? stageCapWei(policy, money.token.decimals)
+          ? stageCapWei(policy, money.token.key, money.token.decimals)
           : null,
       call: {
         contract: contract.key,
@@ -1322,7 +1343,7 @@ export class Treasury {
         'over_stage_cap',
         entry.maxPerStage !== undefined && !money
           ? `${entry.function} may be called ${entry.maxPerStage} times per stage`
-          : `max_per_stage is ${policy.max_per_stage} for this stage`,
+          : `max_per_stage is ${capsFor(policy, money!.token.key).max_per_stage} for this stage`,
       );
     }
     if (reservation.outcome === 'duplicate') {

@@ -23,7 +23,7 @@ import type { Resolver } from '../src/resolver.ts';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
 
 const config = {
   policyDir: '/tmp/does-not-exist',
@@ -348,10 +348,15 @@ describe('policy defaults', () => {
       // Compared in WEI, not as numbers: a cap may be a decimal string, and
       // comparing those numerically is the imprecision the string form exists
       // to prevent.
-      expect(capToWei(DEFAULTS[kind].max_per_tx, 18)).toBeGreaterThan(0n);
-      expect(capToWei(DEFAULTS[kind].max_per_stage, 18)).toBeGreaterThanOrEqual(
-        capToWei(DEFAULTS[kind].max_per_tx, 18),
-      );
+      // PER TOKEN now, and asserted for EVERY token the defaults expanded to
+      // rather than for one: the `*` entry is copied to each deployed key, so a
+      // check of one key would pass while another carried nothing.
+      const caps = DEFAULTS[kind].caps;
+      expect(Object.keys(caps).length).toBeGreaterThan(0);
+      for (const pair of Object.values(caps)) {
+        expect(capToWei(pair.max_per_tx, 18)).toBeGreaterThan(0n);
+        expect(capToWei(pair.max_per_stage, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx, 18));
+      }
       // The file ships `treasury.{tld}`; this is the substitution having
       // happened, asserted through the value a wallet actually gets.
       expect(DEFAULTS[kind].deny).toContain('treasury.play');
@@ -361,7 +366,7 @@ describe('policy defaults', () => {
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play')).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
   });
 
   // §4.7. A pattern naming a TLD can match nothing on a deployment that
@@ -372,7 +377,7 @@ describe('policy defaults', () => {
     // whatever another file left in it.
     droppedPatternsLogged.clear();
     const lines: string[] = [];
-    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
 
     expect(defaults.agent.deny).toEqual([]);
     // `converter` SURVIVES and `*.{tld}` does not, which is the rule working
@@ -401,23 +406,32 @@ describe('policy defaults', () => {
 
   it('does not repeat the dropped-pattern line on a second load in the same process', () => {
     const lines: string[] = [];
-    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
     expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(bad, JSON.stringify({ org: {}, agent: {}, burner: {} }));
-    expect(() => loadPolicyDefaults(bad, 'play')).toThrow(/no valid/);
+    expect(() => loadPolicyDefaults(bad, 'play', ['play'])).toThrow(/no valid/);
 
     const negative = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(
       negative,
       JSON.stringify({
         org: DEFAULTS.org,
-        agent: { ...DEFAULTS.agent, max_per_tx: -1 },
+        // The bad cap is inside `caps` now, where caps live. Left at the top
+        // level it would be a field the loader no longer reads, so the file
+        // would be VALID and the test would assert nothing.
+        agent: { ...DEFAULTS.agent, caps: { '*': { max_per_tx: -1, max_per_stage: 5 } } },
         burner: DEFAULTS.burner,
       }),
     );
-    expect(() => loadPolicyDefaults(negative, 'play')).toThrow(/no valid "agent"/);
+    // The message moved with the shape: a bad cap is now reported by the caps
+    // expansion, which names the KIND and the CAPS KEY it was reading. The
+    // property is the same - a defaults file with an unusable cap does not
+    // load - and the message is more specific than the one it replaces.
+    expect(() => loadPolicyDefaults(negative, 'play', ['play'])).toThrow(
+      /"agent" caps "\*" is not \{max_per_tx, max_per_stage\} of usable amounts/,
+    );
   });
 
   // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an
@@ -1228,7 +1242,9 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }
 
   const read = (dir: string) =>
-    JSON.parse(readFileSync(join(dir, 'orch%3Aa.json'), 'utf8')) as Record<string, unknown>;
+    JSON.parse(readFileSync(join(dir, 'orch%3Aa.json'), 'utf8')) as Record<string, unknown> & {
+      caps: Record<string, { max_per_tx: unknown; max_per_stage: unknown }>;
+    };
 
   // Every field, both directions: the one supplied changes and EVERY omitted
   // one survives. Asserting only the supplied field would leave the fallbacks
@@ -1239,9 +1255,15 @@ describe('PATCH /wallets/:agentId/policy', () => {
 
     await s.patchPolicy('orch:a', { max_per_stage: 4242 });
 
+    // A PATCH carrying the legacy pair still means the DEFAULT token, and only
+    // that token: the other half of the pair and every other token's caps come
+    // from the kind's defaults untouched. A patch that widened one number must
+    // not silently reset the rest.
     const p = read(dir);
-    expect(p.max_per_stage).toBe(4242);
-    expect(p.max_per_tx).toBe(DEFAULTS.agent.max_per_tx);
+    expect(p.caps.play).toEqual({
+      max_per_stage: 4242,
+      max_per_tx: DEFAULTS.agent.caps.play!.max_per_tx,
+    });
     expect(p.allow).toEqual(DEFAULTS.agent.allow);
     expect(p.deny).toEqual(DEFAULTS.agent.deny);
   }, 20_000);
@@ -1250,9 +1272,12 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const { s, dir } = spawnerWith();
     await s.patchPolicy('orch:a', { max_per_tx: 250 });
     await s.patchPolicy('orch:a', { max_per_stage: 999 });
+    // BOTH HALVES OF ONE TOKEN'S PAIR, and the property is unchanged by the
+    // reshape: a patch naming one number leaves the other alone. What the
+    // reshape adds is that it also leaves every OTHER token's pair alone,
+    // asserted below.
     const p = read(dir);
-    expect(p.max_per_tx).toBe(250); // not reset by the second patch
-    expect(p.max_per_stage).toBe(999);
+    expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 999 });
   }, 20_000);
 
   it('flips frozen both ways, and the store agrees with the file', async () => {
@@ -1316,10 +1341,23 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }, 20_000);
 
   // A2/A3: a wallet must be patchable in the form it was spawned with.
+  it('leaves every other token\'s caps alone when a patch names one', async () => {
+    // The multi-token half of the same property. A patch carrying the legacy
+    // pair is about the DEFAULT token; a second token's caps are not its
+    // business, and silently resetting them would be the widest possible
+    // reading of the narrowest possible request.
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { caps: { play: { max_per_tx: 5, max_per_stage: 6 }, gold: { max_per_tx: 7, max_per_stage: 8 } } });
+    await s.patchPolicy('orch:a', { max_per_tx: 250 });
+    const p = read(dir);
+    expect(p.caps.gold).toEqual({ max_per_tx: 7, max_per_stage: 8 });
+    expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 6 });
+  }, 20_000);
+
   it('accepts a STRING cap, the form POST /wallets accepts', async () => {
     const { s, dir } = spawnerWith();
     await s.patchPolicy('orch:a', { max_per_tx: '25' });
-    expect(read(dir).max_per_tx).toBe('25');
+    expect(read(dir).caps.play!.max_per_tx).toBe('25');
   }, 20_000);
 
   it('refuses to patch a wallet that does not exist', async () => {

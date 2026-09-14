@@ -32,7 +32,7 @@ import { buildModules, type Modules } from '../src/modules.ts';
 import type { Deployment } from '../src/chain.ts';
 
 const PKG = join(import.meta.dir, '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play', 'gold']);
 /// A real directory, because one test writes a per-wallet policy file into it -
 /// the shape a per-scenario override produces, which is the §7 trap.
 const POLICY_DIR = mkdtempSync(join(tmpdir(), 'call-policies-'));
