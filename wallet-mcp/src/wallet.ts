@@ -127,6 +127,13 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // private key". A persona learning any of these learns about the custody of
   // keys it must never learn about, and can act on none of it.
   internal_error: null,
+  // The route needs a module this deployment does not have. GENERIC, and it
+  // should be unreachable: wallet-mcp reads /modules at startup and never
+  // advertises a tool whose module is absent, so a persona cannot call one. If
+  // it ever arrives, the tool set and the deployment have diverged - which is a
+  // fact about the deployment, not about the persona's request, and it goes to
+  // the log sink by name like every other generic mapping.
+  module_not_deployed: null,
 };
 /// The reason a persona sees for a chain-svc error code, or null for generic.
 ///

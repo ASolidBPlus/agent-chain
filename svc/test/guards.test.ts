@@ -25,10 +25,23 @@ function fixture(chainId: number): string {
   writeFileSync(
     join(dir, 'deployments', 'local.json'),
     JSON.stringify({
+      schema: 1,
       chainId,
-      VEEBux: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-      NameRegistry: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
       treasury: TEST_TREASURY,
+      modules: [
+        {
+          kind: 'token',
+          key: 'vee',
+          contract: 'Token',
+          address: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        },
+        {
+          kind: 'names',
+          contract: 'NameRegistry',
+          address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+          tld: 'vee',
+        },
+      ],
     }),
   );
   return dir;

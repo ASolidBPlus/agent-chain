@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export class SchemaError extends Error {
   constructor(
@@ -141,8 +141,9 @@ const NEW_TABLE_COLUMNS: ReadonlyArray<[string, string]> = [
   // v3, §4: which chain this store belongs to.
   ['deployment', 'id'],
   ['deployment', 'chain_id'],
-  ['deployment', 'veebux'],
-  ['deployment', 'name_registry'],
+  // v5: the two address columns became one JSON list. Named here, not in
+  // ORIGINAL_COLUMNS, because `deployment` arrived at v3 and this shape at v5.
+  ['deployment', 'modules_json'],
   ['deployment', 'recorded_at'],
 ];
 
@@ -172,6 +173,56 @@ function columnsOf(db: Database, table: string): Set<string> {
 /// rather than run by the caller beforehand, so that the ahead-check below
 /// PROVABLY precedes every write to the file. A caller cannot get the order
 /// wrong, because the order is not theirs to choose.
+/// The first numbered migration. Everything before v5 was additive - new tables
+/// and nullable columns - which `createTables()` and ADDITIVE_COLUMNS handle
+/// between them. Reshaping a table is neither.
+///
+/// THE BACKFILL IS TOTAL AND THAT IS PROVABLE, not hopeful: every v4 store was
+/// written by a chain-svc whose deployment row had exactly one token and one
+/// registry, because that was the only shape that existed. So the two columns
+/// map onto the two-entry list with no case left over and no data invented -
+/// the key `vee` is the only key a v4 store could have meant.
+const NUMBERED: ReadonlyArray<{
+  to: number;
+  /// WHETHER THE OLD SHAPE IS ACTUALLY THERE, not whether the version number
+  /// suggests it should be. A fresh store is created by `createTables()` at the
+  /// CURRENT shape and stamped 0 until the end of this function, so a guard of
+  /// `version < to` fires this entry against a table that never had the column
+  /// it reads - measured, `no such column: veebux`, on every fresh store.
+  ///
+  /// The version tells you what a store was WRITTEN BY. The schema tells you
+  /// what it HAS. A reshaping migration needs the second.
+  applies: (db: Database) => boolean;
+  up: (db: Database) => void;
+}> = [
+  {
+    to: 5,
+    applies: (db) => tableExists(db, 'deployment') && columnsOf(db, 'deployment').has('veebux'),
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE deployment_v5 (
+          id             INTEGER PRIMARY KEY CHECK (id = 1),
+          chain_id       TEXT NOT NULL,
+          modules_json   TEXT NOT NULL,
+          recorded_at    INTEGER NOT NULL
+        );
+        INSERT INTO deployment_v5 (id, chain_id, modules_json, recorded_at)
+          SELECT id,
+                 chain_id,
+                 json_array(
+                   json_object('kind', 'token', 'key', 'vee', 'address', veebux),
+                   json_object('kind', 'names', 'address', name_registry)
+                 ),
+                 recorded_at
+            FROM deployment;
+        DROP TABLE deployment;
+        ALTER TABLE deployment_v5 RENAME TO deployment;
+        PRAGMA user_version = 5;
+      `);
+    },
+  },
+];
+
 export function migrate(
   db: Database,
   createTables: () => void,
@@ -232,8 +283,19 @@ export function migrate(
   // settled and never before.
   createIndexes();
 
-  // Numbered migrations for stamped stores go here, applied in order for
-  // version < SCHEMA_VERSION. There are none yet: v1 IS the baseline.
+  // NUMBERED MIGRATIONS, applied in order for a store stamped BELOW each
+  // entry's `to`. They run after createTables() and after the additive
+  // reconciliation, so an entry can assume every table exists and every
+  // additive column is present.
+  //
+  // Each runs inside one transaction and stamps its own version as its last
+  // statement, so a crash between two entries leaves the store at the last
+  // COMPLETED version rather than half-way through one.
+  for (const step of NUMBERED) {
+    if (version >= step.to) continue;
+    if (!step.applies(db)) continue;
+    db.transaction(() => step.up(db))();
+  }
 
   if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

@@ -10,6 +10,7 @@ import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
 import { HttpError } from './errors.ts';
 import { isCanonicalAgentId } from './validate.ts';
+import { requireNames } from './modules.ts';
 
 export interface Resolved {
   address: Address;
@@ -42,7 +43,7 @@ export class Resolver {
     let target: Address;
     try {
       target = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName: 'resolve',
         args: [name],
@@ -70,7 +71,7 @@ export class Resolver {
     let logs;
     try {
       logs = await this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         eventName: 'Registered',
         fromBlock: 0n,
@@ -100,7 +101,7 @@ export class Resolver {
   async reverseOf(address: Address): Promise<string | null> {
     try {
       const name = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName: 'reverseOf',
         args: [address],
@@ -120,7 +121,7 @@ export class Resolver {
     let logs;
     try {
       logs = await this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         eventName: 'Registered',
         fromBlock: 0n,

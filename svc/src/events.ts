@@ -63,42 +63,67 @@ export class EventTail {
     const from = (this.store.getCursor(CURSOR) ?? -1n) + 1n;
     if (from > latest) return 0;
 
-    const [transfers, registrations, intents] = await Promise.all([
-      this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.VEEBux,
-        abi: TokenAbi,
-        eventName: 'Transfer',
-        fromBlock: from,
-        toBlock: latest,
-      }),
-      this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.NameRegistry,
-        abi: NameRegistryAbi,
-        eventName: 'Registered',
-        fromBlock: from,
-        toBlock: latest,
-      }),
-      this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.VEEBux,
-        abi: TokenAbi,
-        eventName: 'IntentTransfer',
-        fromBlock: from,
-        toBlock: latest,
-      }),
+    // ONE QUERY PAIR PER TOKEN INSTANCE, and the names query only when the
+    // deployment has a registry. The list is built from `modules` rather than
+    // from two fixed addresses, so a second token is polled by the same code
+    // that polls the first - and a names-less deployment issues no Registered
+    // query at all rather than one against the zero address.
+    const { tokens, names } = this.chain.modules;
+    const defaultKey = tokens[0]?.key;
+
+    const [perToken, registrations] = await Promise.all([
+      Promise.all(
+        tokens.map(async (token) => {
+          const [transfers, intents] = await Promise.all([
+            this.chain.publicClient.getContractEvents({
+              address: token.address,
+              abi: TokenAbi,
+              eventName: 'Transfer',
+              fromBlock: from,
+              toBlock: latest,
+            }),
+            this.chain.publicClient.getContractEvents({
+              address: token.address,
+              abi: TokenAbi,
+              eventName: 'IntentTransfer',
+              fromBlock: from,
+              toBlock: latest,
+            }),
+          ]);
+          return { token, transfers, intents };
+        }),
+      ),
+      names
+        ? this.chain.publicClient.getContractEvents({
+            address: names.address,
+            abi: NameRegistryAbi,
+            eventName: 'Registered',
+            fromBlock: from,
+            toBlock: latest,
+          })
+        : Promise.resolve([]),
     ]);
 
     let enqueued = 0;
-    for (const log of transfers) {
-      const args = log.args as { from?: string; to?: string; value?: bigint };
-      if (!args.from || !args.to || args.value === undefined) continue;
-      this.enqueue('chain.transfer', {
-        kind: 'chain.transfer',
-        from: args.from,
-        to: args.to,
-        vee: formatVee(args.value),
-        txHash: log.transactionHash,
-      });
-      enqueued++;
+    for (const { token, transfers } of perToken) {
+      for (const log of transfers) {
+        const args = log.args as { from?: string; to?: string; value?: bigint };
+        if (!args.from || !args.to || args.value === undefined) continue;
+        this.enqueue('chain.transfer', {
+          kind: 'chain.transfer',
+          from: args.from,
+          to: args.to,
+          vee: formatVee(args.value, token.decimals),
+          // THE ONE ADDITIVE FIELD this increment puts on the wire. Taken now
+          // rather than with the second token's endpoints, because a reader
+          // that has to infer which token an amount belongs to will infer it
+          // from the default and be silently wrong the day a second one moves.
+          // An added named field breaks no reader of named fields.
+          token: token.symbol,
+          txHash: log.transactionHash,
+        });
+        enqueued++;
+      }
     }
     // TWO OR MORE IntentTransfers for ONE intent id is an INVARIANT VIOLATION,
     // not a race to be retried. chain-svc broadcasts at most once per
@@ -115,6 +140,7 @@ export class EventTail {
     //
     // Never reconciled silently (ruled): the money moved, so the intent
     // is confirmed and the hold KEPT, and a facilitator is told.
+    for (const { token, intents } of perToken) {
     for (const log of intents) {
       const args = log.args as { intentId?: string; from?: string };
       if (!args.intentId || !log.transactionHash) continue;
@@ -123,6 +149,11 @@ export class EventTail {
         topic: args.intentId,
         txHash: log.transactionHash,
         from: args.from ?? null,
+        // Increment 2 issues intents for the DEFAULT token only, so an
+        // IntentTransfer from any other instance quoting one of our ids is a
+        // foreign token spending against our reservation - the same class as a
+        // foreign sender, and detected the same way.
+        isDefaultToken: token.key === defaultKey,
       });
       if (!anomaly) continue;
 
@@ -139,6 +170,7 @@ export class EventTail {
         // chain-svc:<uuid> being quoted is a different story entirely.
         idSource: anomaly.idSource,
         transfers: anomaly.transfers,
+        token: token.symbol,
         detail:
           anomaly.reason === 'foreign_sender'
             ? `An IntentTransfer for this wallet's intent id was sent by ${senders}, which is ` +
@@ -156,6 +188,7 @@ export class EventTail {
               `inspect the other sender. Senders: ${senders}.`,
       });
       enqueued++;
+    }
     }
 
     for (const log of registrations) {

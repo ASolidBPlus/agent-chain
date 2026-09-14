@@ -12,12 +12,11 @@ import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
 import { assertDeploymentUnchanged, ChainSwapError, type DeploymentIdentity } from '../src/deployment.ts';
 
-const A: DeploymentIdentity = {
-  chainId: '31337',
-  veeBux: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-  nameRegistry: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+const A: DeploymentIdentity = { chainId: '31337', modules: [{ kind: 'token' as const, key: 'vee', address: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }, { kind: 'names' as const, address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512' }] };
+const B: DeploymentIdentity = {
+  ...A,
+  modules: [{ ...A.modules[0]!, address: '0x0000000000000000000000000000000000000BBB' }, A.modules[1]!],
 };
-const B: DeploymentIdentity = { ...A, veeBux: '0x0000000000000000000000000000000000000BBB' };
 
 const codeOf = (fn: () => void) => {
   try {
@@ -59,15 +58,15 @@ describe('the chain this store belongs to', () => {
   // choice, and a store written before a client started checksumming would
   // otherwise report a swap that never happened.
   it('does not report a swap on a checksum difference alone', () => {
-    const lower = { ...A, veeBux: A.veeBux.toLowerCase(), nameRegistry: A.nameRegistry.toLowerCase() };
+    const lower = { ...A, modules: A.modules.map((m) => ({ ...m, address: m.address.toLowerCase() })) };
     expect(codeOf(() => assertDeploymentUnchanged(A, lower, false))).toBe('no-throw');
   });
 
   it('names BOTH deployments and the way out', () => {
     let message = '';
     try { assertDeploymentUnchanged(A, B, false); } catch (e) { message = (e as Error).message; }
-    expect(message).toContain(A.veeBux);
-    expect(message).toContain(B.veeBux);
+    expect(message).toContain(A.modules[0]!.address);
+    expect(message).toContain(B.modules[0]!.address);
     expect(message).toContain('--acknowledge-chain-reset');
     // The symptom points at the one component that is fine, so the message has
     // to say which thing is actually wrong.
@@ -144,10 +143,13 @@ describe('the call site in index.ts', () => {
     expect(call).toBeGreaterThan(-1);
     const wiring = src.slice(src.indexOf('const liveDeployment ='), call + 160);
 
-    // Each fact from its own source, not a literal.
+    // Each fact from its own source, not a literal. The identity is now a
+    // module LIST, so the wiring to check is that the list is built from the
+    // loaded deployment's own modules rather than from anything reconstructed.
     expect(wiring).toContain('deployment.chainId');
-    expect(wiring).toContain('deployment.VEEBux');
-    expect(wiring).toContain('deployment.NameRegistry');
+    expect(wiring).toContain('deployment.modules.map(');
+    expect(wiring).toContain('kind: m.kind');
+    expect(wiring).toContain('address: m.address');
     expect(wiring).toContain('store.recordedDeployment()');
     expect(wiring).toContain('config.acknowledgeChainReset');
   });

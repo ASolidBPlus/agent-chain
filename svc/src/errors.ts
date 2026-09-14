@@ -26,6 +26,11 @@ export type ErrorCode =
   | 'intent_unresolved'
   | 'counterparty_denied'
   | 'wallet_not_found'
+  /// The route needs a module this deployment does not have. 404 because the
+  /// endpoint genuinely is not there on this deployment - not 501, which would
+  /// say the service cannot do it at all, and not 409, which would say the
+  /// request conflicts with some state. A deployment's shape is not a state.
+  | 'module_not_deployed'
   | 'chain_error'
   | 'chain_unreachable'
   | 'internal_error';
@@ -51,6 +56,7 @@ export const STATUS: Record<ErrorCode, number> = {
   // wallet: see getIntent. A 403 there would confirm the id exists.
   unknown_intent: 404,
   wallet_not_found: 404,
+  module_not_deployed: 404,
   wallet_frozen: 409,
   // Policy refusals share 409 with `frozen`: the request was well formed and
   // authorised, and the wallet's own policy is what stopped it (spec S5).

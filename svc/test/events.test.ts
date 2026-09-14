@@ -36,7 +36,7 @@ function chainAt(
   logs: Array<{ args: { intentId: string; from?: string }; transactionHash: string }>,
 ): Chain {
   return {
-    deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+    deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' }, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }], names: { address: '0xreg', tld: 'vee' } },
     publicClient: {
       getBlockNumber: async () => block,
       getContractEvents: async ({ eventName }: { eventName: string }) =>
@@ -237,7 +237,7 @@ describe('the intent anomaly', () => {
     intentLogs: Array<{ args: { intentId: string; from: string }; transactionHash: string }>,
   ): Chain {
     return {
-      deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+      deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' }, modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }], names: { address: '0xreg', tld: 'vee' } },
       publicClient: {
         getBlockNumber: async () => 1n,
         getContractEvents: async ({ eventName }: { eventName: string }) =>
@@ -653,7 +653,7 @@ describe('sweepOnce', () => {
   it('confirms an intent whose transfer landed, and KEEPS the hold', async () => {
     const { store, tail } = seeded();
     reserve(store, 'landed', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
     store.setCursor('chain-log-tail', 9n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
@@ -668,7 +668,7 @@ describe('sweepOnce', () => {
   it('does NOT confirm an emission from a foreign sender', async () => {
     const { store, tail } = seeded();
     reserve(store, 'foreign', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE' });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE', isDefaultToken: true });
     store.setCursor('chain-log-tail', 9n);
 
     const result = await tail.sweepOnce();
@@ -808,7 +808,7 @@ describe('sweepOnce', () => {
     // so if it were swept it would be confirmed, which is how we can tell the
     // difference between "skipped" and "nothing to do".
     reserve(store, 'old-stage', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
 
     store.setStage('run-2');
 
@@ -817,7 +817,7 @@ describe('sweepOnce', () => {
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
       stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
-    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET });
+    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET, isDefaultToken: true });
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
 
@@ -856,7 +856,7 @@ describe('sweepOnce', () => {
   it('a terminal intent keeps its id consumed and answers with its outcome', async () => {
     const { store, tail } = seeded();
     reserve(store, 'terminal', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
     await tail.sweepOnce();
 
     // Terminal status, from the store rather than a chain call.
@@ -888,7 +888,7 @@ describe('sweepOnce', () => {
   it('still COMPLETES a row with no bound when its transfer landed', async () => {
     const { store, tail } = seeded();
     reserve(store, 'unbounded-landed', undefined);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
 
     expect((await tail.sweepOnce()).confirmed).toBe(1);
     expect(store.intentTxHash('unbounded-landed')).toBe('0xaaa');

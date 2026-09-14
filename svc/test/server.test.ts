@@ -265,6 +265,7 @@ describe('the alias index', () => {
 
     const chain = {
       deployment: { NameRegistry: '0xreg' },
+      modules: { tokens: [], names: { address: '0xreg', tld: 'vee' } },
       publicClient: {
         getContractEvents: async () => registered,
         readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {

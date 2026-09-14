@@ -29,10 +29,21 @@
 // all. It also catches a chain SWAP rather than only a wipe, which a name check
 // could never have reached.
 
+import type { ModuleKind } from './modules.ts';
+
 export interface DeploymentIdentity {
+  /// A STRING, and the stored column stays TEXT. The value is a chain id and
+  /// could be a number; changing it here would be a migration for no gain, and
+  /// the comparison is equality either way.
   chainId: string;
-  veeBux: string;
-  nameRegistry: string;
+  /// In manifest order. The ORDER IS PART OF THE IDENTITY: the first token
+  /// entry is the default token, so two deployments with the same modules in a
+  /// different order are two different deployments to every money path.
+  ///
+  /// The treasury is deliberately NOT here. The boot check in chain.ts already
+  /// pins it against the mnemonic, and a second copy of a fact is a second
+  /// thing that can disagree.
+  modules: Array<{ kind: ModuleKind; key?: string; address: string }>;
 }
 
 export class ChainSwapError extends Error {
@@ -43,8 +54,30 @@ export class ChainSwapError extends Error {
   }
 }
 
+const label = (m: { kind: ModuleKind; key?: string }) => (m.key ? `${m.kind}:${m.key}` : m.kind);
+
 const show = (id: DeploymentIdentity) =>
-  `chain ${id.chainId}, VEEBux ${id.veeBux}, NameRegistry ${id.nameRegistry}`;
+  `chain ${id.chainId}, ${id.modules.map((m) => `${label(m)} ${m.address}`).join(', ')}`;
+
+/// The FIRST difference between two module lists, in words. A message that says
+/// only "they differ" leaves an operator diffing two address lists by eye at
+/// the moment they are least able to.
+function firstDifference(recorded: DeploymentIdentity, live: DeploymentIdentity): string | null {
+  if (recorded.chainId !== live.chainId) return `chain id: recorded ${recorded.chainId}, live ${live.chainId}`;
+  const n = Math.max(recorded.modules.length, live.modules.length);
+  for (let i = 0; i < n; i++) {
+    const r = recorded.modules[i];
+    const l = live.modules[i];
+    if (r && !l) return `module ${label(r)}: recorded, now absent`;
+    if (!r && l) return `module ${label(l)}: absent before, now ${l.address}`;
+    if (!r || !l) continue;
+    if (r.kind !== l.kind || r.key !== l.key) return `module order changed: ${label(r)} is now ${label(l)}`;
+    if (r.address.toLowerCase() !== l.address.toLowerCase()) {
+      return `module ${label(r)}: recorded ${r.address}, live ${l.address}`;
+    }
+  }
+  return null;
+}
 
 /// Compares what the store remembers against what booted.
 ///
@@ -85,11 +118,8 @@ export function assertDeploymentUnchanged(
   acknowledged: boolean,
 ): void {
   if (recorded === null) return;
-  const same =
-    recorded.chainId === live.chainId &&
-    recorded.veeBux.toLowerCase() === live.veeBux.toLowerCase() &&
-    recorded.nameRegistry.toLowerCase() === live.nameRegistry.toLowerCase();
-  if (same) return;
+  const difference = firstDifference(recorded, live);
+  if (difference === null) return;
 
   // ACKNOWLEDGED PERMITS THIS BOOT AND NOTHING MORE. The recorded identity is
   // deliberately NOT updated: the disagreement is real and unresolved until
@@ -110,8 +140,8 @@ export function assertDeploymentUnchanged(
   }
 
   throw new ChainSwapError(
-    `refusing to start: THE CHAIN AND THE STORE DISAGREE. This store was written ` +
-      `against ${show(recorded)}; the chain that just booted is ${show(live)}.\n` +
+    `refusing to start: THE CHAIN AND THE STORE DISAGREE (${difference}). This store was ` +
+      `written against ${show(recorded)}; the chain that just booted is ${show(live)}.\n` +
       `\n` +
       `The store is fine, the chain is fine, and the registry is fine - only the ` +
       `PAIRING is wrong, which is why the symptom is "unknown_name" and points at the ` +

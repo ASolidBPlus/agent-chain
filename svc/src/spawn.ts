@@ -19,6 +19,7 @@ import type { Keystore } from './keystore.ts';
 import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
+import { defaultToken, requireNames } from './modules.ts';
 import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
   type AgentPolicy, type PolicyDefaults, type WalletKind,
   assertPatternsUsable,
@@ -82,7 +83,13 @@ export class Spawner {
     const agentId = assertCanonicalAgentId(body.agentId);
     const kind = this.parseKind(body.kind);
     const alias = body.alias === undefined || body.alias === null ? undefined : assertAlias(body.alias);
-    const fundVee = parseVee(body.fundVee ?? 0, 'fundVee');
+    // The default token may be ABSENT here: spawn runs on a names-only
+    // deployment too, and only the funding half needs a token. The scale is
+    // used to parse a value that must then be zero, and the check below is
+    // what refuses a non-zero one - so this cannot quietly parse money at the
+    // wrong scale.
+    const tok = this.chain.modules.tokens[0];
+    const fundVee = parseVee(body.fundVee ?? 0, tok?.decimals ?? 18, tok?.symbol ?? 'tokens', 'fundVee');
     // hub-core may set per-agent caps; otherwise they come by kind from the
     // game-balance file, never from a constant in this module.
     // A supplied policy is a PATCH over the kind defaults, not a complete
@@ -216,7 +223,7 @@ export class Spawner {
   private async fundVee(address: Address, amount: bigint): Promise<void> {
     try {
       const balance = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.VEEBux,
+        address: defaultToken(this.chain.modules).address,
         abi: TokenAbi,
         functionName: 'balanceOf',
         args: [address],
@@ -228,7 +235,7 @@ export class Spawner {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: this.chain.deployment.VEEBux,
+        address: defaultToken(this.chain.modules).address,
         abi: TokenAbi,
         functionName: 'transfer',
         args: [address, amount - balance],
@@ -271,7 +278,7 @@ export class Spawner {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName,
         args: args as never,

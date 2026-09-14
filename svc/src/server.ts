@@ -17,6 +17,7 @@ import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
 import type { Treasury } from './treasury.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
+import { defaultToken } from './modules.ts';
 
 export interface Services {
   config: Config;
@@ -75,19 +76,24 @@ async function getSupply({ services, principal }: RouteContext): Promise<unknown
   try {
     const [total, treasury] = (await Promise.all([
       chain.publicClient.readContract({
-        address: chain.deployment.VEEBux,
+        address: defaultToken(chain.modules).address,
         abi: TokenAbi,
         functionName: 'totalSupply',
       }),
       chain.publicClient.readContract({
-        address: chain.deployment.VEEBux,
+        address: defaultToken(chain.modules).address,
         abi: TokenAbi,
         functionName: 'balanceOf',
         args: [chain.treasury],
       }),
     ])) as [bigint, bigint];
 
-    return { total: formatVee(total), treasury: formatVee(treasury), inPlay: formatVee(total - treasury) };
+    const { decimals } = defaultToken(chain.modules);
+    return {
+      total: formatVee(total, decimals),
+      treasury: formatVee(treasury, decimals),
+      inPlay: formatVee(total - treasury, decimals),
+    };
   } catch (err) {
     throw asChainError(err);
   }
@@ -226,14 +232,14 @@ async function getBalance({ services, param, principal }: RouteContext): Promise
   try {
     const [vee, eth] = await Promise.all([
       services.chain.publicClient.readContract({
-        address: services.chain.deployment.VEEBux,
+        address: defaultToken(services.chain.modules).address,
         abi: TokenAbi,
         functionName: 'balanceOf',
         args: [found.address],
       }) as Promise<bigint>,
       services.chain.publicClient.getBalance({ address: found.address }),
     ]);
-    return { vee: formatVee(vee), eth: formatEther(eth) };
+    return { vee: formatVee(vee, defaultToken(services.chain.modules).decimals), eth: formatEther(eth) };
   } catch (err) {
     throw asChainError(err);
   }
