@@ -212,6 +212,11 @@ class RecordingTreasury extends Treasury {
   }
 }
 
+/// Every address the TREASURY wrote to, in order. The platform paths - `fund`
+/// and `set-balance` - name their token by the CONTRACT they address, and that
+/// is the use no amount assertion can see.
+const written: string[] = [];
+
 async function harness(
   entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR],
   opts: {
@@ -253,7 +258,8 @@ async function harness(
     },
     walletClient: {
       account: { address: PLAY },
-      writeContract: async () => {
+      writeContract: async (a: { address?: string }) => {
+        written.push(String(a.address));
         if (opts.contractReverts) {
           throw new Error(
             'The contract function "setPair" reverted.\n\nError: LoopMintsValue(0x…, 0x…, 1500000000000000000, 750000000000000000)',
@@ -291,6 +297,7 @@ async function harness(
     fixedCallPolicy(entries),
   );
   t.estimateReverts = opts.estimateReverts === true;
+  written.length = 0;
   return { t, store };
 }
 
@@ -1071,6 +1078,42 @@ describe('a transfer in a second token', () => {
     const { t } = await harness();
     await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'g-4' });
     expect(t.signed[0]!.to).toBe(PLAY);
+  });
+});
+
+// §1. THE PLATFORM PATHS NAME THEIR TOKEN TOO, and act on that one only.
+describe('fund and set-balance, per token', () => {
+  it('funds the NAMED token, leaving the others alone', async () => {
+    const { t } = await harness();
+    await t.fund({ to: 'bob.play', amount: '2', token: 'gold', intentId: 'f-1' });
+    // The CONTRACT addressed is the assertion: a fund that reached for the
+    // default token would move real money on the wrong ledger while reporting
+    // a number that looks entirely correct.
+    expect(written).toEqual([GOLD]);
+  });
+
+  it('defaults to the default token when none is named', async () => {
+    const { t } = await harness();
+    await t.fund({ to: 'bob.play', amount: '2', intentId: 'f-2' });
+    expect(written).toEqual([PLAY]);
+  });
+
+  it('refuses a token this deployment does not have', async () => {
+    const { t } = await harness();
+    expect(
+      await codeOf(() => t.fund({ to: 'bob.play', amount: '1', token: 'silver', intentId: 'f-3' })),
+    ).toBe('unknown_token');
+    expect(written).toEqual([]);
+  });
+
+  it('sets the balance of the NAMED token, measuring and moving the same one', async () => {
+    // set-balance READS a balance and then MOVES the difference. If the read
+    // and the write named different tokens it would set one token's balance by
+    // measuring another's - and the reply, which re-reads, would report a
+    // number nobody moved.
+    const { t } = await harness();
+    await t.setBalance('orch:a', { amount: '9', token: 'gold', intentId: 's-1' });
+    expect(written).toEqual([GOLD]);
   });
 });
 

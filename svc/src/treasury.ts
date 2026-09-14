@@ -326,13 +326,17 @@ export class Treasury {
   /// the intent record is taken, the budget is not.
   async fund(body: {
     to?: unknown;
-    vee?: unknown;
+    amount?: unknown;
+    token?: unknown;
     reason?: unknown;
     intentId?: unknown;
   }): Promise<{ txHash: string; intentId: string }> {
     const name = assertLookupName(body.to);
-    const tok = defaultToken(this.chain.modules);
-    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, CARRIED. `fund` acts on the NAMED TOKEN ONLY, leaving every
+    // other balance untouched - so its address, its decimals and its symbol all
+    // come off this one value.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const amount = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
     const target = await this.resolver.require(name);
     const intentId =
       typeof body.intentId === 'string' && body.intentId !== ''
@@ -343,7 +347,7 @@ export class Treasury {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: defaultToken(this.chain.modules).address,
+        address: tok.address,
         abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
@@ -373,7 +377,16 @@ export class Treasury {
   /// balance is not an agent spending. See sweepToTreasury for what that costs.
   async setBalance(
     agentId: string,
-    body: { vee?: unknown; intentId?: unknown; reason?: unknown; to?: unknown },
+    body: {
+      /// The target balance, in the named token's own whole units.
+      amount?: unknown;
+      /// Which token's balance to set. Absent means the default token; the
+      /// others are left exactly as they were.
+      token?: unknown;
+      intentId?: unknown;
+      reason?: unknown;
+      to?: unknown;
+    },
   ): Promise<{ balance: string; txHash?: string; intentId?: string }> {
     assertCanonicalAgentId(agentId);
     // `to` IS NOT A PARAMETER OF THIS ENDPOINT and never becomes one by
@@ -387,11 +400,15 @@ export class Treasury {
       );
     }
 
-    const tok = defaultToken(this.chain.modules);
-    const target = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, CARRIED into the balance read, the top-up, the sweep and the
+    // re-read below. `set-balance` acts on the NAMED TOKEN ONLY, leaving every
+    // other balance untouched - so a second lookup anywhere here would set one
+    // token's balance by measuring another's.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const target = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
     const wallet = await this.resolver.require(agentId);
     const current = (await this.chain.publicClient.readContract({
-      address: defaultToken(this.chain.modules).address,
+      address: tok.address,
       abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
@@ -422,11 +439,7 @@ export class Treasury {
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
       capWei: null,
-      // The default token until §1 gives this endpoint its own `token`
-      // argument. Named at the call site rather than defaulted inside
-      // `reserve`, so the day a second token reaches this path the omission is
-      // a compile error rather than a hold taken in the wrong currency.
-      token: defaultToken(this.chain.modules).key,
+      token: tok.key,
       idSource: suppliedId ? 'caller' : 'server',
     });
     if (reservation.outcome === 'duplicate') {
@@ -447,7 +460,16 @@ export class Treasury {
         // top-up would be the one money movement whose intent cannot be joined
         // from /history, and BOTH SIDES WOULD COMPILE. Review recorded the
         // asymmetry against the pre-merge trees; this is where it dissolves.
-        ? await this.fund({ to: agentId, vee: formatVee(target - current, tok.decimals), reason, intentId })
+        ? await this.fund({
+            to: agentId,
+            amount: formatVee(target - current, tok.decimals),
+            // THE SAME TOKEN, passed on rather than defaulted inside `fund`.
+            // Without it a set-balance of GOLD would top up in PLAY and then
+            // re-read GOLD, and the reply would report a number nobody moved.
+            token: tok.key,
+            reason,
+            intentId,
+          })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId);
 
     this.store.completeIntent(intentId, result.txHash);
@@ -458,7 +480,7 @@ export class Treasury {
     // is what the harness's Wallets panel shows, and a panel showing a number
     // nobody observed is the observer reporting its own state as the subject's.
     const settled = (await this.chain.publicClient.readContract({
-      address: defaultToken(this.chain.modules).address,
+      address: tok.address,
       abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],

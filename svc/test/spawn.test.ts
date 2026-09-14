@@ -1108,26 +1108,26 @@ describe('POST /wallets/:agentId/balance', () => {
   // it needed a test rather than a rebase.
   it('a TOP-UP records the intent id on its memo', async () => {
     const { t, store } = treasuryAt(vee(10));
-    await t.setBalance('orch:a', { vee: '100', intentId: 'top-up-1' });
+    await t.setBalance('orch:a', { amount: '100', intentId: 'top-up-1' });
     expect(store.memosFor(['0xfunded']).get('0xfunded')?.intentId).toBe('top-up-1');
   }, 20_000);
 
   it('a SWEEP records the intent id on its memo', async () => {
     const { t, store } = treasuryAt(vee(100));
-    await t.setBalance('orch:a', { vee: '40', intentId: 'sweep-1' });
+    await t.setBalance('orch:a', { amount: '40', intentId: 'sweep-1' });
     expect(store.memosFor(['0xswept']).get('0xswept')?.intentId).toBe('sweep-1');
   }, 20_000);
 
   it('funds the difference when the balance is below target', async () => {
     const { t } = treasuryAt(vee(10));
-    const res = await t.setBalance('orch:a', { vee: '100', intentId: 'b-1' });
+    const res = await t.setBalance('orch:a', { amount: '100', intentId: 'b-1' });
     expect(res.balance).toBe('100');
     expect(t.sent).toEqual([{ to: WALLET, amount: vee(90) }]);
   }, 20_000);
 
   it('sweeps the difference to the TREASURY when above target', async () => {
     const { t } = treasuryAt(vee(100));
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-2' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-2' });
     expect(res.balance).toBe('40');
     expect(res.txHash).toBe('0xswept');
   }, 20_000);
@@ -1146,7 +1146,7 @@ describe('POST /wallets/:agentId/balance', () => {
       return { ...s, sendRawTransaction: async () => { t.balance = vee(42); return '0xpartial' as `0x${string}`; } };
     };
 
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-measured' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-measured' });
 
     // 42, what the chain holds - not 40, what we asked for.
     expect(res.balance).toBe('42');
@@ -1154,7 +1154,7 @@ describe('POST /wallets/:agentId/balance', () => {
 
   it('does nothing at all when the balance is already correct', async () => {
     const { t } = treasuryAt(vee(50));
-    const res = await t.setBalance('orch:a', { vee: '50', intentId: 'b-3' });
+    const res = await t.setBalance('orch:a', { amount: '50', intentId: 'b-3' });
     expect(res).toEqual({ balance: '50' });
     expect(res.txHash).toBeUndefined();
     expect(t.sent).toHaveLength(0);
@@ -1165,7 +1165,7 @@ describe('POST /wallets/:agentId/balance', () => {
   // described.
   it('sets the balance of a FROZEN wallet', async () => {
     const { t } = treasuryAt(vee(100), true);
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-4' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-4' });
     expect(res.balance).toBe('40');
   }, 20_000);
 
@@ -1174,7 +1174,7 @@ describe('POST /wallets/:agentId/balance', () => {
   it('refuses a body that tries to name a destination', async () => {
     const { t } = treasuryAt(vee(100));
     const code = await codeOf(() =>
-      t.setBalance('orch:a', { vee: '40', to: '0xattacker', intentId: 'b-5' }),
+      t.setBalance('orch:a', { amount: '40', to: '0xattacker', intentId: 'b-5' }),
     );
     expect(code).toBe('invalid_request');
     expect(t.sent).toHaveLength(0);
@@ -1186,10 +1186,10 @@ describe('POST /wallets/:agentId/balance', () => {
   // any reservation is consulted, because "already correct" is the answer.
   it('a repeat after success moves nothing, because the balance is already right', async () => {
     const { t } = treasuryAt(vee(10));
-    await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
     const before = t.sent.length;
 
-    const again = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const again = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
 
     expect(again).toEqual({ balance: '100' });
     expect(t.sent).toHaveLength(before);
@@ -1201,12 +1201,12 @@ describe('POST /wallets/:agentId/balance', () => {
   // answers with the original transaction instead of funding a second time.
   it('replays the original transaction when the caller retries a lost response', async () => {
     const { t } = treasuryAt(vee(10));
-    const first = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const first = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
     const before = t.sent.length;
 
     t.balance = vee(10); // the retry sees the pre-transfer state
 
-    const second = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const second = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
 
     expect(second.txHash).toBe(first.txHash);
     expect(t.sent).toHaveLength(before); // and did NOT fund again
@@ -1216,7 +1216,7 @@ describe('POST /wallets/:agentId/balance', () => {
   // over_stage_cap - the null cap hold, asserted through the endpoint.
   it('is not subject to the stage cap', async () => {
     const { t, store } = treasuryAt(vee(0));
-    const res = await t.setBalance('orch:a', { vee: '100000', intentId: 'b-6' });
+    const res = await t.setBalance('orch:a', { amount: '100000', intentId: 'b-6' });
     expect(res.balance).toBe('100000');
     expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
   }, 20_000);
