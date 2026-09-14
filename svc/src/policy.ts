@@ -191,7 +191,7 @@ export async function readPolicyFile(policyDir: string, agentId: string): Promis
 /// that looks like a glob and behaves like a string is the failure this dialect
 /// exists to avoid, and the old code had exactly one of them.
 ///
-/// chain/wallet-mcp carries an identical copy. They must agree: wallet-mcp's
+/// wallet-mcp carries an identical copy. They must agree: wallet-mcp's
 /// local refusal is the model-facing fast path and chain-svc's is the boundary,
 /// and a pattern that means different things in the two is the drift the shared
 /// policy file was written to prevent. `test/policy.test.ts` asserts agreement

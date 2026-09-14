@@ -3,7 +3,7 @@
 # a second run is idempotent, and balances survive `docker restart`.
 #
 # Not a unit test - it needs a Docker daemon, so it cannot run in the repo's CI.
-# Run it by hand and paste the output into the PR:  ./chain/docker/verify-chain.sh
+# Run it by hand and paste the output into the PR:  ./docker/verify-chain.sh
 set -euo pipefail
 
 IMAGE=${IMAGE:-powerout-anvil:dev}

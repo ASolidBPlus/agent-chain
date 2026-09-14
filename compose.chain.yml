@@ -7,8 +7,8 @@ services:
     build:
       # Relative to THIS FILE, not the working directory. Spec S7 writes
       # ./chain/docker, which is correct only if the compose file sits at the
-      # hub-stack root; S1 puts the file here, under chain/, so the context is
-      # ./docker. Flagged to powerout-planner.
+      # hub-stack root; this file sits at the root of its own repo, so the
+      # context is ./docker. Flagged to powerout-planner.
       context: ./docker
       dockerfile: anvil.Dockerfile
     profiles: [chain]
@@ -62,10 +62,10 @@ services:
 
   chain-svc:
     build:
-      # The repo root: chain/svc is a bun workspace member and the lockfile
-      # lives there, so --frozen-lockfile is only possible from the root.
-      context: ../
-      dockerfile: chain/svc/Dockerfile
+      # The repo root: svc is a bun workspace member and the lockfile lives
+      # there, so --frozen-lockfile is only possible from the root.
+      context: .
+      dockerfile: svc/Dockerfile
     profiles: [chain]
     depends_on:
       chain:
