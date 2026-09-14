@@ -119,7 +119,7 @@ step "criterion 9 - addressing at the service layer"
 check "two-colon id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')" "400"
 echo "    $(body -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')"
 check "bare local id"      "$(code -X POST "$U/wallets" -d '{"agentId":"client","kind":"agent"}')" "400"
-check "uppercase id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:ShadowBroker","kind":"agent"}')" "400"
+check "uppercase id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:Vendor","kind":"agent"}')" "400"
 
 step "transfer by name, with a memo (wallet credential)"
 api -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null

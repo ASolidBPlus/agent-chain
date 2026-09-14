@@ -41,7 +41,7 @@ describe('canonical agent ids', () => {
   // on local ids, so this is the only check standing.
   it('rejects uppercase instead of normalising it', () => {
     expect(codeOf(() => assertCanonicalAgentId('Orch:vendor'))).toBe('invalid_agent_id');
-    expect(codeOf(() => assertCanonicalAgentId('orch:ShadowBroker'))).toBe('invalid_agent_id');
+    expect(codeOf(() => assertCanonicalAgentId('orch:Vendor'))).toBe('invalid_agent_id');
   });
 
   // Without a TOTAL length bound, a 60-character id passes the shape check and

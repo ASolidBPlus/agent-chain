@@ -97,7 +97,7 @@ describe('POST /wallets validation', () => {
     const { spawner: s } = spawner();
     expect(await codeOf(() => s.spawn({ agentId: 'client' }))).toBe('invalid_agent_id');
     expect(await codeOf(() => s.spawn({ agentId: 'orch:pod1:alice' }))).toBe('invalid_agent_id');
-    expect(await codeOf(() => s.spawn({ agentId: 'orch:ShadowBroker' }))).toBe('invalid_agent_id');
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:Vendor' }))).toBe('invalid_agent_id');
   });
 
   // A burner is deliberately an unnamed address the game must trace, so a named
