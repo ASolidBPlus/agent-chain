@@ -11,6 +11,7 @@ import { defaultTokenOf, type ModulesReply } from './modules.ts';
 // a library). What the import buys is the exhaustiveness: a code added to
 // chain-svc without a decision in REFUSAL_FOR fails typecheck here.
 import type { ErrorCode } from '../../svc/src/errors.ts';
+import { createHash } from 'node:crypto';
 import { WalletStore } from './store.ts';
 
 /// Where wallet-mcp's facilitator-facing lines go.
@@ -99,6 +100,18 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // Facts about the string the persona just typed.
   invalid_name: 'invalid_name',
   invalid_amount: 'invalid_amount',
+  // ── The generic call op (increment 3). Each passes the membership test
+  //    above for a different one of its clauses, which is why they are not one
+  //    code: the registry is public, the allowlist is this wallet's own policy,
+  //    the arguments are this wallet's own input, and a revert is a fact about
+  //    what its own call did.
+  unknown_contract: 'unknown_contract',
+  function_not_allowed: 'function_not_allowed',
+  bad_args: 'bad_args',
+  // The CODE is persona-facing and the REASON is not. chain-svc decodes the
+  // revert reason with the contract's ABI and puts it in its own log sink; what
+  // crosses to the persona is "it was mined and nothing changed".
+  revert: 'revert',
 
   // ── Generic: `reason: "error"`, no detail, real code logged for the
   //    facilitator.
@@ -392,6 +405,16 @@ export class Wallet {
       // The dedupe KEY is the intent id alone (ruled). These are not
       // key components - they are what makes "same id, different send" a
       // REFUSAL rather than a silent replay of the wrong transfer.
+      if (previous.call) {
+        // The id was used for a CALL. Not a replay of this send by any
+        // reading, and saying which it was is what turns "that failed" into
+        // "use a different id".
+        return this.fail(
+          'duplicate_intent',
+          `intent_id ${intentId} was already used to call ${previous.call.function} on ` +
+            `${previous.call.contract}`,
+        );
+      }
       if (previous.to === to && previous.vee === amount) {
         return { ok: true, txHash: previous.txHash };
       }
@@ -523,6 +546,142 @@ export class Wallet {
     return this.fail('error');
   }
 
+  // ── §4. THE GENERIC CALL OP, as three tools ────────────────────────────
+  //
+  // ALWAYS REGISTERED, unlike the money tools: they need no module, and an
+  // empty allowlist simply yields an empty menu. A persona that asks what it
+  // may call and is told "nothing" has learned something true; a persona whose
+  // tool is missing has learned nothing at all.
+
+  /// §4. The menu: what this wallet may call, phrased so a model can build a
+  /// call without ever seeing an address.
+  async contracts(): Promise<unknown> {
+    const res = await this.client.calls();
+    const down = Wallet.unreachable(res);
+    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'calls unavailable') };
+    if (res.status !== 200) {
+      const body = res.body as { error?: string } | null;
+      return { error: this.redact(body?.error ?? 'calls unavailable') };
+    }
+    return res.body;
+  }
+
+  /// sha256 of the canonical JSON of the wire arguments - the SAME hash
+  /// chain-svc takes, so the local refusal and the authoritative one cannot
+  /// disagree about what "the same call" means.
+  private static argsHash(args: unknown[]): string {
+    return createHash('sha256').update(JSON.stringify(args)).digest('hex');
+  }
+
+  /// §4. Call a function on a contract, with this wallet's own key.
+  ///
+  /// MIRRORS `send` BRANCH FOR BRANCH - not_sent, unknown, response, the
+  /// reconcile on `intent_unresolved` - because the question those branches
+  /// answer is the same one: did the request leave, and might it have moved
+  /// something? A call that reaches the chain and reverts has still consumed a
+  /// stage slot, so "nothing happened" is exactly as wrong here as there.
+  ///
+  /// NO LOCAL FAST-PATH CHECK. `checkLocally` is transfer-shaped - it knows
+  /// about `to` and an amount - and the allowlist's rules are the server's to
+  /// enforce. A second allowlist parser in the client would be a second
+  /// authority for the one question this op exists to answer, and it runs
+  /// inside a persona designed to be socially engineered. The server is
+  /// authoritative; this side owns only `duplicate_intent`, which only it can
+  /// see.
+  async call(args: {
+    contract: unknown;
+    function: unknown;
+    args: unknown;
+    intent_id: unknown;
+  }): Promise<SendResult> {
+    const contract = typeof args.contract === 'string' ? args.contract.trim() : '';
+    const fn = typeof args.function === 'string' ? args.function.trim() : '';
+    const intentId = typeof args.intent_id === 'string' ? args.intent_id.trim() : '';
+    const wire = Array.isArray(args.args) ? (args.args as unknown[]) : null;
+
+    if (contract === '') return this.fail('error', 'contract is required');
+    if (fn === '') return this.fail('error', 'function is required');
+    if (intentId === '') return this.fail('error', 'intent_id is required');
+    if (wire === null) return this.fail('error', 'args must be an array, [] for a function that takes none');
+
+    const argsHash = Wallet.argsHash(wire);
+    const previous = this.store.recall(intentId);
+    if (previous) {
+      if (
+        previous.call &&
+        previous.call.contract === contract &&
+        previous.call.function === fn &&
+        previous.call.argsHash === argsHash
+      ) {
+        // The model retried; it did not decide twice.
+        return { ok: true, txHash: previous.txHash };
+      }
+      return this.fail(
+        'duplicate_intent',
+        previous.call
+          ? `intent_id ${intentId} was already used to call ${previous.call.function} on ` +
+            `${previous.call.contract} with different arguments`
+          : `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbol} to ${previous.to}`,
+      );
+    }
+
+    const res = await this.client.callContract({ contract, function: fn, args: wire, intentId });
+
+    if (res.outcome === 'not_sent') {
+      return this.fail('error', `chain-svc could not be reached (${res.reason}); the call did not happen`);
+    }
+    if (res.outcome === 'unknown') {
+      return this.fail(
+        'error',
+        `the call to ${fn} on ${contract} was submitted but chain-svc did not answer (${res.reason}); ` +
+          `its outcome is unknown. Retry with the SAME intent_id ${intentId} - that is safe and ` +
+          `returns the original result. Do NOT retry with a new intent_id.`,
+      );
+    }
+
+    const body = res.body as { txHash?: string; error?: string; detail?: string } | null;
+    if (res.status === 200 && body?.txHash) {
+      this.store.remember(intentId, {
+        txHash: body.txHash,
+        at: Date.now(),
+        call: { contract, function: fn, argsHash },
+      });
+      return { ok: true, txHash: body.txHash };
+    }
+    if (res.status === 409 && body?.error === 'intent_unresolved') {
+      return await this.reconcileCall(intentId, contract, fn, argsHash);
+    }
+
+    const mapped = body?.error ? refusalFor(body.error, this.log) : null;
+    // The detail travels with a persona-facing reason and never with a generic
+    // one - the same rule `send` follows, and it matters more here: `bad_args`
+    // carries the argument index and the type, which is the whole of what lets
+    // a model fix its own call rather than retry the same one.
+    return mapped ? this.fail(mapped, body?.detail) : this.fail('error');
+  }
+
+  /// §4. Read a view function. Signs nothing, reserves nothing, costs nothing.
+  async read(args: { contract: unknown; function: unknown; args: unknown }): Promise<unknown> {
+    const contract = typeof args.contract === 'string' ? args.contract.trim() : '';
+    const fn = typeof args.function === 'string' ? args.function.trim() : '';
+    const wire = Array.isArray(args.args) ? (args.args as unknown[]) : null;
+
+    if (contract === '') return { error: 'contract is required' };
+    if (fn === '') return { error: 'function is required' };
+    if (wire === null) return { error: 'args must be an array, [] for a function that takes none' };
+
+    const res = await this.client.readContract({ contract, function: fn, args: wire });
+    const down = Wallet.unreachable(res);
+    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'read unavailable') };
+    if (res.status === 200) return res.body;
+
+    const body = res.body as { error?: string; detail?: string } | null;
+    const mapped = body?.error ? refusalFor(body.error, this.log) : null;
+    return mapped
+      ? { error: mapped, ...(body?.detail ? { detail: this.redact(body.detail) } : {}) }
+      : { error: 'error' };
+  }
+
   /// Polls GET /intents/:intentId until the reservation resolves or the budget
   /// runs out (spec S5). Never re-sends: the only safe move on an unresolved
   /// intent is to ASK, and asking is what this does.
@@ -554,6 +713,53 @@ export class Wallet {
       'intent_unresolved',
       `the send to ${to} is unresolved after ${RECONCILE_BUDGET_MS / 1000}s. Do NOT re-send. ` +
         `Retrying with the SAME intent_id ${intentId} is safe and returns the original outcome.`,
+    );
+  }
+
+  /// The same poll for a call. `GET /intents/:id` is unchanged - the intents
+  /// row is the same row - so this differs only in what it REMEMBERS when the
+  /// answer arrives and in what it says when it does not.
+  ///
+  /// A SEPARATE METHOD rather than a widened one, because the two record
+  /// different things and a single method would have to branch on an optional
+  /// parameter at the exact point where recording the WRONG shape is what makes
+  /// a later replay lie: a call remembered as a transfer would answer a repeat
+  /// of the call with `duplicate_intent` about a payment nobody made.
+  private async reconcileCall(
+    intentId: string,
+    contract: string,
+    fn: string,
+    argsHash: string,
+  ): Promise<SendResult> {
+    const deadline = Date.now() + RECONCILE_BUDGET_MS;
+
+    while (Date.now() < deadline) {
+      const res = await this.client.intent(intentId);
+      if (res.outcome === 'response' && res.status === 200) {
+        const body = res.body as { status?: string; txHash?: string } | null;
+
+        if (body?.status === 'confirmed' && body.txHash) {
+          this.store.remember(intentId, {
+            txHash: body.txHash,
+            at: Date.now(),
+            call: { contract, function: fn, argsHash },
+          });
+          return { ok: true, txHash: body.txHash };
+        }
+        if (body?.status === 'failed') {
+          // Mined and reverted. The REASON is chain-svc's and stays there; what
+          // a persona needs is that its call did nothing.
+          return this.fail('revert', `${fn} on ${contract} was mined and reverted; nothing changed`);
+        }
+      }
+      await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
+    }
+
+    return this.fail(
+      'intent_unresolved',
+      `the call to ${fn} on ${contract} is unresolved after ${RECONCILE_BUDGET_MS / 1000}s. ` +
+        `Do NOT retry with a new intent_id. Retrying with the SAME intent_id ${intentId} is safe ` +
+        `and returns the original outcome.`,
     );
   }
 }

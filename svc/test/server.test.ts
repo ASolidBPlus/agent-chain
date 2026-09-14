@@ -8,6 +8,8 @@ import { createChainSvcServer, type Services } from '../src/server.ts';
 import { authenticate, hashToken } from '../src/auth.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
+import { closedCallPolicy } from '../src/calls.ts';
+import { requireContract } from '../src/modules.ts';
 
 const TOKEN = 'correct-horse-battery-staple';
 const WALLET_TOKEN = 'a-wallet-credential';
@@ -35,8 +37,42 @@ const services = {
       tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
       names: { address: '0xreg', tld: 'play' },
       converter: { address: '0xconv' },
+      // The FLAT VIEW the registry builds beside the typed slots. Spelled out
+      // here rather than derived, because this fixture is one deployment and
+      // the point of the file is the wire shape it produces.
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+        { key: 'names', kind: 'names', name: 'NameRegistry', address: '0xreg', abi: [] },
+        { key: 'converter', kind: 'converter', name: 'Converter', address: '0xconv', abi: [] },
+      ],
+      byKey: new Map([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+        ['names', { key: 'names', kind: 'names', name: 'NameRegistry', address: '0xreg', abi: [] }],
+        ['converter', { key: 'converter', kind: 'converter', name: 'Converter', address: '0xconv', abi: [] }],
+      ]),
     },
   },
+  // The REAL Treasury's call op, as far as the router is concerned: these
+  // three are what the four new routes reach. Built from the real classes -
+  // `closedCallPolicy` and `requireContract` - rather than from stubs that
+  // return fixed refusals, because the behaviours asserted below (the closed
+  // default answering function_not_allowed, an unknown key answering
+  // unknown_contract, an empty menu being a 200) are exactly the ones a stub
+  // would get to invent.
+  treasury: (() => {
+    const calls = closedCallPolicy();
+    const refuseFor = (contract: unknown, fn: unknown) => {
+      if (typeof contract !== 'string') throw new HttpError('invalid_request', 'contract must be a string');
+      requireContract(services.chain.modules, contract);
+      throw new HttpError('function_not_allowed', `${String(fn)} is not callable on ${contract}`);
+    };
+    return {
+      allowlist: () => calls.snapshot(),
+      call: async (_p: unknown, b: Record<string, unknown>) => refuseFor(b.contract, b.function),
+      adminCall: async (b: Record<string, unknown>) => refuseFor(b.contract, b.function),
+      read: async (_p: unknown, b: Record<string, unknown>) => refuseFor(b.contract, b.function),
+    };
+  })(),
   resolver: {
     lookup: async (name: string) => (name === 'alpha.play' ? { address: WALLET, canonical: 'alpha:client' } : null),
     require: async (name: string) => {
@@ -94,8 +130,13 @@ describe('authentication', () => {
   });
 
   // /modules is the machine-readable counterpart of /health: wallet-mcp reads it
-  // at startup to learn the deployed addresses. The converter is listed by
-  // address only - nothing is callable through it yet.
+  // at startup to learn the deployed addresses. The typed slots answer "what
+  // kind of deployment is this"; `contracts` answers "what is registered", and
+  // the call op addresses everything by the keys it lists.
+  //
+  // NO ABIs HERE. /calls carries the fragments a caller may actually use, and
+  // shipping every function of every contract would tell a persona about the
+  // ones the allowlist withholds.
   it('serves /modules with the deployed module addresses, converter included', async () => {
     const res = await fetch(`${base}/modules`, { headers: auth });
     expect(res.status).toBe(200);
@@ -107,6 +148,11 @@ describe('authentication', () => {
       tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
       names: { address: '0xreg', tld: 'play' },
       converter: { address: '0xconv' },
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee' },
+        { key: 'names', kind: 'names', name: 'NameRegistry', address: '0xreg' },
+        { key: 'converter', kind: 'converter', name: 'Converter', address: '0xconv' },
+      ],
     });
   });
 
@@ -164,6 +210,88 @@ describe('credential scopes', () => {
     const res = await fetch(`${base}/supply`, { headers: wallet });
     expect(res.status).toBe(403);
     expect((await body(res)).error).toBe('wrong_scope');
+  });
+
+  // §8.4. THE FOUR CALL-OP ROUTES, at the router rather than in the handler.
+  //
+  // A unit test of a scope check cannot tell a gate that runs from one that is
+  // never called, and the scope is the whole of what separates a persona
+  // calling a contract from the hub granting itself a role.
+  describe('the generic call op', () => {
+    const post = (path: string, headers: Record<string, string>, payload: unknown) =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+    it('refuses /call under the platform credential - it has no wallet identity', async () => {
+      const res = await post('/call', auth, { contract: 'converter', function: 'convert', args: [] });
+      expect(res.status).toBe(403);
+      expect((await body(res)).error).toBe('wrong_scope');
+    });
+
+    it('refuses /admin-call under a wallet credential', async () => {
+      // THE ONE THAT MATTERS MOST. admin-call signs with the TREASURY key and
+      // is how a role is granted; a wallet reaching it is the whole game lost.
+      const res = await post('/admin-call', wallet, {
+        contract: 'converter',
+        function: 'setPair',
+        args: [],
+      });
+      expect(res.status).toBe(403);
+      expect((await body(res)).error).toBe('wrong_scope');
+    });
+
+    it('serves /read and /calls to either credential', async () => {
+      // A view on a registered contract is public information on a private
+      // chain, so neither credential is turned away AT THE ROUTER.
+      //
+      // The assertion is on the CODE, not on the status: this deployment has
+      // an empty allowlist, so /read gets as far as `function_not_allowed`,
+      // which is also a 403. Asserting `not 403` would have read the right
+      // outcome as the wrong one - the two refusals share a status and say
+      // completely different things about who the caller is.
+      for (const headers of [auth, wallet]) {
+        const read = await post('/read', headers, {
+          contract: 'converter',
+          function: 'quote',
+          args: [],
+        });
+        expect((await body(read)).error).not.toBe('wrong_scope');
+        const calls = await fetch(`${base}/calls`, { headers });
+        expect(calls.status).toBe(200);
+      }
+    });
+
+    it('answers function_not_allowed on a deployment with no allowlist', async () => {
+      // THE CLOSED DEFAULT, over HTTP. Not `module_not_deployed`: the op is
+      // there and nothing is permitted through it, which is a different fact
+      // and the only one a persona is allowed to learn.
+      const res = await post('/call', wallet, {
+        contract: 'converter',
+        function: 'convert',
+        args: [{ token: 'play' }],
+      });
+      expect(res.status).toBe(403);
+      expect((await body(res)).error).toBe('function_not_allowed');
+    });
+
+    it('answers unknown_contract for a key the registry does not have', async () => {
+      const res = await fetch(`${base}/read`, {
+        method: 'POST',
+        headers: { ...wallet, 'content-type': 'application/json' },
+        body: JSON.stringify({ contract: 'bazaar', function: 'quote', args: [] }),
+      });
+      expect(res.status).toBe(404);
+      expect((await body(res)).error).toBe('unknown_contract');
+    });
+
+    it('serves an empty menu rather than refusing, when nothing is callable', async () => {
+      const res = await fetch(`${base}/calls`, { headers: wallet });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ calls: [] });
+    });
   });
 });
 
@@ -296,7 +424,7 @@ describe('the alias index', () => {
 
     const chain = {
       deployment: {},
-      modules: { tokens: [], names: { address: '0xreg', tld: 'play' } },
+      modules: { tokens: [], names: { address: '0xreg', tld: 'play' }, contracts: [], byKey: new Map() },
       publicClient: {
         getContractEvents: async () => registered,
         readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {

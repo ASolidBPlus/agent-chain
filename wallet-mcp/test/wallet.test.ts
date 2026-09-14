@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeFileSync } from 'node:fs';
@@ -44,6 +44,15 @@ interface Fake {
   /// way to make resolve answer a GENERIC code, the second mapping site has
   /// no test that reaches its log line at all.
   resolveReply: { status: number; body: unknown } | null;
+  /// §4. What POST /call answers next, what GET /calls serves, and what POST
+  /// /read answers. Recorded as well as answered, so a test can assert what was
+  /// SENT - a call that returned the right hash having sent the wrong arguments
+  /// would otherwise pass.
+  calls: Array<Record<string, unknown>>;
+  reads: Array<Record<string, unknown>>;
+  callReply: { status: number; body: unknown };
+  readReply: { status: number; body: unknown };
+  menu: unknown;
 }
 
 async function fakeChainSvc(): Promise<Fake> {
@@ -61,6 +70,11 @@ async function fakeChainSvc(): Promise<Fake> {
     // wallet-mcp's half of the refusal is untested.
     ambiguous: [],
     resolveReply: null,
+    calls: [],
+    reads: [],
+    callReply: { status: 200, body: { txHash: '0xcall1' } },
+    readReply: { status: 200, body: { result: '40' } },
+    menu: { calls: [] },
     names: {
       'alpha.play': { address: '0xaaa', canonical: 'alpha:client' },
       'treasury.play': { address: '0xttt', canonical: 'treasury.play' },
@@ -108,6 +122,15 @@ async function fakeChainSvc(): Promise<Fake> {
         const next =
           state.intentReplies.length > 1 ? state.intentReplies.shift()! : state.intentReplies[0];
         return next ? json(next.status, next.body) : json(404, { error: 'unknown_name' });
+      }
+      if (url.pathname === '/calls') return json(200, state.menu);
+      if (url.pathname === '/call') {
+        state.calls.push(JSON.parse(body || '{}'));
+        return json(state.callReply.status, state.callReply.body);
+      }
+      if (url.pathname === '/read') {
+        state.reads.push(JSON.parse(body || '{}'));
+        return json(state.readReply.status, state.readReply.body);
       }
       if (url.pathname === '/sign-transfer') {
         state.transfers.push(JSON.parse(body || '{}'));
@@ -588,5 +611,215 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
     const missing = await wallet.send({ to: 'nobody.play', amount: '10', intent_id: 'off-4' });
 
     expect(JSON.stringify(outage)).not.toBe(JSON.stringify(missing));
+  });
+});
+
+// §4 / §8.7. THE THREE CALL-OP TOOLS.
+//
+// The fake records what was SENT as well as what it answered, for the reason
+// the file's header gives about transfers: a call that returned the right hash
+// having sent the wrong arguments would pass a test that only read the reply.
+describe('the call op', () => {
+  const CALL = {
+    contract: 'converter',
+    function: 'convert',
+    args: [{ token: 'play' }, { token: 'gold' }, '40'],
+    intent_id: 'c-1',
+  };
+
+  describe('contracts', () => {
+    it('passes the menu through as chain-svc served it', async () => {
+      // NOT RESHAPED HERE. The menu is what the model reads to learn what an
+      // argument takes, and two places deciding its shape is how the tool
+      // description and the server's answer drift apart.
+      fake.menu = {
+        calls: [
+          {
+            contract: 'converter',
+            function: 'convert',
+            read: false,
+            params: [
+              { name: 'source', type: 'address', accepts: 'token' },
+              { name: 'amountIn', type: 'uint256', accepts: 'amount:per-call' },
+            ],
+            maxPerStage: 20,
+          },
+        ],
+      };
+      const { wallet } = walletWith(AGENT_POLICY);
+      expect(await wallet.contracts()).toEqual(fake.menu);
+    });
+
+    it('is not cached: a second call re-reads the file', async () => {
+      // A scenario may rewrite calls.json between turns, and a menu that lagged
+      // it would advertise calls that are no longer permitted - the one
+      // direction that matters, because a persona acts on what the menu says.
+      const { wallet } = walletWith(AGENT_POLICY);
+      fake.menu = { calls: [] };
+      expect(await wallet.contracts()).toEqual({ calls: [] });
+      fake.menu = { calls: [{ contract: 'shop', function: 'buy', read: false, params: [] }] };
+      expect(await wallet.contracts()).toEqual(fake.menu);
+    });
+
+    it('reports an outage as an outage', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      await new Promise<void>((r) => fake.server.close(() => r()));
+      expect(await wallet.contracts()).toEqual({ error: expect.stringContaining('unreachable') });
+    });
+  });
+
+  describe('call', () => {
+    it('sends exactly what the model asked for', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      expect(await wallet.call(CALL)).toEqual({ ok: true, txHash: '0xcall1' });
+      expect(fake.calls).toEqual([
+        {
+          contract: 'converter',
+          function: 'convert',
+          args: [{ token: 'play' }, { token: 'gold' }, '40'],
+          intentId: 'c-1',
+        },
+      ]);
+    });
+
+    it('returns the original hash for a replay, and sends nothing', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      await wallet.call(CALL);
+      expect(await wallet.call(CALL)).toEqual({ ok: true, txHash: '0xcall1' });
+      expect(fake.calls).toHaveLength(1);
+    });
+
+    it('refuses the same intent_id with different arguments', async () => {
+      // The refusal only this side can see. chain-svc refuses it too - this is
+      // the same rule applied earlier, from this side's own record, and both
+      // hash the same wire arguments so the two cannot disagree.
+      const { wallet } = walletWith(AGENT_POLICY);
+      await wallet.call(CALL);
+      const again = await wallet.call({ ...CALL, args: [{ token: 'play' }, { token: 'gold' }, '41'] });
+      expect(again).toMatchObject({ ok: false, reason: 'duplicate_intent' });
+      expect(fake.calls).toHaveLength(1);
+    });
+
+    it('refuses an intent_id already used for a SEND, and says which', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      await wallet.send({ to: 'alpha.play', amount: '10', intent_id: 'shared' });
+      const call = await wallet.call({ ...CALL, intent_id: 'shared' });
+      expect(call).toMatchObject({ ok: false, reason: 'duplicate_intent' });
+      expect((call as { detail?: string }).detail).toContain('send');
+    });
+
+    it('refuses a send under an intent_id already used for a CALL', async () => {
+      // The mirror, and it is not symmetry for its own sake: a call remembered
+      // as a transfer would answer a repeat of the call with duplicate_intent
+      // about a payment nobody made.
+      const { wallet } = walletWith(AGENT_POLICY);
+      await wallet.call({ ...CALL, intent_id: 'shared2' });
+      const send = await wallet.send({ to: 'alpha.play', amount: '10', intent_id: 'shared2' });
+      expect(send).toMatchObject({ ok: false, reason: 'duplicate_intent' });
+      expect((send as { detail?: string }).detail).toContain('call');
+    });
+
+    it('surfaces the four new refusals by name, with their detail', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      for (const [error, detail] of [
+        ['unknown_contract', 'no contract "bazaar" in this deployment'],
+        ['function_not_allowed', 'convert is not callable on converter'],
+        ['bad_args', 'argument 2 (amountIn): expected uint256'],
+      ] as const) {
+        fake.callReply = { status: 400, body: { error, detail } };
+        const out = await wallet.call({ ...CALL, intent_id: `r-${error}` });
+        expect(out).toEqual({ ok: false, reason: error, detail });
+      }
+    });
+
+    it('carries no reason with a revert', async () => {
+      // The CODE crosses to the persona and the REASON does not: a revert
+      // string is the contract's internal state, and the game's machinery is
+      // not a player's to read. chain-svc already withholds it; this asserts
+      // that wallet-mcp does not invent one.
+      const { wallet } = walletWith(AGENT_POLICY);
+      fake.callReply = {
+        status: 409,
+        body: { error: 'revert', detail: 'the call was mined and reverted; nothing changed' },
+      };
+      const out = await wallet.call({ ...CALL, intent_id: 'rev-1' });
+      expect(out).toMatchObject({ ok: false, reason: 'revert' });
+      expect(JSON.stringify(out)).not.toMatch(/pair|paused|insufficient/i);
+    });
+
+    it('withholds a code that is not persona-facing, and logs it', async () => {
+      const { wallet, logs } = walletWith(AGENT_POLICY);
+      fake.callReply = { status: 403, body: { error: 'not_your_wallet', detail: 'belongs to someone else' } };
+      expect(await wallet.call({ ...CALL, intent_id: 'g-1' })).toEqual({ ok: false, reason: 'error' });
+      expect(logs.join('\n')).toContain('not_your_wallet');
+    });
+
+    it('tells the model to retry with the SAME id when the outcome is unknown', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      fake.callReply = { status: 409, body: { error: 'intent_unresolved' } };
+      fake.intentReplies = [{ status: 200, body: { status: 'confirmed', txHash: '0xlate' } }];
+      const out = await wallet.call({ ...CALL, intent_id: 'u-1' });
+      expect(out).toEqual({ ok: true, txHash: '0xlate' });
+      expect(fake.intentQueries).toContain('u-1');
+    });
+
+    it('remembers a reconciled call as a CALL, so a repeat is a replay', async () => {
+      // The shape recorded by the reconcile is what a later repeat is compared
+      // against. Recording it as a transfer would make the repeat a
+      // duplicate_intent about a payment nobody made.
+      const { wallet } = walletWith(AGENT_POLICY);
+      fake.callReply = { status: 409, body: { error: 'intent_unresolved' } };
+      fake.intentReplies = [{ status: 200, body: { status: 'confirmed', txHash: '0xlate' } }];
+      await wallet.call({ ...CALL, intent_id: 'u-2' });
+      expect(await wallet.call({ ...CALL, intent_id: 'u-2' })).toEqual({ ok: true, txHash: '0xlate' });
+    });
+
+    it('refuses its own malformed input before it reaches the wire', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      for (const bad of [
+        { ...CALL, contract: '' },
+        { ...CALL, function: '' },
+        { ...CALL, intent_id: '' },
+        { ...CALL, args: 'not an array' },
+      ]) {
+        expect(await wallet.call(bad)).toMatchObject({ ok: false, reason: 'error' });
+      }
+      expect(fake.calls).toHaveLength(0);
+    });
+  });
+
+  describe('read', () => {
+    it('returns the result and sends no intent id', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      expect(
+        await wallet.read({ contract: 'converter', function: 'quote', args: [{ token: 'play' }] }),
+      ).toEqual({ result: '40' });
+      expect(fake.reads[0]).toEqual({
+        contract: 'converter',
+        function: 'quote',
+        args: [{ token: 'play' }],
+      });
+      expect(fake.reads[0]).not.toHaveProperty('intentId');
+    });
+
+    it('surfaces a refusal by name', async () => {
+      const { wallet } = walletWith(AGENT_POLICY);
+      fake.readReply = { status: 403, body: { error: 'function_not_allowed', detail: 'quote is not readable' } };
+      expect(await wallet.read({ contract: 'converter', function: 'quote', args: [] })).toEqual({
+        error: 'function_not_allowed',
+        detail: 'quote is not readable',
+      });
+    });
+
+    it('records nothing, so a read is free to repeat', async () => {
+      const { wallet, config } = walletWith(AGENT_POLICY);
+      await wallet.read({ contract: 'converter', function: 'quote', args: [] });
+      await wallet.read({ contract: 'converter', function: 'quote', args: [] });
+      expect(fake.reads).toHaveLength(2);
+      // THE LEDGER FILE IS NEVER EVEN CREATED. A stronger statement than "it
+      // holds no intents", and the one that is actually true: a read reserves
+      // nothing, so there is nothing to remember and no write to make.
+      expect(existsSync(config.stateFile)).toBe(false);
+    });
   });
 });

@@ -140,6 +140,74 @@ describe('schema migration', () => {
     expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 
+  // §8.6. v5 -> v6: the call op's storage, and both mechanisms in one step.
+  //
+  // ADDITIVE, NOT NUMBERED, and that distinction is the one increment 2 paid
+  // for: the numbered mechanism exists for RESHAPING a table with a backfill,
+  // and a numbered migration guarded on the VERSION rather than on the schema
+  // fired against a fresh store that never had the old column. Three nullable
+  // columns and a new table are neither a reshape nor a backfill, so they go
+  // through the two mechanisms that were built for them.
+  it('adds the call columns and the call_counts table to a v5 store', () => {
+    const s1 = new Store(dbPath());
+    s1.close();
+    const db = new Database(dbPath());
+    // A store as the PREVIOUS release left it: stamped 5, without any of v6.
+    db.exec('PRAGMA user_version = 5');
+    db.exec('ALTER TABLE intents DROP COLUMN call_contract');
+    db.exec('ALTER TABLE intents DROP COLUMN call_function');
+    db.exec('ALTER TABLE intents DROP COLUMN call_args_hash');
+    db.exec('DROP TABLE call_counts');
+    db.close();
+
+    const s2 = new Store(dbPath());
+    s2.close();
+
+    expect(columns(dbPath(), 'intents')).toContain('call_contract');
+    expect(columns(dbPath(), 'intents')).toContain('call_function');
+    expect(columns(dbPath(), 'intents')).toContain('call_args_hash');
+    expect(columns(dbPath(), 'call_counts').sort()).toEqual([
+      'agent_id',
+      'contract',
+      'count',
+      'function',
+      'stage',
+    ]);
+    expect(userVersion(dbPath())).toBe(6);
+  });
+
+  it('leaves the three new columns NULL on rows that predate them', () => {
+    // A sign-transfer intent has no call, and so does every intent written
+    // before v6. Null is the true value for both, which is why the columns are
+    // nullable with no default: a default would turn "this was not a call" and
+    // "we did not record it" into the same answer.
+    const s1 = new Store(dbPath());
+    s1.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null });
+    s1.close();
+
+    const db = new Database(dbPath());
+    const row = db.query('SELECT call_contract, call_function, call_args_hash FROM intents').get() as
+      | Record<string, unknown>
+      | null;
+    db.close();
+    expect(row).toEqual({ call_contract: null, call_function: null, call_args_hash: null });
+  });
+
+  it('a second boot on a migrated store changes nothing', () => {
+    // The migration is idempotent or it is not a migration: every restart runs
+    // it, and a step that is not a no-op the second time would corrupt on the
+    // first restart rather than on the first upgrade.
+    const s1 = new Store(dbPath());
+    s1.close();
+    const before = [columns(dbPath(), 'intents').sort(), columns(dbPath(), 'call_counts').sort()];
+    const s2 = new Store(dbPath());
+    s2.close();
+    expect([columns(dbPath(), 'intents').sort(), columns(dbPath(), 'call_counts').sort()]).toEqual(
+      before,
+    );
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
+  });
+
   // The rollback direction. An older binary against a newer store must refuse
   // by name rather than discover it at the first unknown column.
   it('refuses a store written by a NEWER binary, naming the cause', () => {
@@ -567,19 +635,25 @@ describe('the v4 -> v5 deployment reshape', () => {
   // written by a build whose deployment row could only ever be one token and
   // one registry, so `vee` is the only key it could have meant. Nothing is
   // invented; the shape is just restated.
-  it('stamps the store at 5, so a second boot does not refuse it as newer', () => {
+  it('stamps the store at the current version, so a second boot does not refuse it', () => {
+    // SCHEMA_VERSION, not a literal. This test is about the RELATIONSHIP
+    // between what a migration stamps and what the binary accepts, and a
+    // literal made it a test about the number instead: it went red on the v6
+    // bump while the property it describes was still true. The literal that
+    // SHOULD stay is the one below, on SCHEMA_VERSION itself - that one is a
+    // tripwire whose whole job is to fire when somebody bumps the version.
     v4Store(dbPath());
 
     const first = new Store(dbPath());
     first.close();
-    expect(userVersion(dbPath())).toBe(5);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
 
     // The refusal this guards against is "written by a NEWER chain-svc": with
-    // SCHEMA_VERSION left at 4, the first boot would stamp 5 and the second
-    // would read 5 > 4 and refuse the store it had just migrated.
+    // SCHEMA_VERSION left behind the migration, the first boot would stamp the
+    // higher number and the second would refuse the store it had just migrated.
     const second = new Store(dbPath());
     second.close();
-    expect(userVersion(dbPath())).toBe(5);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 
   // A MIGRATED STORE AND A FRESH ONE MUST BE THE SAME STORE. Two paths reach
@@ -615,7 +689,12 @@ describe('the v4 -> v5 deployment reshape', () => {
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
     db.close();
 
-    expect(SCHEMA_VERSION).toBe(5);
+    // A TRIPWIRE, deliberately a literal: it exists to fire when somebody
+    // bumps SCHEMA_VERSION, so they come and check that this file's v4 and v5
+    // fixtures still describe the migration they think they do. Bumped to 6 by
+    // the call increment, which added three nullable columns and call_counts -
+    // both additive, so the v4 -> v5 reshape below is untouched.
+    expect(SCHEMA_VERSION).toBe(6);
     expect(() => new Store(dbPath())).toThrow(/newer/i);
   });
 

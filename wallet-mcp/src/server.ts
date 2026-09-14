@@ -108,6 +108,93 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
     );
   }
 
+  // §4. THE GENERIC CALL OP — ALWAYS REGISTERED, unlike the money tools.
+  //
+  // They need no module: an empty allowlist yields an empty menu, and a persona
+  // that asks what it may call and is told "nothing" has learned something
+  // true. A persona whose tool is simply absent has learned nothing, and the
+  // absence is indistinguishable from a deployment where the op does not exist.
+  // EVERY refusal a call can actually produce. over_max_per_tx and
+  // counterparty_denied were missing, and both are reachable: a call whose
+  // amount is in the default token goes through the same enforcePolicy as a
+  // send, with the CONTRACT KEY as the counterparty. A description that omits a
+  // refusal the persona will meet is a description that teaches it to treat
+  // that refusal as an unknown error.
+  const REFUSALS =
+    'Refusals you may see: unknown_contract, function_not_allowed, bad_args, revert, ' +
+    'over_max_per_tx, over_stage_cap, counterparty_denied, frozen, duplicate_intent.';
+
+  server.registerTool(
+    'contracts',
+    {
+      description:
+        'What this wallet may call on chain: contracts, functions, and the shape of their arguments. ' +
+        'Names, never addresses. Read this before calling anything - it is the only place that says ' +
+        'which arguments are names, which are token keys, and which are amounts.',
+      inputSchema: {},
+    },
+    async () => asToolResult(await wallet.contracts()),
+  );
+
+  server.registerTool(
+    'call',
+    {
+      description:
+        'Call a function on a contract, signed with this wallet. Use `contracts` first to see what is ' +
+        'callable and what each argument takes. Money moved by a call is bounded by this wallet\'s ' +
+        `policy exactly as a send is. ${REFUSALS} ` +
+        'Reuse the same intent_id when retrying the SAME call: it will not be made twice.',
+      inputSchema: {
+        contract: z.string().describe('the contract KEY from `contracts`, e.g. "converter" - never an address'),
+        function: z.string().describe('the function name, exactly as `contracts` lists it'),
+        args: z
+          .array(
+            z.union([
+              z.string(),
+              z.boolean(),
+              z.object({ token: z.string() }),
+              z.object({ contract: z.string() }),
+              z.object({ name: z.string() }),
+            ]),
+          )
+          .describe(
+            'the arguments, in the order `contracts` lists them. Numbers and amounts are DECIMAL ' +
+              'STRINGS ("40", not 40). An address argument is never an address: pass {"token":"gold"} ' +
+              'for a token, {"contract":"shop"} for a contract, or {"name":"acme:toby"} for a wallet, ' +
+              'as `contracts` says for that argument.',
+          ),
+        intent_id: z.string().describe('a stable id for this call; retrying with it will not call twice'),
+      },
+    },
+    async (args) => asToolResult(await wallet.call(args)),
+  );
+
+  server.registerTool(
+    'read',
+    {
+      description:
+        'Read a view function on a contract. Free, changes nothing, and safe to call before deciding - ' +
+        'if you are unsure whether a call would work, read first. ' +
+        'Refusals you may see: unknown_contract, function_not_allowed, bad_args, revert.',
+      inputSchema: {
+        contract: z.string().describe('the contract KEY from `contracts`'),
+        function: z.string().describe('the function name, exactly as `contracts` lists it'),
+        args: z
+          .array(
+            z.union([
+              z.string(),
+              z.boolean(),
+              z.object({ token: z.string() }),
+              z.object({ contract: z.string() }),
+              z.object({ name: z.string() }),
+            ]),
+          )
+          .describe('the arguments, in the order `contracts` lists them; [] for a function that takes none'),
+      },
+    },
+    async (args) => asToolResult(await wallet.read(args)),
+  );
+
   return server;
 }
 

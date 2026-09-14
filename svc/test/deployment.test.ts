@@ -355,9 +355,15 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
 
   // Two instances under one key: every later lookup of that key would answer
   // about whichever came first, silently.
+  //
+  // The message says "duplicate key", not "duplicate token key", as of the call
+  // increment: keys are now ONE namespace shared by tokens, custom contracts
+  // and the implicit `names`/`converter`, so naming the kind in the refusal
+  // would describe the entry rather than the collision. Deploy.s.sol refuses
+  // the same manifest with the same words.
   it('refuses a duplicate token key', () => {
     write({ ...GOOD, modules: [TOKEN_ENTRY, { ...TOKEN_ENTRY, address: ADDR_B }] });
-    expect(() => load()).toThrow(/duplicate token key "play"/);
+    expect(() => load()).toThrow(/duplicate key "play"/);
   });
 
   it('refuses a second names module', () => {
@@ -451,5 +457,140 @@ describe('a deployment with a converter module', () => {
     expect(modules.tokens).toHaveLength(1);
     // One read for the token; none for the converter.
     expect(reads).toBe(1);
+  });
+});
+
+// §1.3. THE `contract` MANIFEST KIND, and the one namespace every key shares.
+//
+// #7 taught the DEPLOY to write `{kind:"contract"}`; until this increment
+// chain-svc refused that file outright, because MODULES has no `contract` kind
+// and an unknown kind is an unknown kind. chain-svc being stricter than the
+// deploy is the bad direction of the two - the deploy is what an operator runs,
+// and a service that will not boot against what it wrote is a service that
+// cannot be deployed - so the two halves were deliberately kept in one release.
+describe('a deployment with custom contract entries', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'custom-deploy-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const TREASURY = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
+  const PLAY = '0x5fbdb2315678afecb367f032d93f642f64180aa3';
+  const REGISTRY = '0xe7f1725e7734ce288f8367e1bb143e90bb3f0512';
+  const CONVERTER = '0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0';
+  const SHOP = '0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9';
+
+  const TOKEN_ENTRY = { kind: 'token', key: 'play', contract: 'Token', address: PLAY };
+  const NAMES_ENTRY = { kind: 'names', contract: 'NameRegistry', address: REGISTRY, tld: 'play' };
+  const CONVERTER_ENTRY = { kind: 'converter', contract: 'Converter', address: CONVERTER };
+
+  const write = (modules: Array<Record<string, unknown>>) =>
+    writeFileSync(
+      join(dir, 'local.json'),
+      JSON.stringify({ schema: 1, chainId: 31337, treasury: TREASURY, modules }),
+    );
+
+  it('accepts an entry whose contract is any name the ABI table knows', () => {
+    // The typed kinds keep their rule - a `token` entry must name `Token` - but
+    // a custom entry has no single expected name, which is the whole point of
+    // the kind. What replaces the equality check is the ABI table: a contract
+    // chain-svc cannot encode a call to is not a contract it can register.
+    write([TOKEN_ENTRY, { kind: 'contract', key: 'shop', contract: 'Converter', address: SHOP }]);
+    const d = loadDeployment(dir);
+    expect(d.modules.map((m) => m.kind)).toEqual(['token', 'contract']);
+    expect(d.modules[1]?.key).toBe('shop');
+    expect(d.modules[1]?.contract).toBe('Converter');
+  });
+
+  it('refuses a custom entry whose contract has no ABI, naming the fix', () => {
+    write([TOKEN_ENTRY, { kind: 'contract', key: 'shop', contract: 'Bazaar', address: SHOP }]);
+    expect(() => loadDeployment(dir)).toThrow(/no ABI for contract "Bazaar"/);
+  });
+
+  it('refuses a contract name that is not a Solidity contract name', () => {
+    // Checked as a SHAPE before it is used as a lookup key, because the lookup
+    // is into an object: `constructor`, `__proto__` and `toString` all resolve
+    // on a plain object literal and none of them is a contract.
+    for (const name of ['shop', '', 'toString', 'constructor', '__proto__', 'Sh op']) {
+      write([TOKEN_ENTRY, { kind: 'contract', key: 'shop', contract: name, address: SHOP }]);
+      expect(() => loadDeployment(dir)).toThrow(/contract name/);
+    }
+  });
+
+  it('refuses a custom entry with no key, or a key that is not a manifest key', () => {
+    write([TOKEN_ENTRY, { kind: 'contract', contract: 'Converter', address: SHOP }]);
+    expect(() => loadDeployment(dir)).toThrow(/has a contract module with no key/);
+
+    for (const key of ['Shop', '1shop', 'shop-2', 'averyverylongcontractkey']) {
+      write([TOKEN_ENTRY, { kind: 'contract', key, contract: 'Converter', address: SHOP }]);
+      expect(() => loadDeployment(dir)).toThrow(/key/);
+    }
+  });
+
+  // ONE NAMESPACE. Increment 2 checked token keys against token keys, which was
+  // complete while tokens were the only kind carrying one. A caller of the
+  // generic op passes a key and gets back one contract, so two entries under
+  // one key is not a duplicate row - it is a lookup whose answer depends on
+  // which entry the loop saw last.
+  it('refuses a custom key that collides with a token key', () => {
+    write([TOKEN_ENTRY, { kind: 'contract', key: 'play', contract: 'Converter', address: SHOP }]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "play"/);
+  });
+
+  it('refuses a custom key that collides with the implicit names key', () => {
+    // `names` and `converter` are addressed BY THEIR KIND - the manifest gives
+    // them no key - so those two strings are taken even though no entry spells
+    // them out. A custom contract keyed `names` would shadow the registry.
+    write([NAMES_ENTRY, { kind: 'contract', key: 'names', contract: 'Converter', address: SHOP }]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "names"/);
+  });
+
+  it('refuses a custom key that collides with the implicit converter key', () => {
+    write([CONVERTER_ENTRY, { kind: 'contract', key: 'converter', contract: 'Token', address: SHOP }]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "converter"/);
+  });
+
+  it('refuses a token key that collides with an implicit key, in either order', () => {
+    // The check is on the NAMESPACE, not on "custom entries": a token keyed
+    // `names` breaks the same lookup, and the manifest may declare it first.
+    write([{ ...TOKEN_ENTRY, key: 'names' }, NAMES_ENTRY]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "names"/);
+
+    write([NAMES_ENTRY, { ...TOKEN_ENTRY, key: 'names' }]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "names"/);
+  });
+
+  it('refuses two custom entries under one key', () => {
+    write([
+      { kind: 'contract', key: 'shop', contract: 'Converter', address: SHOP },
+      { kind: 'contract', key: 'shop', contract: 'Token', address: PLAY },
+    ]);
+    expect(() => loadDeployment(dir)).toThrow(/duplicate key "shop"/);
+  });
+
+  it('accepts two instances of one contract under two keys', () => {
+    // The mirror image of the case above, and the reason the check is on the
+    // KEY and not on the contract name: two shops are a reasonable manifest.
+    write([
+      { kind: 'contract', key: 'shop', contract: 'Converter', address: SHOP },
+      { kind: 'contract', key: 'market', contract: 'Converter', address: CONVERTER },
+    ]);
+    expect(loadDeployment(dir).modules).toHaveLength(2);
+  });
+
+  it('builds a registry entry for a custom contract', async () => {
+    write([TOKEN_ENTRY, { kind: 'contract', key: 'shop', contract: 'Converter', address: SHOP }]);
+    const modules = await buildModules(loadDeployment(dir), async () => ({
+      symbol: 'PLAY',
+      decimals: 18,
+    }));
+
+    expect(modules.byKey.get('shop')?.name).toBe('Converter');
+    expect(modules.byKey.get('shop')?.kind).toBe('contract');
+    // Registered, and in no typed slot: `contracts`/`byKey` is the whole of it.
+    expect(modules.tokens).toHaveLength(1);
+    expect(modules.converter).toBeUndefined();
   });
 });

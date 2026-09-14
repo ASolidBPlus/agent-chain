@@ -29,7 +29,7 @@
 // all. It also catches a chain SWAP rather than only a wipe, which a name check
 // could never have reached.
 
-import type { ModuleKind } from './modules.ts';
+import type { ManifestKind } from './modules.ts';
 
 export interface DeploymentIdentity {
   /// A STRING, and the stored column stays TEXT. The value is a chain id and
@@ -43,7 +43,12 @@ export interface DeploymentIdentity {
   /// The treasury is deliberately NOT here. The boot check in chain.ts already
   /// pins it against the mnemonic, and a second copy of a fact is a second
   /// thing that can disagree.
-  modules: Array<{ kind: ModuleKind; key?: string; address: string }>;
+  /// EVERY manifest entry, custom contracts included. A custom contract's
+  /// address is CREATE2-derived like every other, so it changes only when the
+  /// chain was replaced or the manifest was edited - which is exactly what this
+  /// record exists to notice. Leaving them out would let a deployment swap a
+  /// shop under a store full of wallets and say nothing.
+  modules: Array<{ kind: ManifestKind; key?: string; address: string }>;
 }
 
 export class ChainSwapError extends Error {
@@ -54,7 +59,7 @@ export class ChainSwapError extends Error {
   }
 }
 
-const label = (m: { kind: ModuleKind; key?: string }) => (m.key ? `${m.kind}:${m.key}` : m.kind);
+const label = (m: { kind: ManifestKind; key?: string }) => (m.key ? `${m.kind}:${m.key}` : m.kind);
 
 const show = (id: DeploymentIdentity) =>
   `chain ${id.chainId}, ${id.modules.map((m) => `${label(m)} ${m.address}`).join(', ')}`;

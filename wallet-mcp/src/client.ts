@@ -153,4 +153,27 @@ export class ChainSvcClient {
   signTransfer(body: { to: string; vee: string; memo?: string; intentId: string }): Promise<CallResult> {
     return this.call('/sign-transfer', { method: 'POST', body });
   }
+
+  /// §4. The allowlist as THIS wallet may use it - the menu behind the
+  /// `contracts` tool.
+  ///
+  /// NEVER CACHED by its caller, unlike /modules: a deployment's modules cannot
+  /// change under a running service, but a scenario may rewrite calls.json
+  /// between turns and the menu has to reflect it.
+  calls(): Promise<CallResult> {
+    return this.call('/calls');
+  }
+
+  callContract(body: {
+    contract: string;
+    function: string;
+    args: unknown[];
+    intentId: string;
+  }): Promise<CallResult> {
+    return this.call('/call', { method: 'POST', body });
+  }
+
+  readContract(body: { contract: string; function: string; args: unknown[] }): Promise<CallResult> {
+    return this.call('/read', { method: 'POST', body });
+  }
 }

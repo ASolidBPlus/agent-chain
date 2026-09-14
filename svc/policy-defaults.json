@@ -20,6 +20,15 @@
     "normalised; a non-integer number is refused invalid_amount rather than",
     "rounded, because a cap is an amount and silent-wrong on an amount is the one",
     "failure this system is built to remove.",
+    "ALLOW LISTS NOW NAME CONTRACTS AS WELL AS WALLETS. The generic call op",
+    "checks an amount against the same allow/deny lists, with the CONTRACT KEY",
+    "as the counterparty - enforcePolicy is pure string matching, so this works",
+    "mechanically, and the consequence is a standing rule: a kind whose allow",
+    "list is not [\"*\"] must name every contract key its callers may pay",
+    "through. `org` is [\"*\"] and needs nothing; `agent` and `burner` carry",
+    "[\"*.{tld}\"], which no contract key matches, so `converter` is listed",
+    "explicitly. Every future custom-contract key is added the same way, by the",
+    "PR that deploys it.",
     "JSON has no comment syntax, hence this key. It is ignored by the loader."
   ],
   "org": {
@@ -31,13 +40,13 @@
   "agent": {
     "max_per_tx": "100",
     "max_per_stage": "500",
-    "allow": ["*.{tld}"],
+    "allow": ["*.{tld}", "converter"],
     "deny": ["treasury.{tld}"]
   },
   "burner": {
     "max_per_tx": "50",
     "max_per_stage": "200",
-    "allow": ["*.{tld}"],
+    "allow": ["*.{tld}", "converter"],
     "deny": ["treasury.{tld}"]
   }
 }

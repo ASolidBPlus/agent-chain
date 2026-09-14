@@ -10,6 +10,7 @@
 //              events buffer and retry with backoff, are never dropped
 //              silently, and can never take chain-svc down.
 
+import { parseEventLogs, type Abi } from 'viem';
 import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import type { Config } from './config.ts';
@@ -69,7 +70,6 @@ export class EventTail {
     // that polls the first - and a names-less deployment issues no Registered
     // query at all rather than one against the zero address.
     const { tokens, names } = this.chain.modules;
-    const defaultKey = tokens[0]?.key;
 
     const [perToken, registrations] = await Promise.all([
       Promise.all(
@@ -153,40 +153,16 @@ export class EventTail {
         // IntentTransfer from any other instance quoting one of our ids is a
         // foreign token spending against our reservation - the same class as a
         // foreign sender, and detected the same way.
-        isDefaultToken: token.key === defaultKey,
+        // THE EXPECTED EMITTER FOR THIS INTENT, not "is this the default
+        // token". They coincided while every intent was a transfer, and the
+        // call increment separated them: an intent reserved for a CALL expects
+        // its emission from the contract it was reserved for. Computed here
+        // because only this side knows the registry.
+        isExpectedEmitter: this.isExpectedEmitter(args.intentId, token.address),
       });
       if (!anomaly) continue;
 
-      const senders = anomaly.transfers.map((t) => t.from ?? 'unknown').join(', ');
-      this.enqueue('chain.anomaly', {
-        kind: 'chain.anomaly',
-        intentId: args.intentId,
-        agentId: anomaly.agentId,
-        reason: anomaly.reason,
-        // Whether the intent id was the CALLER'S or ours. The spec's question
-        // for a foreign sender is intent-id PREDICTABILITY, and a facilitator
-        // should not need a second lookup to answer it: a model-chosen id being
-        // quoted by a stranger is a guessable id being guessed, and a
-        // chain-svc:<uuid> being quoted is a different story entirely.
-        idSource: anomaly.idSource,
-        transfers: anomaly.transfers,
-        token: token.symbol,
-        detail:
-          anomaly.reason === 'foreign_sender'
-            ? `An IntentTransfer for this wallet's intent id was sent by ${senders}, which is ` +
-              `not the wallet that reserved it. transferWithIntent is permissionless, so this is ` +
-              `somebody spending THEIR OWN funds while quoting our intent id - it says nothing ` +
-              `about this wallet's key, and the reservation is NOT resolved by it. Inspect that ` +
-              `sender. The id was ${anomaly.idSource ?? 'of unrecorded origin'}` +
-              (anomaly.idSource === 'caller'
-                ? ', so it was chosen by the caller and may be guessable - that is the question to ask.'
-                : ', so it was generated here and is not guessable, which makes how they learned it the question.')
-            : `${anomaly.emissions} IntentTransfer events for one intent id. chain-svc broadcasts ` +
-              `at most once per reservation, so this means the reservation was bypassed - most ` +
-              `likely a second chain-svc with a separate store writing to this chain, or an ` +
-              `out-of-band transfer reusing the id. The money moved; freeze the named wallet and ` +
-              `inspect the other sender. Senders: ${senders}.`,
-      });
+      this.enqueueAnomaly(args.intentId, anomaly, token.symbol);
       enqueued++;
     }
     }
@@ -204,11 +180,203 @@ export class EventTail {
       enqueued++;
     }
 
+    enqueued += await this.pollGenericEvents(from, latest);
+
     // The cursor advances only after the events are in the outbox, so a crash
     // mid-poll re-reads the range rather than skipping it. That can duplicate
     // an event; losing one is worse, because the outcome feed is the record
     // nobody can lie to.
     this.store.setCursor(CURSOR, latest);
+    return enqueued;
+  }
+
+  /// One anomaly payload, emitted by BOTH feeders.
+  ///
+  /// Extracted when the generic pass became the second one: the detector's
+  /// findings are read by an operator, and two call sites writing the payload
+  /// would drift in exactly the field somebody is looking for. `label` is the
+  /// token's symbol for a transfer and the contract's key for a call - what the
+  /// reader would name the emitter.
+  private enqueueAnomaly(
+    intentId: string,
+    anomaly: {
+      reason: string;
+      agentId: string;
+      idSource: string | null;
+      emissions: number;
+      transfers: Array<{ txHash: string; from: string | null }>;
+    },
+    label: string,
+  ): void {
+      const senders = anomaly.transfers.map((t) => t.from ?? 'unknown').join(', ');
+      this.enqueue('chain.anomaly', {
+        kind: 'chain.anomaly',
+        intentId,
+        agentId: anomaly.agentId,
+        reason: anomaly.reason,
+        // Whether the intent id was the CALLER'S or ours. The spec's question
+        // for a foreign sender is intent-id PREDICTABILITY, and a facilitator
+        // should not need a second lookup to answer it: a model-chosen id being
+        // quoted by a stranger is a guessable id being guessed, and a
+        // chain-svc:<uuid> being quoted is a different story entirely.
+        idSource: anomaly.idSource,
+        transfers: anomaly.transfers,
+        token: label,
+        detail:
+          anomaly.reason === 'foreign_sender'
+            ? `An IntentTransfer for this wallet's intent id was sent by ${senders}, which is ` +
+              `not the wallet that reserved it. transferWithIntent is permissionless, so this is ` +
+              `somebody spending THEIR OWN funds while quoting our intent id - it says nothing ` +
+              `about this wallet's key, and the reservation is NOT resolved by it. Inspect that ` +
+              `sender. The id was ${anomaly.idSource ?? 'of unrecorded origin'}` +
+              (anomaly.idSource === 'caller'
+                ? ', so it was chosen by the caller and may be guessable - that is the question to ask.'
+                : ', so it was generated here and is not guessable, which makes how they learned it the question.')
+            : `${anomaly.emissions} IntentTransfer events for one intent id. chain-svc broadcasts ` +
+              `at most once per reservation, so this means the reservation was bypassed - most ` +
+              `likely a second chain-svc with a separate store writing to this chain, or an ` +
+              `out-of-band transfer reusing the id. The money moved; freeze the named wallet and ` +
+              `inspect the other sender. Senders: ${senders}.`,
+      });
+  }
+
+  /// §5. Is this log's emitter the contract the intent was issued for?
+  ///
+  /// For a CALL intent it is the contract the allowlist entry named; for a
+  /// transfer or fund intent it is the default token - which is exactly what
+  /// `isDefaultToken` computed, so every existing case answers the same. An
+  /// intent this store never reserved answers `true`, because `recordEmission`
+  /// returns null for it before the flag is ever read, and answering `false`
+  /// here would state something untrue about a topic we know nothing about.
+  private isExpectedEmitter(topic: string, emitter: string): boolean {
+    const key = this.store.callContractForTopic(topic);
+    const expected =
+      key === null
+        ? this.chain.modules.tokens[0]?.address
+        : this.chain.modules.byKey.get(key)?.address;
+    if (expected === undefined) return true;
+    return emitter.toLowerCase() === expected.toLowerCase();
+  }
+
+  /// §5. EVERY event of EVERY registered contract, decoded generically.
+  ///
+  /// One `getLogs` over all registered addresses, then `parseEventLogs` per
+  /// contract with that contract's ABI. The named passes above stay: they carry
+  /// the shapes the game already reads - amounts formatted at the token's
+  /// decimals, the anomaly detector's joins - and re-deriving those from a
+  /// generic decode would be a second implementation of the same thing.
+  ///
+  /// SO THE TWO OVERLAP, and the overlap is removed by (address, eventName):
+  /// `Transfer` and `IntentTransfer` on a token, `Registered` on the registry.
+  /// Removed by ADDRESS as well as name, not by name alone - a custom contract
+  /// is perfectly entitled to declare its own `Transfer`, and filtering by name
+  /// would silently swallow it.
+  ///
+  /// UNDECODABLE LOGS ARE FOUND BY DIFFERENCE, because `parseEventLogs` DROPS
+  /// a log that matches no event in the ABI it was given - measured - rather
+  /// than reporting it. Dropping is right for "this log belongs to another
+  /// contract" and wrong for "this contract emitted something its ABI does not
+  /// declare", and only a diff can tell those apart. So every decoded log is
+  /// marked by (txHash, logIndex) and whatever is left over is reported with
+  /// its raw topics: a contract emitting something nobody can read is a fact a
+  /// operator should see, not a silence.
+  private async pollGenericEvents(from: bigint, latest: bigint): Promise<number> {
+    const registered = this.chain.modules.contracts;
+    if (registered.length === 0) return 0;
+
+    const logs = await this.chain.publicClient.getLogs({
+      address: registered.map((c) => c.address),
+      fromBlock: from,
+      toBlock: latest,
+    });
+    if (logs.length === 0) return 0;
+
+    /// What the named passes above already enqueued, by (address, event).
+    const alreadyNamed = new Set<string>();
+    for (const token of this.chain.modules.tokens) {
+      alreadyNamed.add(`${token.address.toLowerCase()}:Transfer`);
+      alreadyNamed.add(`${token.address.toLowerCase()}:IntentTransfer`);
+    }
+    if (this.chain.modules.names) {
+      alreadyNamed.add(`${this.chain.modules.names.address.toLowerCase()}:Registered`);
+    }
+
+    const seen = new Set<string>();
+    const id = (log: { transactionHash?: string | null; logIndex?: number | null }) =>
+      `${log.transactionHash ?? ''}:${log.logIndex ?? -1}`;
+    let enqueued = 0;
+
+    for (const contract of registered) {
+      const mine = logs.filter((l) => l.address.toLowerCase() === contract.address.toLowerCase());
+      if (mine.length === 0) continue;
+      const decoded = parseEventLogs({ abi: contract.abi as Abi, logs: mine });
+
+      for (const log of decoded) {
+        seen.add(id(log));
+        if (alreadyNamed.has(`${contract.address.toLowerCase()}:${log.eventName}`)) continue;
+
+        const args = (log.args ?? {}) as Record<string, unknown>;
+        this.enqueue('chain.event', {
+          kind: 'chain.event',
+          contract: contract.key,
+          event: log.eventName,
+          // Stringified, because a bigint has no JSON form and the outbox is
+          // JSON. Every other lossy type survives round-tripping as itself.
+          args: Object.fromEntries(
+            Object.entries(args).map(([k, v]) => [k, typeof v === 'bigint' ? v.toString() : v]),
+          ),
+          txHash: log.transactionHash,
+          blockNumber: String(log.blockNumber ?? 0n),
+        });
+        enqueued++;
+
+        // §5. THE ANOMALY DETECTOR GAINS A SECOND FEEDER. Any decoded event
+        // carrying a bytes32 named `intentId` - the Converter's `Converted`,
+        // and anything else that follows the convention - is recorded exactly
+        // as an IntentTransfer is, so a call's on-chain proof resolves its
+        // intent and a foreign emission under its id is still caught.
+        const intentId = args.intentId;
+        if (typeof intentId === 'string' && log.transactionHash) {
+          const anomaly = this.store.recordEmission({
+            topic: intentId,
+            txHash: log.transactionHash,
+            // The event convention carries no sender field, and inventing one
+            // from the transaction would be a different fact: `from` here means
+            // "the address the CONTRACT named", and this one named none.
+            from: null,
+            isExpectedEmitter: this.isExpectedEmitter(intentId, contract.address),
+          });
+          // RAISED, not merely recorded. Discarding this return was the defect
+          // a test caught: the detector wrote its row, the operator heard
+          // nothing, and the feed said the call was ordinary.
+          if (anomaly) {
+            this.enqueueAnomaly(intentId, anomaly, contract.key);
+            enqueued++;
+          }
+        }
+      }
+    }
+
+    for (const log of logs) {
+      if (seen.has(id(log))) continue;
+      const contract = registered.find(
+        (c) => c.address.toLowerCase() === log.address.toLowerCase(),
+      );
+      this.enqueue('chain.event', {
+        kind: 'chain.event',
+        contract: contract?.key ?? null,
+        // NULL, not omitted: "this contract emitted something its own ABI does
+        // not declare" is the fact, and a missing field would read as a decode
+        // nobody attempted.
+        event: null,
+        topics: log.topics,
+        data: log.data,
+        txHash: log.transactionHash,
+        blockNumber: String(log.blockNumber ?? 0n),
+      });
+      enqueued++;
+    }
+
     return enqueued;
   }
 

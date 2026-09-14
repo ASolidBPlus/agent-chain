@@ -1,5 +1,6 @@
-import type { Address } from 'viem';
+import type { Abi, Address } from 'viem';
 import type { Deployment } from './chain.ts';
+import { ABIS } from './abi.ts';
 import { HttpError } from './errors.ts';
 
 /// The deployable modules, and the contract each one deploys.
@@ -15,6 +16,21 @@ export const MODULES = {
 } as const;
 
 export type ModuleKind = keyof typeof MODULES;
+
+/// Every kind a manifest entry may declare.
+///
+/// `contract` is NOT in MODULES and that is the point: MODULES maps a kind to
+/// THE contract that kind deploys, and a custom entry names its own. So the two
+/// are different questions - "which kinds exist" and "which kinds have a fixed
+/// contract" - and this type is the first, which until now they shared.
+export type ManifestKind = ModuleKind | 'contract';
+
+/// A contract name, as `forge build` and the ABI table spell it.
+export const CONTRACT_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
+/// The manifest's own key shape: lower-case, short, and stable. Shared by token
+/// and contract entries, and matched by the implicit keys `names`/`converter`.
+export const MANIFEST_KEY = /^[a-z][a-z0-9]{0,15}$/;
 
 export interface TokenModule {
   key: string;
@@ -40,6 +56,21 @@ export interface ConverterModule {
   address: Address;
 }
 
+/// One deployed contract, as the generic call op sees it: a key to name it, an
+/// address to send to, and the ABI to encode with. What KIND it is survives
+/// only so `/modules` and the boot line can say so - the call op never branches
+/// on it, which is what makes a new on-chain feature a contract, a manifest
+/// entry and a policy entry rather than chain-svc code.
+export interface RegisteredContract {
+  key: string;
+  kind: ManifestKind;
+  /// The Solidity contract name, and the key into the ABI table. `Shop` is the
+  /// class; `shop` is this instance of it.
+  name: string;
+  address: Address;
+  abi: Abi;
+}
+
 export interface Modules {
   /// In manifest order, so `tokens[0]` is the default token - the one every
   /// money endpoint, message and wallet-mcp tool operates on. Empty on a
@@ -47,6 +78,13 @@ export interface Modules {
   tokens: TokenModule[];
   names?: NamesModule;
   converter?: ConverterModule;
+  /// EVERY entry of EVERY kind, in manifest order, and the same objects are in
+  /// `byKey`. Not "the custom ones": a caller asking to call `converter` uses
+  /// the same op and the same lookup as one calling `shop`, and a flat view
+  /// that held only the new kind would need a second lookup path for the old
+  /// ones - which is the branching this view exists to delete.
+  contracts: RegisteredContract[];
+  byKey: Map<string, RegisteredContract>;
 }
 
 /// The default token, or a refusal naming the reason.
@@ -67,6 +105,19 @@ export function requireNames(m: Modules): NamesModule {
   return m.names;
 }
 
+/// The contract behind a key, or a refusal a persona may see.
+///
+/// `unknown_contract` rather than `module_not_deployed`: the two say different
+/// things and only one of them is the caller's business. `module_not_deployed`
+/// is withheld from personas because it describes the deployment's SHAPE - what
+/// the operator chose to run - whereas which keys exist is the registry, which
+/// the `contracts` tool lists in full to anyone who asks.
+export function requireContract(m: Modules, key: string): RegisteredContract {
+  const found = m.byKey.get(key);
+  if (!found) throw new HttpError('unknown_contract', `no contract "${key}" in this deployment`);
+  return found;
+}
+
 /// Builds the live view of a deployment: every token's symbol and decimals read
 /// FROM THE CHAIN, in manifest order.
 ///
@@ -85,13 +136,48 @@ export function requireNames(m: Modules): NamesModule {
 ///     it, but the manifest is a request and the chain is the answer: the
 ///     contract's symbol is what a persona sees in a refusal and in history, so
 ///     two instances sharing one is two different moneys with one name.
+/// The ABI table is a PARAMETER for the same reason `read` is. `ABIS` is
+/// generated from a forge build, so a test that wanted to exercise a custom
+/// contract entry would otherwise have to add a real contract to src/ and build
+/// it - which would make this a test of the build rather than of the registry.
 export async function buildModules(
   deployment: Deployment,
   read: (address: Address) => Promise<{ symbol: string; decimals: number }>,
+  abis: Record<string, Abi> = ABIS,
 ): Promise<Modules> {
   const tokens: TokenModule[] = [];
   let names: NamesModule | undefined;
   let converter: ConverterModule | undefined;
+  const contracts: RegisteredContract[] = [];
+  const byKey = new Map<string, RegisteredContract>();
+
+  /// The key a caller addresses this entry by. Tokens and custom contracts
+  /// carry their own; the singletons are addressed by their kind, because that
+  /// is what the manifest writes for them - it gives them no key at all.
+  const keyFor = (m: (typeof deployment.modules)[number]): string => m.key ?? m.kind;
+
+  for (const m of deployment.modules) {
+    const abi = abis[m.contract];
+    if (!abi) {
+      // A deployment can outlive the ABI file: add a contract, deploy it, do
+      // not regenerate. Booting anyway moves the failure to the first call to
+      // that contract - at request time, inside viem's encoder, in front of a
+      // persona - instead of at boot in front of the operator who deployed it.
+      throw new Error(
+        `chain-svc: no ABI for contract "${m.contract}"; regenerate abi.ts ` +
+          `(cd svc && bun run scripts/generate-abi.ts)`,
+      );
+    }
+    const registered: RegisteredContract = {
+      key: keyFor(m),
+      kind: m.kind,
+      name: m.contract,
+      address: m.address,
+      abi,
+    };
+    contracts.push(registered);
+    byKey.set(registered.key, registered);
+  }
 
   for (const m of deployment.modules) {
     if (m.kind === 'token') {
@@ -114,8 +200,13 @@ export async function buildModules(
     } else if (m.kind === 'names') {
       names = { address: m.address, tld: m.tld as string };
     } else if (m.kind === 'converter') {
-      // Address only, no chain read: nothing is callable through chain-svc yet.
+      // Address only, no chain read: its pairs live on the contract, and what
+      // is callable on it is the allowlist's business, not the registry's.
       converter = { address: m.address };
+    } else if (m.kind === 'contract') {
+      // NO TYPED SLOT, and none is missing. A custom contract is reached
+      // through `byKey` alone - that is what "no chain-svc code per feature"
+      // means - so the flat view above is the whole of its registration.
     }
     // No else: a kind this build does not know is refused by loadDeployment
     // before it reaches here. It is NOT silently folded into `names`, which is
@@ -123,7 +214,7 @@ export async function buildModules(
 
   }
 
-  return { tokens, names, converter };
+  return { tokens, names, converter, contracts, byKey };
 }
 
 /// The boot line's module summary: `token:play(PLAY, 18 dp)@0x…, names(.play)@0x…`.

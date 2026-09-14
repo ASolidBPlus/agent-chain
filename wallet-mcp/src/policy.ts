@@ -36,7 +36,27 @@ export type Refusal =
   /// telling it is the difference between a model that corrects itself and one
   /// that retries the same bad string against an opaque "error".
   | 'invalid_name'
-  | 'invalid_amount';
+  | 'invalid_amount'
+  /// No contract with that key in this deployment. A fact about the PUBLIC
+  /// registry, like `unknown_name`: the `contracts` tool lists exactly what
+  /// exists, so refusing to say which keys are real would only make a persona
+  /// guess at a menu it can already read.
+  | 'unknown_contract'
+  /// This wallet may not call that function on that contract. ONE REASON FOR
+  /// BOTH CAUSES - no allowlist entry at all, and an entry that does not
+  /// include this wallet's kind - deliberately: distinguishing them would tell
+  /// a persona what OTHER kinds of wallet are permitted to do.
+  | 'function_not_allowed'
+  /// The arguments did not match the function's ABI, with the index and the
+  /// expected type. A fact about what the persona just typed, like
+  /// `invalid_amount`, and the detail is what lets a model fix its own call
+  /// instead of retrying the same one.
+  | 'bad_args'
+  /// The call was mined and the contract reverted. The persona must know its
+  /// call did nothing, or it will assume success and act on it; the REASON is
+  /// withheld, because a revert string is the contract's internal state and
+  /// says more about the game's machinery than a player should read.
+  | 'revert';
 
 export interface WalletPolicy {
   agentId: string;

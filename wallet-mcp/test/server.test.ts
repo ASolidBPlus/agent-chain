@@ -49,20 +49,40 @@ const NEITHER = modules({});
 describe('tools advertised by deployed module', () => {
   const names = async (m: ModulesReply): Promise<string[]> => (await advertised(m)).map((t) => t.name).sort();
 
-  it('advertises whoami only when there is no token and no names', async () => {
-    expect(await names(NEITHER)).toEqual(['whoami']);
+  /// The three call-op tools are registered on EVERY deployment (§4), so they
+  /// appear in every expectation below rather than in a condition.
+  ///
+  /// UNCONDITIONAL BECAUSE THEY NEED NO MODULE: an empty allowlist yields an
+  /// empty menu, and a persona told "nothing is callable" has learned something
+  /// true, where a persona whose tool is absent has learned nothing - and the
+  /// absence is indistinguishable from a deployment where the op does not
+  /// exist. That is the opposite of the money tools, which are hidden precisely
+  /// so `module_not_deployed` stays unreachable.
+  const CALL_OP = ['call', 'contracts', 'read'];
+  const withCallOp = (...tools: string[]) => [...tools, ...CALL_OP].sort();
+
+  it('advertises whoami and the call op only, when there is no token and no names', async () => {
+    expect(await names(NEITHER)).toEqual(withCallOp('whoami'));
   });
 
   it('adds balance, history and send when a default token exists', async () => {
-    expect(await names(TOKEN_ONLY)).toEqual(['balance', 'history', 'send', 'whoami']);
+    expect(await names(TOKEN_ONLY)).toEqual(withCallOp('balance', 'history', 'send', 'whoami'));
   });
 
   it('adds resolve when a names module exists', async () => {
-    expect(await names(NAMES_ONLY)).toEqual(['resolve', 'whoami']);
+    expect(await names(NAMES_ONLY)).toEqual(withCallOp('resolve', 'whoami'));
   });
 
-  it('advertises all five when both modules are deployed', async () => {
-    expect(await names(BOTH)).toEqual(['balance', 'history', 'resolve', 'send', 'whoami']);
+  it('advertises all five module tools when both modules are deployed', async () => {
+    expect(await names(BOTH)).toEqual(
+      withCallOp('balance', 'history', 'resolve', 'send', 'whoami'),
+    );
+  });
+
+  it('advertises the call op on a deployment with no modules at all', async () => {
+    // Stated on its own as well as inside the four above, because it is the
+    // property that distinguishes these tools from every other one here.
+    expect(await names(NEITHER)).toEqual(expect.arrayContaining(CALL_OP));
   });
 
   it('carries the default token symbol in the money-tool descriptions', async () => {

@@ -20,6 +20,7 @@ import type { Config } from '../src/config.ts';
 import type { Chain } from '../src/chain.ts';
 import type { Keystore } from '../src/keystore.ts';
 import type { Resolver } from '../src/resolver.ts';
+import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
@@ -76,6 +77,7 @@ function treasury(store = new Store(':memory:')): Treasury {
     store,
     exploding('resolver') as Resolver,
     DEFAULTS,
+    closedCallPolicy(),
   );
 }
 
@@ -373,7 +375,12 @@ describe('policy defaults', () => {
     const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
 
     expect(defaults.agent.deny).toEqual([]);
-    expect(defaults.agent.allow).toEqual([]);
+    // `converter` SURVIVES and `*.{tld}` does not, which is the rule working
+    // rather than an exception to it: the patterns that drop are the ones that
+    // name a TLD, and a CONTRACT KEY names none. A deployment with no names
+    // module still has contracts, and an agent may still pay through them -
+    // it just cannot pay anyone by name.
+    expect(defaults.agent.allow).toEqual(['converter']);
     // `*` names no TLD, so it survives: the org default still allows anything.
     expect(defaults.org.allow).toEqual(['*']);
     expect(defaults.org.deny).toEqual([]);
@@ -502,6 +509,7 @@ describe('the reservation records a sound lower bound', () => {
       store,
       { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' })) } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
 
     await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'bounded' }).catch(() => undefined);
@@ -579,6 +587,7 @@ describe('the release rule', () => {
         store,
         { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
         DEFAULTS,
+        closedCallPolicy(),
       );
     // NOT treasury.play: that is on the default deny list, so the policy check
     // refuses first and the replay path is never reached - which is the correct
@@ -619,13 +628,37 @@ describe('the release rule', () => {
 
   // Structural, and deliberately so: the review warning was that a SECOND
   // catch reasoning about release is the tell. A behavioural test cannot see a
-  // release path that has not been written yet, so this asserts the shape - one
-  // call, in the pre-broadcast branch.
-  it('has exactly one release call in the whole of treasury.ts', async () => {
+  // release path that has not been written yet, so this asserts the SHAPE.
+  //
+  // IT USED TO ASSERT "exactly one", which was the same statement while
+  // signTransfer was the only thing that reserved. The call op reserves too, so
+  // a count is now a proxy for the property rather than the property - and a
+  // proxy that goes red for a legitimate second site teaches whoever meets it
+  // to raise the number, which is how a guard becomes a formality.
+  //
+  // THE PROPERTY IS: every release sits in a branch that PROVABLY PRECEDES THE
+  // BROADCAST. So each site is located, and the nearest marker comment above it
+  // must be the "before" one. That generalises to a third caller and stays a
+  // statement about the rule rather than about the file's size.
+  it('releases only in branches that provably precede the broadcast', async () => {
     const src = await Bun.file(join(PKG, 'src/treasury.ts')).text();
-    expect(src.match(/\.release\(/g) ?? []).toHaveLength(1);
-    // ...and it is not in the tail that runs after the transaction is on the wire.
-    expect(src.slice(src.indexOf('AT OR AFTER THE BROADCAST'))).not.toContain('.release(');
+    const BEFORE = 'PROVABLY BEFORE THE BROADCAST';
+    const AFTER = 'AT OR AFTER THE BROADCAST';
+
+    const sites: number[] = [];
+    for (let i = src.indexOf('.release('); i !== -1; i = src.indexOf('.release(', i + 1)) {
+      sites.push(i);
+    }
+    // Not zero: a guard that passes when the thing it guards has been deleted
+    // is the empty-set failure this codebase has already paid for three times.
+    expect(sites.length).toBeGreaterThan(0);
+
+    for (const at of sites) {
+      const before = src.lastIndexOf(BEFORE, at);
+      const after = src.lastIndexOf(AFTER, at);
+      expect(before).toBeGreaterThan(-1);
+      expect(before).toBeGreaterThan(after);
+    }
   });
 });
 
@@ -640,6 +673,7 @@ describe('a missing intent id is visible, not silent', () => {
     new Store(':memory:'),
     { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
     DEFAULTS,
+    closedCallPolicy(),
   );
 
   it('warns, naming the generated id and what was lost', async () => {
@@ -716,6 +750,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       new Store(':memory:'),
       { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
   }
 
@@ -734,6 +769,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       new Store(':memory:'),
       { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical })) } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
   }
 
@@ -783,6 +819,7 @@ describe('concurrent signTransfer against a stage cap', () => {
           n.includes(':') ? null : { address: addressOf(n), canonical: 'orch:someone' },
       } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
   }
 
@@ -849,6 +886,7 @@ describe('concurrent signTransfer against a stage cap', () => {
         },
       } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
   }
 
@@ -1041,6 +1079,7 @@ describe('POST /wallets/:agentId/balance', () => {
       store,
       { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: WALLET, canonical: 'orch:a' })) } as unknown as Resolver,
       DEFAULTS,
+      closedCallPolicy(),
     );
     t.balance = balance;
     return { t, store };
