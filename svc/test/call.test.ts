@@ -247,6 +247,11 @@ async function harness(
 
   const chain = {
     modules: await modules(),
+    // The sweep half of set-balance reads the treasury address from here. A
+    // fixture without it throws a TypeError inside sweepToTreasury's try, which
+    // asChainError then dresses up as a chain failure - the error reads as "the
+    // node is broken" about a stub that simply lacks a field.
+    deployment: { chainId: 31337, treasury: PLAY },
     viemChain: { id: 31337 },
     publicClient: {
       waitForTransactionReceipt: async () => ({ status: opts.reverted ? 'reverted' : 'success' }),
@@ -1078,6 +1083,27 @@ describe('a transfer in a second token', () => {
     expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
   });
 
+  it('emits agent.spend at THAT token\'s scale, and names it', async () => {
+    // FOUND BY A TIP FROM THE WALLET-MCP LANE, which hit the same shape in its
+    // own reconcile: a site that takes a SYMBOL or DECIMALS rather than the
+    // resolved token. This one formatted every spend at the DEFAULT token's
+    // decimals and carried no token field at all - so a 3 GOLD transfer reached
+    // the feed as "0.000000000003" of an unnamed currency, while the transfer
+    // itself was entirely correct and every assertion about it passed.
+    //
+    // The event was the only thing wrong, which is why nothing caught it: the
+    // money moved right and the RECORD of it did not.
+    const { t, store } = await harness();
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '3', token: 'gold', intentId: 'e-1' });
+
+    const spend = store
+      .dueEvents(10)
+      .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'agent.spend')!;
+    expect(spend.amount).toBe('3');
+    expect(spend.token).toBe('GOLD');
+  });
+
   it('accepts the SYMBOL as well as the key', async () => {
     const { t } = await harness();
     await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', token: 'GOLD', intentId: 'g-2' });
@@ -1124,6 +1150,30 @@ describe('fund and set-balance, per token', () => {
       await codeOf(() => t.fund({ to: 'bob.play', amount: '1', token: 'silver', intentId: 'f-3' })),
     ).toBe('unknown_token');
     expect(written).toEqual([]);
+  });
+
+  it('SWEEPS the named token too, not the default one', async () => {
+    // The other half of set-balance, and the same shape one branch over: a GOLD
+    // set-balance that needs to sweep would take PLAY out of the wallet,
+    // leaving the gold balance exactly as it was while the reply reported a
+    // number nobody moved. The fixture's balances make the sweep the branch
+    // taken.
+    //
+    // The fixture's `balanceOf` answers 40 wei, which at GOLD's 6 decimals is
+    // 0.00004 - so a target of 0.00001 is BELOW it and the sweep is the branch
+    // taken. Stated rather than left to the reader, because a target above it
+    // would exercise the FUNDING branch and this test would assert nothing
+    // about sweeping at all.
+    const { t } = await harness();
+    // The tail of the sweep needs more of a chain than this fixture has, and
+    // that is fine: the contract addressed is RECORDED AT PREPARE, before
+    // anything that could fail, so the assertion holds either way. Catching
+    // rather than asserting no-throw keeps the test about the token and not
+    // about how complete the stub is.
+    await t.setBalance('orch:a', { amount: '0.00001', token: 'gold', intentId: 'sw-1' }).catch(() => undefined);
+    // The SIGNED transaction is the assertion here, because a sweep is signed
+    // with the wallet's own key rather than written by the treasury.
+    expect(t.signed[0]!.to).toBe(GOLD);
   });
 
   it('sets the balance of the NAMED token, measuring and moving the same one', async () => {

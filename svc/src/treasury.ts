@@ -470,7 +470,7 @@ export class Treasury {
             reason,
             intentId,
           })
-        : await this.sweepToTreasury(agentId, current - target, reason, intentId);
+        : await this.sweepToTreasury(agentId, current - target, reason, intentId, tok);
 
     this.store.completeIntent(intentId, result.txHash);
 
@@ -517,6 +517,12 @@ export class Treasury {
     amount: bigint,
     reason: string | null,
     intentId: string,
+    /// THE RESOLVED TOKEN to sweep. Passed rather than defaulted, because
+    /// `set-balance` names its token and the sweep is the OTHER half of the
+    /// same operation: a GOLD set-balance that needs to sweep would otherwise
+    /// take PLAY out of the wallet, leaving the gold balance exactly as it was
+    /// and the reply reporting a number nobody moved.
+    token: TokenModule,
   ): Promise<{ txHash: string }> {
     const { privateKey } = await this.keystore.load(agentId);
     const account = privateKeyToAccount(privateKey);
@@ -534,7 +540,7 @@ export class Treasury {
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: defaultToken(this.chain.modules).address,
+        to: token.address,
         data,
         ...ZERO_FEES,
       });
@@ -864,6 +870,7 @@ export class Treasury {
       fromAgentId,
       to: name,
       amount,
+      token: tok,
       via: spendVia(clientMarker),
       memo: body.memo,
     });
@@ -898,6 +905,12 @@ export class Treasury {
     fromAgentId: string;
     to: string;
     amount: bigint;
+    /// THE RESOLVED TOKEN, not its symbol and not its decimals. Passing either
+    /// alone is the shape that put a GOLD amount through PLAY's scale here: the
+    /// event reported a second-currency spend as a near-zero number of an
+    /// unnamed currency, and every assertion about the transfer still passed
+    /// because the transfer was correct. The event was the only thing wrong.
+    token: TokenModule;
     via: string;
     memo: unknown;
   }): Promise<{ txHash: string }> {
@@ -934,7 +947,14 @@ export class Treasury {
         kind: 'agent.spend',
         name: args.fromAgentId,
         to: args.to,
-        vee: formatVee(args.amount, defaultToken(this.chain.modules).decimals),
+        // AT THE TOKEN'S OWN SCALE, AND NAMED. Both from the resolved token
+        // this transfer was made in - formatting at the default token's
+        // decimals reported 5 GOLD as 0.000000000005, and the reader had no
+        // field telling it which currency it was looking at either.
+        amount: formatVee(args.amount, args.token.decimals),
+        token: args.token.symbol,
+        // The old field beside the new one until v0.6.0, as everywhere else.
+        vee: formatVee(args.amount, args.token.decimals),
         intent_id: args.intentId,
         via: args.via,
         txHash: hash,
