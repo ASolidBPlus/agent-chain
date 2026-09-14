@@ -300,7 +300,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury(store);
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', vee: 1 })),
+      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', amount: 1 })),
     ).toBe('wallet_frozen');
     store.close();
   });
@@ -308,7 +308,7 @@ describe('POST /sign-transfer validation', () => {
   it('refuses a two-colon destination', async () => {
     const t = treasury();
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'orch:pod1:alice', vee: 1 })),
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'orch:pod1:alice', amount: 1 })),
     ).toBe('invalid_name');
   });
 
@@ -318,7 +318,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury();
     expect(
       await codeOf(() =>
-        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.play', vee: 1 }),
+        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.play', amount: 1 }),
       ),
     ).toBe('principal_mismatch');
   });
@@ -326,7 +326,7 @@ describe('POST /sign-transfer validation', () => {
   it('refuses the platform credential outright - it has no wallet identity', async () => {
     const t = treasury();
     expect(
-      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.play', vee: 1 })),
+      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.play', amount: 1 })),
     ).toBe('wrong_scope');
   });
 });
@@ -526,7 +526,7 @@ describe('the reservation records a sound lower bound', () => {
       closedCallPolicy(),
     );
 
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'bounded' }).catch(() => undefined);
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'bounded' }).catch(() => undefined);
 
     const row = store.unresolvedIntents().find((r) => r.intentId === 'bounded');
     expect(row?.reservedAtBlock).toBe(10n); // the observed head, not the cursor's 3
@@ -606,7 +606,9 @@ describe('the release rule', () => {
     // NOT treasury.play: that is on the default deny list, so the policy check
     // refuses first and the replay path is never reached - which is the correct
     // ordering, and made this fixture test the wrong thing until it was fixed.
-    const send = { fromAgentId: 'orch:a', to: 'bob.play', vee: '1', intentId: 'replay' };
+    // `amount`, not `vee`: the alias is a WIRE concern that readBody applies,
+    // and a direct method call is not the wire.
+    const send = { fromAgentId: 'orch:a', to: 'bob.play', amount: '1', intentId: 'replay' };
     const seed = (store: Store) => {
       const stage = store.currentStage();
       store.reserve({ token: 'play', intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
@@ -695,7 +697,7 @@ describe('a missing intent id is visible, not silent', () => {
     const real = console.warn;
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
-      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1' }).catch(() => undefined);
+      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1' }).catch(() => undefined);
     } finally {
       console.warn = real;
     }
@@ -712,7 +714,7 @@ describe('a missing intent id is visible, not silent', () => {
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
       await noIntent
-        .signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'mine' })
+        .signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'mine' })
         .catch(() => undefined);
     } finally {
       console.warn = real;
@@ -794,7 +796,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   it('refuses an ALIAS of a denied wallet, and never reaches the chain', async () => {
     const t = await treasuryResolving('treasury.play', ['treasury.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'treasure.play', vee: '1', intentId: 'alias-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'treasure.play', amount: '1', intentId: 'alias-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -804,7 +806,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // a probe that refuses everything would pass the test above.
   it('still sends to an alias whose wallet is not denied', async () => {
     const t = await treasuryResolving('orch:bob', []);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'alias-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'alias-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -843,7 +845,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   it('refuses a wallet denied under a different alias entirely', async () => {
     const t = await treasuryWithAliases(['mark.play'], ['mark.play', 'marky.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'id-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'id-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -853,7 +855,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // the identity check is not simply refusing everything.
   it('still sends to a DIFFERENT wallet when a deny entry exists', async () => {
     const t = await treasuryWithAliases(['mark.play'], ['mark.play']);
-    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.play', vee: '1', intentId: 'id-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.play', amount: '1', intentId: 'id-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -911,7 +913,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       throw new Error('registry read failed');
     });
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-1' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(code);
     expect(t.broadcasts).toBe(0);
@@ -921,7 +923,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // is a real answer and not an unknown.
   it('sends when a deny entry names nothing registered', async () => {
     const t = treasuryWhoseLookup(async () => null);
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -936,12 +938,12 @@ describe('concurrent signTransfer against a stage cap', () => {
     });
 
     const first = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-3' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-3' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(first);
 
     const second = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-4' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-4' }),
     );
     expect(second).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -960,14 +962,14 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     // First send: the deny entry names nothing yet, so nothing matches.
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-1' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-1' });
     expect(t.broadcasts).toBe(1);
 
     // The name is now registered, to the same wallet the alias points at.
     registered = true;
 
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-2' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-2' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(1); // still one: the second never reached the chain
@@ -985,18 +987,18 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-3' })),
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-3' })),
     ).toBe('counterparty_denied');
 
     pointsAtTarget = false;
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-4' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-4' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
   it('broadcasts exactly floor(cap/amount) of N concurrent sends', async () => {
     const t = await treasuryWithStageCap(100); // one 100-VEE send fits
     const send = (n: number) =>
-      t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `i${n}` });
+      t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: `i${n}` });
 
     const results = await Promise.allSettled(Array.from({ length: 8 }, (_, n) => send(n)));
 
@@ -1016,7 +1018,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     const t = await treasuryWithStageCap(500);
     const results = await Promise.allSettled(
       Array.from({ length: 10 }, (_, n) =>
-        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `j${n}` }),
+        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: `j${n}` }),
       ),
     );
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
@@ -1027,7 +1029,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // pass for the wrong reason.
   it('broadcasts a single sequential send that fits, so the probe can pass', async () => {
     const t = await treasuryWithStageCap(100);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: 'solo' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: 'solo' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 });

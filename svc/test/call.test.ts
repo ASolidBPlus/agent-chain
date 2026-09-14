@@ -87,7 +87,21 @@ const CONVERTER_ABI = [
   ),
 ] as unknown as Abi;
 
-const ABIS = { Token: [] as unknown as Abi, Converter: CONVERTER_ABI };
+/// `transferWithIntent(address,uint256,bytes32)`, the one function a transfer
+/// encodes - enough to decode the calldata and read the amount back out.
+const TOKEN_ABI = [
+  fn(
+    'transferWithIntent',
+    [
+      { type: 'address', name: 'to' },
+      { type: 'uint256', name: 'value' },
+      { type: 'bytes32', name: 'intentId' },
+    ],
+    'nonpayable',
+  ),
+] as unknown as Abi;
+
+const ABIS = { Token: TOKEN_ABI, Converter: CONVERTER_ABI };
 
 async function modules(): Promise<Modules> {
   const deployment = {
@@ -999,6 +1013,67 @@ describe('serialiseResult', () => {
 });
 
 // §3.4's bound, in the unit the spec names it in.
+// §1. A TRANSFER IN A NON-DEFAULT TOKEN, and the five things that have to agree
+// about which token it is.
+//
+// `signTransfer` uses the resolved token five times: its decimals parse the
+// amount, its symbol appears in refusals, its key is the caps coordinate, its
+// key is the stage-spend coordinate, and its ADDRESS is the contract the
+// transfer is sent to. The fixture's two tokens differ in key, in symbol (GOLD
+// is not `au` upper-cased) and in DECIMALS (18 and 6), so a use that reached
+// for the default token instead is visible in at least one of them - and the
+// address one is visible in the transaction itself.
+describe('a transfer in a second token', () => {
+  it('sends to THAT token\'s contract, at THAT token\'s scale', async () => {
+    const { t, store } = await harness();
+    await t.signTransfer(asWallet('orch:a'), {
+      to: 'bob.play',
+      amount: '3',
+      token: 'gold',
+      intentId: 'g-1',
+    });
+
+    // THE CONTRACT THE TRANSFER WENT TO. The one use whose failure moves real
+    // money to the wrong ledger, and the one no amount assertion would catch.
+    expect(t.signed[0]!.to).toBe(GOLD);
+
+    // THE SCALE. GOLD is 6 dp in this fixture, so 3 whole units are 3_000000 -
+    // at PLAY's 18 the calldata would carry 3e18, a millionfold error that
+    // looks like a plausible number.
+    const decoded = decodeFunctionData({ abi: TOKEN_ABI, data: t.signed[0]!.data });
+    expect((decoded.args as unknown[])[1]).toBe(3_000000n);
+
+    // THE BOOKKEEPING COORDINATE, which is the KEY and never the symbol.
+    expect(store.intentToken('g-1')).toBe('gold');
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'gold')).toBe(3_000000n);
+    // AND THE DEFAULT TOKEN'S BUDGET IS UNTOUCHED, which is the whole point of
+    // per-token caps: spending gold must not consume a persona's play budget.
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
+  });
+
+  it('accepts the SYMBOL as well as the key', async () => {
+    const { t } = await harness();
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', token: 'GOLD', intentId: 'g-2' });
+    expect(t.signed[0]!.to).toBe(GOLD);
+  });
+
+  it('refuses a token this deployment does not have', async () => {
+    const { t } = await harness();
+    expect(
+      await codeOf(() =>
+        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', token: 'silver', intentId: 'g-3' }),
+      ),
+    ).toBe('unknown_token');
+  });
+
+  it('still means the default token when none is named', async () => {
+    // The increment's ONE RULE, asserted on the path most callers use.
+    const { t } = await harness();
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'g-4' });
+    expect(t.signed[0]!.to).toBe(PLAY);
+  });
+});
+
 describe('the read size bound', () => {
   it('counts BYTES, not UTF-16 units', async () => {
     // The same reasoning callargs.ts's string cap carries, and it was

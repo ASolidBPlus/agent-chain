@@ -381,7 +381,7 @@ describe('deny entries without a names module', () => {
   it('still refuses a send to a denied AGENT ID', async () => {
     const { t, store } = treasuryWith(['orch:b'], 'orch:a');
     expect(
-      await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'd1' })),
+      await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', amount: '1', intentId: 'd1' })),
     ).toBe('counterparty_denied');
     store.close();
   });
@@ -403,13 +403,13 @@ describe('deny entries without a names module', () => {
       // ENTRY that cannot resolve.
       const a = treasuryWith(['treasury.play'], 'orch:a');
       await code(() =>
-        a.t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'x1' }),
+        a.t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', amount: '1', intentId: 'x1' }),
       );
       a.store.close();
 
       const b = treasuryWith(['treasury.play'], 'orch:c');
       await code(() =>
-        b.t.signTransfer({ scope: 'wallet', agentId: 'orch:c' }, { to: 'orch:b', vee: '1', intentId: 'x2' }),
+        b.t.signTransfer({ scope: 'wallet', agentId: 'orch:c' }, { to: 'orch:b', amount: '1', intentId: 'x2' }),
       );
       b.store.close();
     } finally {
@@ -425,7 +425,7 @@ describe('deny entries without a names module', () => {
     const { t, store } = treasuryWith(['treasury.play'], 'orch:a');
     expect(
       await code(() =>
-        t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'treasury.play', vee: '1', intentId: 'd2' }),
+        t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'treasury.play', amount: '1', intentId: 'd2' }),
       ),
     ).toBe('unknown_name');
     store.close();
