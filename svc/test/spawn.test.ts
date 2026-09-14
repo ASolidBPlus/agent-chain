@@ -207,9 +207,9 @@ describe('POST /wallets validation', () => {
   it('returns the recorded wallet without touching the chain once spawned', async () => {
     const store = new Store(':memory:');
     const { spawner: s } = spawner(store);
-    store.markSpawned('orch:shadowbroker', '0x1111111111111111111111111111111111111111', null);
+    store.markSpawned('orch:vendor', '0x1111111111111111111111111111111111111111', null);
 
-    const result = await s.spawn({ agentId: 'orch:shadowbroker', fundVee: 250, kind: 'agent' });
+    const result = await s.spawn({ agentId: 'orch:vendor', fundVee: 250, kind: 'agent' });
     expect(result.address).toBe('0x1111111111111111111111111111111111111111');
     store.close();
   });
@@ -270,7 +270,7 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
       lookup: async (name: string) =>
         name === 'treasury.vee'
           ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.vee' }
-          : { address, canonical: 'orch:shadowbroker' },
+          : { address, canonical: 'orch:vendor' },
     } as unknown as Resolver;
 
     const s = new Spawner(
@@ -282,11 +282,11 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
       DEFAULTS,
     );
 
-    const result = await s.spawn({ agentId: 'orch:shadowbroker', fundVee: 250, kind: 'agent', alias: 'sb.vee' });
+    const result = await s.spawn({ agentId: 'orch:vendor', fundVee: 250, kind: 'agent', alias: 'sb.vee' });
 
     expect(result.address).toBe(address);
     expect(writes).toEqual([]); // no ETH, no VEE, no registration - nothing to redo
-    expect(store.spawnedAddress('orch:shadowbroker')).toBe(address);
+    expect(store.spawnedAddress('orch:vendor')).toBe(address);
     store.close();
   });
 });

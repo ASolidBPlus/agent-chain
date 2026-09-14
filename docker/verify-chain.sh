@@ -63,7 +63,7 @@ cd "$CONTRACTS_DIR"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|Compiler run|ONCHAIN EXECUTION|Error" | head -10
 cat ../deployments/local.json
 
-VEE=$(python3 -c "import json;print(json.load(open('../deployments/local.json'))['VEEBux'])")
+VEE=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='token'][0]['address'])")
 REG=$(python3 -c "import json;print(json.load(open('../deployments/local.json'))['NameRegistry'])")
 TREASURY=$(cast wallet address --private-key "$KEY")
 
@@ -76,18 +76,18 @@ echo "resolve(treasury.vee): $resolve_before"
 
 step "second run is idempotent (must NOT redeploy)"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|nothing to do" | head -5
-VEE2=$(python3 -c "import json;print(json.load(open('../deployments/local.json'))['VEEBux'])")
-[ "$VEE" = "$VEE2" ] || { echo "FAIL: VEEBux address changed: $VEE -> $VEE2"; exit 1; }
-echo "VEEBux address unchanged: $VEE2"
+VEE2=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='token'][0]['address'])")
+[ "$VEE" = "$VEE2" ] || { echo "FAIL: token address changed: $VEE -> $VEE2"; exit 1; }
+echo "token address unchanged: $VEE2"
 
 step "the OTHER idempotence direction: local.json gone, chain intact (must REFUSE)"
 # ./deployments is a bind mount and chain-state is a named volume, so either can
-# outlive the other. Without this guard the script below deploys a SECOND VEEBux
+# outlive the other. Without this guard the script below deploys a SECOND token
 # and writes it over the file, orphaning the first with every balance in it.
 mv ../deployments/local.json /tmp/local.json.hidden
 if forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast >/tmp/redeploy.log 2>&1; then
   mv /tmp/local.json.hidden ../deployments/local.json
-  echo "FAIL: redeployed with no local.json - the live VEEBux has been orphaned"; exit 1
+  echo "FAIL: redeployed with no local.json - the live token has been orphaned"; exit 1
 fi
 grep -oE "refusing to redeploy[^\"]*" /tmp/redeploy.log | head -1
 [ -f ../deployments/local.json ] && { echo "FAIL: it wrote a local.json anyway"; exit 1; }
@@ -132,7 +132,7 @@ code_len=$(cast code "$VEE" --rpc-url "$RPC" | wc -c)
 supply_after=$(cast call "$VEE" "totalSupply()(uint256)" --rpc-url "$RPC")
 balance_after=$(cast call "$VEE" "balanceOf(address)(uint256)" "$TREASURY" --rpc-url "$RPC")
 resolve_after=$(cast call "$REG" "resolve(string)(address)" "treasury.vee" --rpc-url "$RPC")
-echo "VEEBux code bytes after restart: $code_len"
+echo "token code bytes after restart: $code_len"
 echo "totalSupply: $supply_after"
 echo "treasury balance: $balance_after"
 echo "resolve(treasury.vee): $resolve_after"
@@ -142,5 +142,5 @@ fail=0
 [ "$supply_before"  = "$supply_after"  ] || { echo "FAIL: totalSupply changed"; fail=1; }
 [ "$balance_before" = "$balance_after" ] || { echo "FAIL: treasury balance changed"; fail=1; }
 [ "$resolve_before" = "$resolve_after" ] || { echo "FAIL: treasury.vee resolution changed"; fail=1; }
-[ "$code_len" -gt 10 ] || { echo "FAIL: VEEBux has no code after restart"; fail=1; }
+[ "$code_len" -gt 10 ] || { echo "FAIL: token has no code after restart"; fail=1; }
 [ "$fail" = 0 ] && echo "PASS: state survived the restart" || exit 1

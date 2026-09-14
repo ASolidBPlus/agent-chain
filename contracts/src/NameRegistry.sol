@@ -8,7 +8,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /// (spec S0). Two kinds of name live here:
 ///   * a CANONICAL name is a qualified agent id, `<org label>:<local id>`,
 ///     registered by chain-svc at spawn with owner == target == the wallet;
-///   * a VANITY alias (`shadowbroker.vee`) is any other name owned by a wallet
+///   * a VANITY alias (`vendor.vee`) is any other name owned by a wallet
 ///     that already has a canonical name.
 /// @dev The registry deliberately CANNOT tell the two apart. The rule "exactly
 /// one colon iff canonical" is enforced in chain-svc (400 invalid_name), not

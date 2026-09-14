@@ -4,7 +4,7 @@ import { Store, MAX_BUFFERED_EVENTS } from '../src/store.ts';
 describe('memos', () => {
   it('joins a memo back onto its transaction, case-insensitively', () => {
     const store = new Store(':memory:');
-    store.recordMemo({ txHash: '0xABC', memo: 'for the stream job', intentId: 'a1', fromAgentId: 'orch:shadowbroker' });
+    store.recordMemo({ txHash: '0xABC', memo: 'for the stream job', intentId: 'a1', fromAgentId: 'orch:vendor' });
 
     const found = store.memosFor(['0xabc']);
     expect(found.get('0xabc')?.memo).toBe('for the stream job');
@@ -32,7 +32,7 @@ describe('frozen', () => {
 
     store.freeze('orch:scammer');
     expect(store.isFrozen('orch:scammer')).toBe(true);
-    expect(store.isFrozen('orch:shadowbroker')).toBe(false);
+    expect(store.isFrozen('orch:vendor')).toBe(false);
     store.close();
   });
 });

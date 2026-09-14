@@ -12,7 +12,7 @@ import { Wallet, refusalFor } from '../src/wallet.ts';
 import type { WalletConfig } from '../src/config.ts';
 
 const TOKEN = 'wallet-token-that-must-never-leak';
-const AGENT = 'orch:shadowbroker';
+const AGENT = 'orch:vendor';
 
 // The /modules reply the host passes into Wallet (spec S5). A single-token,
 // 18-place deployment whose symbol is VEE - so the money-message wording these
@@ -94,7 +94,7 @@ async function fakeChainSvc(): Promise<Fake> {
           ? json(200, found)
           : json(404, { error: 'unknown_name', detail: `no wallet is registered as ${name}, nor as orch:${name}` });
       }
-      if (url.pathname.startsWith('/reverse/')) return json(200, { canonical: AGENT, aliases: ['shadowbroker.vee'] });
+      if (url.pathname.startsWith('/reverse/')) return json(200, { canonical: AGENT, aliases: ['vendor.vee'] });
       if (url.pathname.startsWith('/balance/')) return json(200, { vee: '250', eth: '1' });
       if (url.pathname.startsWith('/history/')) {
         return json(200, [
@@ -414,7 +414,7 @@ describe('send', () => {
 describe('reads', () => {
   it('reports who it is, with its aliases', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.whoami()).toEqual({ agentId: AGENT, address: '0xme', aliases: ['shadowbroker.vee'] });
+    expect(await wallet.whoami()).toEqual({ agentId: AGENT, address: '0xme', aliases: ['vendor.vee'] });
   });
 
   it('labels history by direction and names the counterparty', async () => {

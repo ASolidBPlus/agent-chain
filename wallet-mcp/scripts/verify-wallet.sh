@@ -35,7 +35,7 @@ jget() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 # Funded above max_per_stage on purpose, so the wallet runs out of CAP before it
 # runs out of MONEY - otherwise the stage-cap check would really be measuring an
 # overdraft, which is a mistake this suite has already made once.
-SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":1000,"kind":"agent","alias":"shadowbroker.vee"}')
+SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":1000,"kind":"agent","alias":"vendor.vee"}')
 WALLET_TOKEN=$(echo "$SB" | jget "['walletToken']")
 curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 # A lookalike owned by someone else, for the resolve check.
@@ -44,9 +44,9 @@ curl -fsS "${A[@]}" -X POST "$U/aliases" -d '{"agentId":"orch:scammer","alias":"
 echo "  wallets spawned; policy file: $(ls "$WORK/policies")"
 
 cd "$MCP"
-WALLET_AGENT_ID=orch:shadowbroker \
+WALLET_AGENT_ID=orch:vendor \
   CHAIN_SVC_URL="$U" \
   WALLET_TOKEN="$WALLET_TOKEN" \
-  POLICY_FILE="$WORK/policies/orch%3Ashadowbroker.json" \
+  POLICY_FILE="$WORK/policies/orch%3Avendor.json" \
   WALLET_STATE_FILE="$WORK/wallet-state.json" \
   bun run scripts/mcp-probe.ts

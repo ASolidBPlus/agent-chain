@@ -69,7 +69,7 @@ rm -f "$DEPLOYMENTS/local.json"
 KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
 ( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
     forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) >/dev/null 2>&1
-echo "  deployed: $(python3 -c "import json;print(json.load(open('$DEPLOYMENTS/local.json'))['VEEBux'])")"
+echo "  deployed: $(python3 -c "import json;print([m for m in json.load(open('$DEPLOYMENTS/local.json'))['modules'] if m['kind']=='token'][0]['address'])")"
 
 ( cd "$SVC" && RPC_URL="$RPC" CHAIN_SVC_TOKEN="$TOKEN" KEYSTORE_SECRET=verify-secret \
     ANVIL_MNEMONIC="$MNEMONIC" DEPLOYMENTS_DIR="$DEPLOYMENTS" KEYSTORE_DIR="$WORK/keystore" \
@@ -87,13 +87,13 @@ step "criterion 3 - spawn a named, funded wallet"
 # (ruled). A warning instead of a failure was explicitly rejected -
 # a check that never fails measures nothing.
 TIMES=""
-for who in shadowbroker timing1 timing2; do
+for who in vendor timing1 timing2; do
   START=$(date +%s%N)
   RESULT=$(api -X POST "$U/wallets" -d "{\"agentId\":\"orch:$who\",\"fundVee\":250,\"kind\":\"agent\",\"alias\":\"$who.vee\"}")
-  [ "$who" = shadowbroker ] && SB_TOKEN=$(echo "$RESULT" | jget "['walletToken']")
+  [ "$who" = vendor ] && SB_TOKEN=$(echo "$RESULT" | jget "['walletToken']")
   MS=$(( ($(date +%s%N) - START) / 1000000 ))
   TIMES="$TIMES $MS"
-  [ "$who" = shadowbroker ] && SPAWN="$RESULT"
+  [ "$who" = vendor ] && SPAWN="$RESULT"
 done
 P50=$(echo $TIMES | tr ' ' '\n' | sort -n | sed -n 2p)
 echo "  POST /wallets -> $SPAWN"
@@ -103,16 +103,16 @@ echo "  timings:$TIMES ms   p50=${P50}ms"
     - spawn p50 ${P50}ms exceeds the 5s hard bound"; }
 ADDR=$(echo "$SPAWN" | jget "['address']")
 
-check "balance"            "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "250"
-check "resolve canonical"  "$(api "$U/resolve/orch%3Ashadowbroker" | jget "['address']")" "$ADDR"
-check "resolve alias"      "$(api "$U/resolve/shadowbroker.vee"    | jget "['address']")" "$ADDR"
-check "reverse"            "$(api "$U/reverse/$ADDR" | jget "['canonical']")" "orch:shadowbroker"
-check "reverse aliases"    "$(api "$U/reverse/$ADDR" | jget "['aliases'][0]")" "shadowbroker.vee"
+check "balance"            "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "250"
+check "resolve canonical"  "$(api "$U/resolve/orch%3Avendor" | jget "['address']")" "$ADDR"
+check "resolve alias"      "$(api "$U/resolve/vendor.vee"    | jget "['address']")" "$ADDR"
+check "reverse"            "$(api "$U/reverse/$ADDR" | jget "['canonical']")" "orch:vendor"
+check "reverse aliases"    "$(api "$U/reverse/$ADDR" | jget "['aliases'][0]")" "vendor.vee"
 
 step "criterion 3 - a repeat spawn must not mint money"
-AGAIN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":250,"kind":"agent","alias":"shadowbroker.vee"}')
+AGAIN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":250,"kind":"agent","alias":"vendor.vee"}')
 check "same address"       "$(echo "$AGAIN" | jget "['address']")" "$ADDR"
-check "balance unchanged"  "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "250"
+check "balance unchanged"  "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "250"
 check "no token on repeat" "$(echo "$AGAIN" | python3 -c "import sys,json;print('walletToken' in json.load(sys.stdin))")" "False"
 
 step "criterion 9 - addressing at the service layer"
@@ -125,9 +125,9 @@ step "transfer by name, with a memo (wallet credential)"
 api -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 TX=$(wbody "$SB_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":50,"memo":"for the stream job","intentId":"a1"}')
 echo "  POST /sign-transfer -> $TX"
-check "sender balance"     "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "200"
+check "sender balance"     "$(api "$U/balance/orch%3Avendor" | jget "['vee']")" "200"
 check "recipient balance"  "$(api "$U/balance/alpha.vee"           | jget "['vee']")" "60"
-HIST=$(api "$U/history/orch%3Ashadowbroker?limit=10")
+HIST=$(api "$U/history/orch%3Avendor?limit=10")
 check "history memo"       "$(echo "$HIST" | jget "[0]['memo']")" "for the stream job"
 check "history counterparty" "$(echo "$HIST" | jget "[0]['to']")" "alpha:client"
 

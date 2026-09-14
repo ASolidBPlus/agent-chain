@@ -20,7 +20,7 @@ function codeOf(fn: () => unknown): string {
 
 describe('canonical agent ids', () => {
   it('accepts a qualified lowercase id', () => {
-    expect(assertCanonicalAgentId('orch:shadowbroker')).toBe('orch:shadowbroker');
+    expect(assertCanonicalAgentId('orch:vendor')).toBe('orch:vendor');
     expect(assertCanonicalAgentId('alpha:client')).toBe('alpha:client');
   });
 
@@ -40,7 +40,7 @@ describe('canonical agent ids', () => {
   // under an id the caller did not ask for, and the mesh does NOT enforce case
   // on local ids, so this is the only check standing.
   it('rejects uppercase instead of normalising it', () => {
-    expect(codeOf(() => assertCanonicalAgentId('Orch:shadowbroker'))).toBe('invalid_agent_id');
+    expect(codeOf(() => assertCanonicalAgentId('Orch:vendor'))).toBe('invalid_agent_id');
     expect(codeOf(() => assertCanonicalAgentId('orch:ShadowBroker'))).toBe('invalid_agent_id');
   });
 
@@ -78,7 +78,7 @@ describe('vanity aliases', () => {
 
   // An alias with a colon could impersonate a namespaced canonical id.
   it('rejects a colon', () => {
-    expect(codeOf(() => assertAlias('orch:shadowbroker'))).toBe('invalid_name');
+    expect(codeOf(() => assertAlias('orch:vendor'))).toBe('invalid_name');
   });
 
   it('enforces the 3-48 length bounds', () => {
@@ -90,7 +90,7 @@ describe('vanity aliases', () => {
 
 describe('lookup names', () => {
   it('accepts a canonical id or an alias', () => {
-    expect(assertLookupName('orch:shadowbroker')).toBe('orch:shadowbroker');
+    expect(assertLookupName('orch:vendor')).toBe('orch:vendor');
     expect(assertLookupName('alpha.vee')).toBe('alpha.vee');
   });
 
@@ -140,7 +140,7 @@ describe('amounts', () => {
 
 describe('key file names', () => {
   it('encodes the colon so it never reaches a path', () => {
-    expect(keyFileName('orch:shadowbroker')).toBe('orch%3Ashadowbroker.json');
+    expect(keyFileName('orch:vendor')).toBe('orch%3Avendor.json');
   });
 
   it('leaves no separator or traversal sequence in the result', () => {

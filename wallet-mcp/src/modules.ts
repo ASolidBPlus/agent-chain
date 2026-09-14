@@ -41,7 +41,7 @@ export function defaultTokenOf(modules: ModulesReply): TokenModule | null {
 
 /// Reads /modules with the wallet credential. Unreachable or non-200 is fatal:
 /// the server cannot decide which tools to advertise without it, so main() lets
-/// this throw and exits non-zero - the same contract mesh-agent's `required: true`
+/// this throw and exits non-zero - the same contract the harness's `required: true`
 /// expects. Cache the result for the process lifetime; the module set does not
 /// change under a running chain.
 export async function fetchModules(config: WalletConfig): Promise<ModulesReply> {

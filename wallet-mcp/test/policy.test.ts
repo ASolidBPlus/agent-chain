@@ -12,7 +12,7 @@ const chk = (policy: WalletPolicy | null, to: string, vee: string) => checkLocal
 const wei = (vee: string) => veeToWei(vee, 18);
 
 const POLICY: WalletPolicy = {
-  agentId: 'orch:shadowbroker',
+  agentId: 'orch:vendor',
   max_per_tx: 100,
   max_per_stage: 500,
   allow: ['*.vee'],

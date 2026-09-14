@@ -10,12 +10,12 @@ contract NameRegistryTest is Test {
     bytes32 internal registrarRole;
 
     address internal treasury = makeAddr("treasury");
-    address internal shadowbroker = makeAddr("shadowbroker");
+    address internal vendor = makeAddr("vendor");
     address internal client = makeAddr("client");
     address internal scammer = makeAddr("scammer");
 
-    string internal constant CANONICAL = "orch:shadowbroker";
-    string internal constant ALIAS = "shadowbroker.vee";
+    string internal constant CANONICAL = "orch:vendor";
+    string internal constant ALIAS = "vendor.vee";
 
     function setUp() public {
         registry = new NameRegistry(treasury);
@@ -39,28 +39,28 @@ contract NameRegistryTest is Test {
     /// address that has none, burners included.
     function test_RegisterResolveRoundTrip() public {
         vm.prank(treasury);
-        registry.register(CANONICAL, shadowbroker);
+        registry.register(CANONICAL, vendor);
 
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
-        assertEq(registry.reverseOf(shadowbroker), "", "register must not write a primary name");
+        assertEq(registry.resolve(CANONICAL), vendor);
+        assertEq(registry.reverseOf(vendor), "", "register must not write a primary name");
     }
 
     /// The registrar's path is the one that does.
     function test_RegisterForSetsThePrimaryName() public {
         vm.prank(treasury);
-        registry.registerFor(CANONICAL, shadowbroker, shadowbroker);
+        registry.registerFor(CANONICAL, vendor, vendor);
 
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
-        assertEq(registry.reverseOf(shadowbroker), CANONICAL);
+        assertEq(registry.resolve(CANONICAL), vendor);
+        assertEq(registry.reverseOf(vendor), CANONICAL);
     }
 
     function test_RegistrarCanRegisterForOthers() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         (address owner, address target) = registry.records(keccak256(bytes(CANONICAL)));
-        assertEq(owner, shadowbroker);
-        assertEq(target, shadowbroker);
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
+        assertEq(owner, vendor);
+        assertEq(target, vendor);
+        assertEq(registry.resolve(CANONICAL), vendor);
     }
 
     function test_NonRegistrarCannotRegisterForOthers() public {
@@ -70,11 +70,11 @@ contract NameRegistryTest is Test {
                 IAccessControl.AccessControlUnauthorizedAccount.selector, scammer, registrarRole
             )
         );
-        registry.registerFor(CANONICAL, shadowbroker, shadowbroker);
+        registry.registerFor(CANONICAL, vendor, vendor);
     }
 
     function test_DuplicateRegistrationReverts() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.NameTaken.selector);
@@ -82,7 +82,7 @@ contract NameRegistryTest is Test {
 
         // The original registration is untouched - a failed land-grab must not
         // repoint the name it failed to take.
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
+        assertEq(registry.resolve(CANONICAL), vendor);
     }
 
     /// Views return a miss as a VALUE, never a revert (ruled):
@@ -100,50 +100,50 @@ contract NameRegistryTest is Test {
     /// The rule that keeps money legible: a wallet's primary name is its
     /// canonical mesh id, and buying vanity aliases never changes it.
     function test_AliasDoesNotOverwriteCanonicalReverse() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         vm.prank(treasury);
-        registry.registerFor(ALIAS, shadowbroker, shadowbroker);
+        registry.registerFor(ALIAS, vendor, vendor);
 
-        assertEq(registry.reverseOf(shadowbroker), CANONICAL);
+        assertEq(registry.reverseOf(vendor), CANONICAL);
         // Both names still resolve to the same wallet.
-        assertEq(registry.resolve(ALIAS), shadowbroker);
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
+        assertEq(registry.resolve(ALIAS), vendor);
+        assertEq(registry.resolve(CANONICAL), vendor);
     }
 
     function test_TransferClearsReverse() public {
-        _spawn(CANONICAL, shadowbroker);
-        assertEq(registry.reverseOf(shadowbroker), CANONICAL);
+        _spawn(CANONICAL, vendor);
+        assertEq(registry.reverseOf(vendor), CANONICAL);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         registry.transfer(CANONICAL, client);
 
         (address owner,) = registry.records(keccak256(bytes(CANONICAL)));
         assertEq(owner, client);
         // The name no longer speaks for the address it still targets.
-        assertEq(registry.reverseOf(shadowbroker), "");
+        assertEq(registry.reverseOf(vendor), "");
     }
 
     function test_NonOwnerTransferReverts() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         vm.prank(scammer);
         vm.expectRevert(NameRegistry.NotOwner.selector);
         registry.transfer(CANONICAL, scammer);
 
         (address owner,) = registry.records(keccak256(bytes(CANONICAL)));
-        assertEq(owner, shadowbroker);
+        assertEq(owner, vendor);
     }
 
     function test_SetTargetClearsReverseAndDoesNotAdoptTheNewTarget() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         registry.setTarget(CANONICAL, client);
 
         assertEq(registry.resolve(CANONICAL), client);
         // Cleared for the address it left.
-        assertEq(registry.reverseOf(shadowbroker), "");
+        assertEq(registry.reverseOf(vendor), "");
         // NOT adopted by the address it moved to: the reverse is written on
         // register only, so repointing a name cannot promote it to be
         // somebody's primary name behind their back.
@@ -151,13 +151,13 @@ contract NameRegistryTest is Test {
     }
 
     function test_NonOwnerCannotSetTarget() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         vm.prank(scammer);
         vm.expectRevert(NameRegistry.NotOwner.selector);
         registry.setTarget(CANONICAL, scammer);
 
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
+        assertEq(registry.resolve(CANONICAL), vendor);
     }
 
     // --- retirement (the DELETE /wallets path) -----------------------------
@@ -165,9 +165,9 @@ contract NameRegistryTest is Test {
     /// Retiring an agent clears its ALIAS targets with the registrar key, and
     /// must not need the agent's own key (spec S4, ruled).
     function test_RegistrarCanClearAliasTargetWithoutOwnerKey() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
         vm.prank(treasury);
-        registry.registerFor(ALIAS, shadowbroker, shadowbroker);
+        registry.registerFor(ALIAS, vendor, vendor);
 
         vm.prank(treasury);
         registry.setTargetFor(ALIAS, address(0));
@@ -176,12 +176,12 @@ contract NameRegistryTest is Test {
         assertEq(registry.resolve(ALIAS), address(0));
         // The canonical name is untouched: retirement clears aliases, and the
         // wallet keeps its identity for history and audit.
-        assertEq(registry.reverseOf(shadowbroker), CANONICAL);
-        assertEq(registry.resolve(CANONICAL), shadowbroker);
+        assertEq(registry.reverseOf(vendor), CANONICAL);
+        assertEq(registry.resolve(CANONICAL), vendor);
     }
 
     function test_NonRegistrarCannotSetTargetFor() public {
-        _spawn(CANONICAL, shadowbroker);
+        _spawn(CANONICAL, vendor);
 
         vm.prank(scammer);
         vm.expectRevert(
@@ -232,7 +232,7 @@ contract NameRegistryTest is Test {
     function test_NameTooShortReverts() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.NameTooShort.selector);
-        registry.registerFor("ab", shadowbroker, shadowbroker);
+        registry.registerFor("ab", vendor, vendor);
     }
 
     function test_NameTooLongReverts() public {
@@ -243,7 +243,7 @@ contract NameRegistryTest is Test {
 
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.NameTooLong.selector);
-        registry.registerFor(tooLong, shadowbroker, shadowbroker);
+        registry.registerFor(tooLong, vendor, vendor);
     }
 
     function test_MaximumLengthNameIsAccepted() public {
@@ -251,14 +251,14 @@ contract NameRegistryTest is Test {
         assertEq(bytes(atCap).length, 48);
 
         vm.prank(treasury);
-        registry.registerFor(atCap, shadowbroker, shadowbroker);
-        assertEq(registry.resolve(atCap), shadowbroker);
+        registry.registerFor(atCap, vendor, vendor);
+        assertEq(registry.resolve(atCap), vendor);
     }
 
     function test_InvalidCharacterReverts() public {
         vm.prank(treasury);
         vm.expectRevert(abi.encodeWithSelector(NameRegistry.InvalidNameChar.selector, 4, bytes1("!")));
-        registry.registerFor("orch!shadowbroker", shadowbroker, shadowbroker);
+        registry.registerFor("orch!vendor", vendor, vendor);
     }
 
     /// A space is the one an operator types by accident, and it must not become
@@ -266,6 +266,6 @@ contract NameRegistryTest is Test {
     function test_SpaceIsRejected() public {
         vm.prank(treasury);
         vm.expectRevert(abi.encodeWithSelector(NameRegistry.InvalidNameChar.selector, 5, bytes1(" ")));
-        registry.registerFor("alpha .vee", shadowbroker, shadowbroker);
+        registry.registerFor("alpha .vee", vendor, vendor);
     }
 }

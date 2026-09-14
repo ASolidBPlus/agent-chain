@@ -14,7 +14,7 @@ contract TokenTest is Test {
     bytes32 internal burnerRole;
 
     address internal treasury = makeAddr("treasury");
-    address internal shadowbroker = makeAddr("shadowbroker");
+    address internal vendor = makeAddr("vendor");
     address internal client = makeAddr("client");
 
     function setUp() public {
@@ -46,63 +46,63 @@ contract TokenTest is Test {
     function test_NobodyHoldsBurnerRoleAtDeploy() public view {
         assertFalse(vee.hasRole(burnerRole, treasury));
         assertFalse(vee.hasRole(burnerRole, address(this)));
-        assertFalse(vee.hasRole(burnerRole, shadowbroker));
+        assertFalse(vee.hasRole(burnerRole, vendor));
     }
 
     function test_BurnFromRevertsForACallerWithoutTheRole() public {
         vm.prank(treasury);
-        vee.mint(shadowbroker, 100 ether);
+        vee.mint(vendor, 100 ether);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, shadowbroker, burnerRole)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, vendor, burnerRole)
         );
-        vee.burnFrom(shadowbroker, 1 ether);
+        vee.burnFrom(vendor, 1 ether);
     }
 
     function test_BurnFromReducesSupplyAndBalanceOnceGranted() public {
         vm.prank(treasury);
-        vee.mint(shadowbroker, 100 ether);
+        vee.mint(vendor, 100 ether);
         vm.prank(treasury);
         vee.grantRole(burnerRole, client);
 
         vm.prank(client);
-        vee.burnFrom(shadowbroker, 40 ether);
+        vee.burnFrom(vendor, 40 ether);
 
-        assertEq(vee.balanceOf(shadowbroker), 60 ether);
+        assertEq(vee.balanceOf(vendor), 60 ether);
         assertEq(vee.totalSupply(), 60 ether);
     }
 
     function test_TreasuryCanMint() public {
         vm.prank(treasury);
-        vee.mint(shadowbroker, 250 ether);
+        vee.mint(vendor, 250 ether);
 
-        assertEq(vee.balanceOf(shadowbroker), 250 ether);
+        assertEq(vee.balanceOf(vendor), 250 ether);
         assertEq(vee.totalSupply(), 250 ether);
     }
 
     /// Minting is the whole money supply of the game. If any wallet could call
     /// it, every policy cap in wallet-mcp is decorative.
     function test_NonMinterCannotMint() public {
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vm.expectRevert(
             abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, shadowbroker, minterRole
+                IAccessControl.AccessControlUnauthorizedAccount.selector, vendor, minterRole
             )
         );
-        vee.mint(shadowbroker, 1 ether);
+        vee.mint(vendor, 1 ether);
 
         assertEq(vee.totalSupply(), 0);
     }
 
     function test_TransferMovesBalance() public {
         vm.prank(treasury);
-        vee.mint(shadowbroker, 100 ether);
+        vee.mint(vendor, 100 ether);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vee.transfer(client, 40 ether);
 
-        assertEq(vee.balanceOf(shadowbroker), 60 ether);
+        assertEq(vee.balanceOf(vendor), 60 ether);
         assertEq(vee.balanceOf(client), 40 ether);
     }
 
@@ -110,9 +110,9 @@ contract TokenTest is Test {
     /// top-ups (spec S3.1) without redeploying the token.
     function test_AdminCanGrantMinterRole() public {
         vm.prank(treasury);
-        vee.grantRole(minterRole, shadowbroker);
+        vee.grantRole(minterRole, vendor);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vee.mint(client, 5 ether);
 
         assertEq(vee.balanceOf(client), 5 ether);
@@ -129,36 +129,36 @@ contract TokenTest is Test {
     }
 
     function test_TransferWithIntentMovesTheMoneyAndEmitsBothEvents() public {
-        _fund(shadowbroker, 100e18);
-        bytes32 intent = keccak256(bytes("orch:shadowbroker:pay-1"));
+        _fund(vendor, 100e18);
+        bytes32 intent = keccak256(bytes("orch:vendor:pay-1"));
 
         // ALONGSIDE, not instead of: anything reading Transfer is unaffected.
         vm.expectEmit(true, true, false, true);
-        emit Transfer(shadowbroker, client, 40e18);
+        emit Transfer(vendor, client, 40e18);
         vm.expectEmit(true, true, true, true);
-        emit IntentTransfer(intent, shadowbroker, client, 40e18);
+        emit IntentTransfer(intent, vendor, client, 40e18);
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vee.transferWithIntent(client, 40e18, intent);
 
         assertEq(vee.balanceOf(client), 40e18);
-        assertEq(vee.balanceOf(shadowbroker), 60e18);
+        assertEq(vee.balanceOf(vendor), 60e18);
     }
 
     /// The mover is msg.sender and there is no `from` parameter, so this cannot
     /// be used to move someone else's balance even with an allowance in place.
     function test_TransferWithIntentCannotSpendSomeoneElsesBalance() public {
-        _fund(shadowbroker, 100e18);
-        vm.prank(shadowbroker);
+        _fund(vendor, 100e18);
+        vm.prank(vendor);
         vee.approve(client, 100e18);
 
-        // client holds an allowance over shadowbroker, and it buys
+        // client holds an allowance over vendor, and it buys
         // nothing here: it can only move its own (zero) balance.
         vm.prank(client);
         vm.expectRevert();
         vee.transferWithIntent(treasury, 1e18, keccak256(bytes("theft")));
 
-        assertEq(vee.balanceOf(shadowbroker), 100e18);
+        assertEq(vee.balanceOf(vendor), 100e18);
     }
 
     /// THE DESIGN, asserted so nobody "hardens" it into a uniqueness constraint
@@ -167,20 +167,20 @@ contract TokenTest is Test {
     /// it happened once. That is what makes a second event detectable as an
     /// anomaly instead of silently reverting.
     function test_TheContractDoesNotDeduplicateIntents() public {
-        _fund(shadowbroker, 100e18);
+        _fund(vendor, 100e18);
         bytes32 intent = keccak256(bytes("reused"));
 
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vee.transferWithIntent(client, 10e18, intent);
-        vm.prank(shadowbroker);
+        vm.prank(vendor);
         vee.transferWithIntent(client, 10e18, intent);
 
         assertEq(vee.balanceOf(client), 20e18);
     }
 
     function test_TransferWithIntentRespectsBalance() public {
-        _fund(shadowbroker, 5e18);
-        vm.prank(shadowbroker);
+        _fund(vendor, 5e18);
+        vm.prank(vendor);
         vm.expectRevert();
         vee.transferWithIntent(client, 6e18, keccak256(bytes("too-much")));
     }
@@ -189,10 +189,10 @@ contract TokenTest is Test {
     /// contract concern, and refusing it here would add a rule chain-svc would
     /// then have to mirror.
     function testFuzz_AnyIntentIdIsCarriedThrough(bytes32 intent) public {
-        _fund(shadowbroker, 10e18);
+        _fund(vendor, 10e18);
         vm.expectEmit(true, true, true, true);
-        emit IntentTransfer(intent, shadowbroker, client, 1e18);
-        vm.prank(shadowbroker);
+        emit IntentTransfer(intent, vendor, client, 1e18);
+        vm.prank(vendor);
         vee.transferWithIntent(client, 1e18, intent);
     }
 }

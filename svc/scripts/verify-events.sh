@@ -57,7 +57,7 @@ A=(-H "Authorization: Bearer $TOKEN" -H 'content-type: application/json')
 jget() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
 step "spawn two wallets and make one accepted send"
-SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":250,"kind":"agent","alias":"shadowbroker.vee"}')
+SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":250,"kind":"agent","alias":"vendor.vee"}')
 SB_TOKEN=$(echo "$SB" | jget "['walletToken']")
 curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 # No X-Wallet-Client header: this is a caller going straight at chain-svc, the
