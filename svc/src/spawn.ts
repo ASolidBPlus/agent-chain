@@ -104,6 +104,29 @@ export class Spawner {
       throw new HttpError('invalid_request', 'a burner registers no names, so it cannot have an alias');
     }
 
+    // THE MODULE CHECKS SIT HERE, beside the other request-shape refusals, and
+    // the position is the point: BEFORE the idempotency return and BEFORE the
+    // first side effect (`keystore.create`). A spawn asking for something this
+    // deployment cannot do must refuse without leaving a key file, a policy
+    // file or a store row behind - otherwise the retry after the refusal takes
+    // the idempotent path and reports success for the request that was refused.
+    //
+    // Spawn itself needs NEITHER module: a wallet is a key, a token and a
+    // policy file, and all three exist on a deployment with no contracts at
+    // all. Only the two optional halves need one each.
+    if (fundVee > 0n && this.chain.modules.tokens.length === 0) {
+      throw new HttpError(
+        'module_not_deployed',
+        'fundVee requires a token module; omit it or deploy one',
+      );
+    }
+    if (alias !== undefined && this.chain.modules.names === undefined) {
+      throw new HttpError(
+        'module_not_deployed',
+        'alias requires a names module; omit it or deploy one',
+      );
+    }
+
     // Fully idempotent (spec S4): a retried spawn must never mint money. The
     // marker is written only after every step succeeded, so a half-finished
     // spawn resumes below instead of being reported as done.
@@ -360,6 +383,16 @@ export class Spawner {
   /// itself uses - and refusing it would make a policy un-writable until the
   /// wallet it names exists, which inverts the spawn order.
   private async assertDenyEntriesAreCanonical(deny: string[]): Promise<void> {
+    // WITHOUT A REGISTRY THERE ARE NO VANITY ALIASES, so there is nothing for
+    // this rule to catch: it exists to stop a deny entry that resolves to
+    // somebody else's canonical id today and to nobody's tomorrow. On a
+    // names-less deployment `lookup` answers only exact spawned ids, so an
+    // entry either IS a canonical id or names nothing - and running the check
+    // would turn every deny entry into a store query for no decision.
+    //
+    // Deny entries are kept verbatim here, and §4.7 says what they then mean.
+    if (this.chain.modules.names === undefined) return;
+
     for (const entry of deny) {
       if (entry.includes('*')) continue; // a pattern names no single identity
       const found = await this.resolver.lookup(entry).catch(() => null);
