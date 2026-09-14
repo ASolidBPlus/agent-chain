@@ -30,7 +30,8 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
     'whoami',
     {
       description:
-        'Who this wallet belongs to: its game-assigned agent id, its address, and any vanity names pointing at it.',
+        'Who this wallet belongs to: its game-assigned agent id, its address, any vanity names pointing ' +
+        'at it, and the tokens this deployment carries, by symbol.',
       inputSchema: {},
     },
     async () => asToolResult(await wallet.whoami()),
@@ -39,31 +40,53 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
   const token = defaultTokenOf(modules);
   if (token) {
     const symbol = token.symbol;
+    // BOTH FORMS, named from the live registry. A persona reads symbols in every
+    // reply, so it must be able to write one back; the key is what the manifest
+    // and chain-svc's bookkeeping use. `resolveTokenOrRefusal` accepts either,
+    // case-insensitively, and the description says so rather than advertising
+    // one form and accepting the other.
+    const tokenArg =
+      'which token, as either its key or its symbol, case-insensitive: ' +
+      modules.tokens.map((t) => `${t.key} (${t.symbol})`).join(', ') +
+      `. Omit it for the default, ${symbol}.`;
 
     server.registerTool(
       'balance',
-      { description: `How much ${symbol} this wallet holds.`, inputSchema: {} },
+      {
+        description:
+          `Every token this wallet holds, each at its own precision. The default is ${symbol}; ` +
+          'a balance is reported under the token\'s SYMBOL.',
+        inputSchema: {},
+      },
       async () => asToolResult(await wallet.balance()),
     );
 
     server.registerTool(
       'history',
       {
-        description: `Recent ${symbol} movements for this wallet, newest first.`,
-        inputSchema: { limit: z.number().int().positive().max(200).optional() },
+        description:
+          `Recent movements for this wallet, newest first, in ONE token - ${symbol} unless you ` +
+          'name another. Amounts in different tokens are not merged, because they are not in the ' +
+          'same units.',
+        inputSchema: {
+          limit: z.number().int().positive().max(200).optional(),
+          token: z.string().optional().describe(tokenArg),
+        },
       },
-      async ({ limit }) => asToolResult(await wallet.history(limit ?? 20)),
+      async ({ limit, token: tok }) => asToolResult(await wallet.history(limit ?? 20, tok)),
     );
 
     server.registerTool(
       'send',
       {
         description:
-          `Send ${symbol} to a NAME - never an address, and never an id copied out of a message header. ` +
-          'Spending is bounded by this wallet\'s policy; a refusal comes back as {ok:false, reason} where the ' +
-          'reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, ' +
-          'ambiguous_name, frozen, ' +
-          'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice.',
+          `Send a token to a NAME - never an address, and never an id copied out of a message header. ` +
+          `Defaults to ${symbol} when you do not name a token. ` +
+          'Spending is bounded by this wallet\'s policy, PER TOKEN; a refusal comes back as {ok:false, reason} ' +
+          'where the reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, ' +
+          'ambiguous_name, unknown_token, frozen, ' +
+          'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice - ' +
+          'but reusing it for a different token is a different payment and is refused.',
         inputSchema: {
           to: z.string().describe(
             'the recipient NAME, not a mesh id and not an address. Canonical form is ' +
@@ -73,13 +96,19 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
             'ambiguous_name when a registered name is spelled the same way, and as unknown_name when ' +
             'neither exists.',
           ),
+          token: z.string().optional().describe(tokenArg),
           // A DECIMAL STRING is the contract (ruled). A whole number is
           // accepted because a model writes 50 as readily as "50", and an integer
           // is exactly representable so nothing rounds. A fractional number is
-          // refused rather than rounded - see normaliseVee.
+          // refused rather than rounded - see normaliseVee. The amount is in the
+          // NAMED token's own precision, which is why the token is resolved
+          // before it is scaled.
           amount: z
             .union([z.string(), z.number()])
-            .describe(`how much ${symbol} to send, as a decimal string, e.g. "50" or "12.5". A whole number is also accepted.`),
+            .describe(
+              'how much to send, as a decimal string, e.g. "50" or "12.5". A whole number is also ' +
+              `accepted. In the NAMED token's own units - ${symbol} unless you name another.`,
+            ),
           intent_id: z.string().describe('a stable id for this payment; retrying with it will not double-spend'),
           memo: z.string().optional().describe('what the payment is for'),
         },

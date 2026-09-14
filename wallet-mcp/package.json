@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The stdio MCP server an agent uses to hold and spend VEE Bux by name",
+  "description": "The stdio MCP server an agent uses to hold and spend a deployment's tokens, paying by name",
   "main": "src/index.ts",
   "scripts": {
     "start": "bun run src/server.ts",

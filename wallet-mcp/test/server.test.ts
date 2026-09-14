@@ -159,7 +159,16 @@ describe('startup reads /modules and fails hard when it cannot', () => {
       killed = true;
       proc.kill();
     }, 15_000);
-    const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    // EVERY BRANCH INSIDE AN ASYNC ARROW, including the one that is already a
+    // promise. A bare expression sitting in the array literal is evaluated while
+    // the array is BUILT - so if `new Response(...)` throws synchronously,
+    // `proc.exited` is already in flight with nothing awaiting it and its
+    // rejection is unhandled. The arrow moves that throw inside the settled
+    // set, where Promise.all reports it.
+    const [exitCode, stderr] = await Promise.all([
+      (async () => proc.exited)(),
+      (async () => new Response(proc.stderr).text())(),
+    ]);
     clearTimeout(cap);
 
     // A starved or hung child fails BY NAME here rather than as an opaque

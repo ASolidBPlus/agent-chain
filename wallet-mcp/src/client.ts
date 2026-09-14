@@ -142,15 +142,30 @@ export class ChainSvcClient {
     return this.call(`/balance/${encodeURIComponent(nameOrId)}`);
   }
 
-  history(nameOrId: string, limit: number): Promise<CallResult> {
-    return this.call(`/history/${encodeURIComponent(nameOrId)}?limit=${limit}`);
+  /// `token` is a manifest KEY here. The caller may have written a symbol, but
+  /// `resolveTokenOrRefusal` has already turned it into a key by this point -
+  /// the wire and chain-svc's bookkeeping both speak keys.
+  history(nameOrId: string, limit: number, token: string): Promise<CallResult> {
+    return this.call(
+      `/history/${encodeURIComponent(nameOrId)}?limit=${limit}&token=${encodeURIComponent(token)}`,
+    );
   }
 
   intent(intentId: string): Promise<CallResult> {
     return this.call(`/intents/${encodeURIComponent(intentId)}`);
   }
 
-  signTransfer(body: { to: string; vee: string; memo?: string; intentId: string }): Promise<CallResult> {
+  /// `amount`, never `vee`, and NEVER BOTH - chain-svc accepts the old field for
+  /// one release and refuses a body carrying the pair as `invalid_request`. This
+  /// package ships in the same release as the endpoint, so it has no reason to
+  /// speak the deprecated spelling at all.
+  signTransfer(body: {
+    to: string;
+    amount: string;
+    token: string;
+    memo?: string;
+    intentId: string;
+  }): Promise<CallResult> {
     return this.call('/sign-transfer', { method: 'POST', body });
   }
 
