@@ -209,7 +209,7 @@ describe('the intent ledger never forgets', () => {
 // persona-facing side, and one quietly removed from it. The count alone would
 // catch neither if two changes cancelled.
 describe('the disclosure decision', () => {
-  it('discloses exactly these thirteen codes, and nothing else', () => {
+  it('discloses exactly these fourteen codes, and nothing else', () => {
     const facing = Object.entries(REFUSAL_FOR)
       .filter(([, reason]) => reason !== null)
       .map(([code]) => code)
@@ -229,6 +229,7 @@ describe('the disclosure decision', () => {
         'unknown_name',
         'ambiguous_name',
         'unknown_contract',
+        'unknown_token',
         'function_not_allowed',
         // ...and what its own action did.
         'intent_unresolved',

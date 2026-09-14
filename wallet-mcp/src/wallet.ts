@@ -106,6 +106,9 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   //    the arguments are this wallet's own input, and a revert is a fact about
   //    what its own call did.
   unknown_contract: 'unknown_contract',
+  // The token half of the same fact: which tokens this deployment carries is
+  // the registry, and the persona has already been shown their symbols.
+  unknown_token: 'unknown_token',
   function_not_allowed: 'function_not_allowed',
   bad_args: 'bad_args',
   // The CODE is persona-facing and the REASON is not. chain-svc decodes the

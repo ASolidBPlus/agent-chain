@@ -186,7 +186,15 @@ describe('the route table', () => {
 });
 
 describe('policy enforcement', () => {
-  const policy: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.play'], deny: ['treasury.play'] };
+  // CAPS PER TOKEN as of the multi-token increment. The same two numbers, now
+  // keyed by the token they bound - which is the whole change: a wallet holding
+  // two currencies has two bounds, and a cap that named neither was only ever
+  // right while there was one.
+  const policy: AgentPolicy = {
+    caps: { play: { max_per_tx: 100, max_per_stage: 500 } },
+    allow: ['*.play'],
+    deny: ['treasury.play'],
+  };
   const vee = (n: number) => BigInt(n) * 10n ** 18n;
 
   it('matches only the patterns the game config can express', () => {
@@ -198,16 +206,16 @@ describe('policy enforcement', () => {
   });
 
   it('refuses over max_per_tx and a denied counterparty', () => {
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(150), decimals: 18, symbol: 'PLAY' }))).toBe('over_max_per_tx');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY' }))).toBe('counterparty_denied');
-    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(100), decimals: 18, symbol: 'PLAY' }))).toBe('no-error');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(150), decimals: 18, symbol: 'PLAY', tokenKey: 'play' }))).toBe('over_max_per_tx');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY', tokenKey: 'play' }))).toBe('counterparty_denied');
+    expect(codeOf(() => enforcePolicy({ policy, to: 'alpha.play', amount: vee(100), decimals: 18, symbol: 'PLAY', tokenKey: 'play' }))).toBe('no-error');
   });
 
   // Deny wins: a name matching both lists is refused, because deny is what an
   // author writes to stop something specific.
   it('lets deny beat allow', () => {
     const both: AgentPolicy = { ...policy, allow: ['*'], deny: ['treasury.play'] };
-    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY' }))).toBe(
+    expect(codeOf(() => enforcePolicy({ policy: both, to: 'treasury.play', amount: vee(1), decimals: 18, symbol: 'PLAY', tokenKey: 'play' }))).toBe(
       'counterparty_denied',
     );
   });
@@ -220,7 +228,7 @@ describe('policy enforcement', () => {
   // the cap and the intent together, because they were the same defect twice:
   // a decision and its durable record that were not one operation.
   describe('the reservation', () => {
-    const cap = stageCapWei(policy, 18); // 500 VEE
+    const cap = stageCapWei(policy, 'play', 18); // 500 VEE
     let n = 0;
     const uniq = () => `i${++n}`;
     const take = (store: Store, agentId: string, stage: string, amount: bigint, capWei: bigint) =>
@@ -491,16 +499,15 @@ describe('policy enforcement', () => {
 describe('deny matches the resolved principal, not just the requested name', () => {
   const denied = {
     agentId: 'orch:mark',
-    max_per_tx: 1000,
-    max_per_stage: 5000,
+    caps: { play: { max_per_tx: 1000, max_per_stage: 5000 } },
     allow: ['*'],
     deny: ['mark.play'],
     frozen: false,
   };
   const oneVee = 10n ** 18n; // the `vee` helper is scoped to the describe above
-  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee, decimals: 18, symbol: 'PLAY' }));
+  const to = (name: string) => codeOf(() => enforcePolicy({ policy: denied, to: name, amount: oneVee, decimals: 18, symbol: 'PLAY', tokenKey: 'play' }));
   const toResolved = (name: string, canonical: string) =>
-    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee, decimals: 18, symbol: 'PLAY' }));
+    codeOf(() => enforcePolicy({ policy: denied, to: name, canonical, amount: oneVee, decimals: 18, symbol: 'PLAY', tokenKey: 'play' }));
 
   it('refuses the denied name', () => {
     expect(to('mark.play')).toBe('counterparty_denied');
@@ -522,7 +529,7 @@ describe('deny matches the resolved principal, not just the requested name', () 
   it('refuses a treasury alias when the deny list names the treasury', () => {
     const p = { ...denied, deny: ['treasury.play'] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'treasure.play', canonical: 'treasury.play', amount: oneVee, decimals: 18, symbol: 'PLAY' }),
+      enforcePolicy({ policy: p, to: 'treasure.play', canonical: 'treasury.play', amount: oneVee, decimals: 18, symbol: 'PLAY', tokenKey: 'play' }),
     );
     expect(code).toBe('counterparty_denied');
   });
@@ -534,7 +541,7 @@ describe('deny matches the resolved principal, not just the requested name', () 
   it('still allows an ordinary send whose canonical does not match the allow list', () => {
     const p = { ...denied, allow: ['*.play'], deny: [] };
     const code = codeOf(() =>
-      enforcePolicy({ policy: p, to: 'bob.play', canonical: 'orch:bob', amount: oneVee, decimals: 18, symbol: 'PLAY' }),
+      enforcePolicy({ policy: p, to: 'bob.play', canonical: 'orch:bob', amount: oneVee, decimals: 18, symbol: 'PLAY', tokenKey: 'play' }),
     );
     expect(code).toBe('no-error');
   });

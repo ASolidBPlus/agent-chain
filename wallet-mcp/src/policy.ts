@@ -47,6 +47,11 @@ export type Refusal =
   /// include this wallet's kind - deliberately: distinguishing them would tell
   /// a persona what OTHER kinds of wallet are permitted to do.
   | 'function_not_allowed'
+  /// No token by that key or symbol in this deployment. A fact about the PUBLIC
+  /// registry, like `unknown_contract` and `unknown_name`: a persona reads token
+  /// SYMBOLS in every balance and every history entry, so refusing to say which
+  /// ones exist would refuse it the vocabulary the service itself taught it.
+  | 'unknown_token'
   /// The arguments did not match the function's ABI, with the index and the
   /// expected type. A fact about what the persona just typed, like
   /// `invalid_amount`, and the detail is what lets a model fix its own call

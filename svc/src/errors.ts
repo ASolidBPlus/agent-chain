@@ -36,6 +36,17 @@ export type ErrorCode =
   /// tool lists exactly what exists, and refusing to say which keys are real
   /// would only make a persona guess.
   | 'unknown_contract'
+  /// No token by that key or symbol in this deployment. 404 and persona-facing
+  /// for the same reason `unknown_contract` is: which tokens exist is the
+  /// public registry, and a persona reads their symbols in every balance and
+  /// every history entry.
+  ///
+  /// DISTINCT FROM `module_not_deployed`, which says this deployment has NO
+  /// token module at all. Two different absences: one is a fact about the
+  /// registry's contents, the other about the deployment's shape, and only the
+  /// first is the caller's business. Collapsing them would have a names-only
+  /// deployment tell a persona that its own currency does not exist.
+  | 'unknown_token'
   /// The contract exists and this caller may not call this function on it -
   /// either the allowlist has no entry for the pair, or the entry does not
   /// include this wallet's kind. ONE CODE FOR BOTH, deliberately: telling a
@@ -78,6 +89,7 @@ export const STATUS: Record<ErrorCode, number> = {
   wallet_not_found: 404,
   module_not_deployed: 404,
   unknown_contract: 404,
+  unknown_token: 404,
   function_not_allowed: 403,
   bad_args: 400,
   wallet_frozen: 409,

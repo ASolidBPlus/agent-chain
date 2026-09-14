@@ -49,14 +49,157 @@ export function isWalletKind(value: unknown): value is WalletKind {
 /// veeToWei.
 export type VeeCap = number | string;
 
-export interface AgentPolicy {
+/// What one wallet may spend of ONE token.
+export interface TokenCaps {
   max_per_tx: VeeCap;
   max_per_stage: VeeCap;
+}
+
+export interface AgentPolicy {
+  /// KEYED BY TOKEN KEY, not by symbol: this is chain-svc's own bookkeeping,
+  /// and `stage_spend` and `intents` store the key. A symbol is what a persona
+  /// reads and writes; `resolveToken` is where the two meet, once.
+  ///
+  /// A TOKEN WITH NO ENTRY CANNOT BE SPENT. Silence fails closed in money
+  /// policy - an absent cap read as "no limit" is the one reading that costs
+  /// money, and it is the reading a careless caller reaches for first.
+  caps: Record<string, TokenCaps>;
   allow: string[];
   deny: string[];
 }
 
+/// The caps for one token, or the refusal that says there are none.
+///
+/// `over_max_per_tx` rather than a new code: from the caller's side this IS the
+/// per-transaction bound refusing, and the bound happens to be zero because
+/// nobody set one. The DETAIL says which token, because a persona holding two
+/// currencies cannot otherwise tell which of its spends is impossible.
+export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
+  const caps = policy.caps?.[tokenKey];
+  if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
+    throw new HttpError('over_max_per_tx', `no cap set for ${tokenKey}`);
+  }
+  return caps;
+}
+
 export type PolicyDefaults = Record<WalletKind, AgentPolicy>;
+
+/// The one wildcard the defaults file's `caps` may use. EXACTLY TWO KEY FORMS,
+/// `*` and a deployed token key - a third would make this a pattern language,
+/// and the one place this system already has one (allow/deny) is the one place
+/// it has needed a rule about what a pattern matching nothing means.
+const CAPS_WILDCARD = '*';
+
+function isTokenCaps(value: unknown): value is TokenCaps {
+  if (typeof value !== 'object' || value === null) return false;
+  const c = value as Record<string, unknown>;
+  return isCap(c.max_per_tx) && isCap(c.max_per_stage);
+}
+
+/// Turns the defaults file's `caps` into one entry per DEPLOYED token.
+///
+/// `*` is copied to every deployed key; an explicit key REPLACES the whole pair
+/// for that token rather than merging into it, because field-by-field merging
+/// is the trap: "au gets a bigger max_per_tx" would silently inherit the
+/// wildcard's max_per_stage, and the wallet would carry two halves of one bound
+/// taken from two different currencies.
+///
+/// SEPARATE FROM the `{tld}` substitution beside it rather than folded into it.
+/// They answer different questions - which tokens a cap covers, and what a
+/// pattern with no TLD can match - and the second has its own rule about a
+/// pattern that matches nothing, which this one must not inherit.
+function expandCaps(raw: unknown, tokenKeys: string[], kind: string, path: string): Record<string, TokenCaps> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`chain-svc: policy defaults at ${path}: "${kind}" has no caps object`);
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0) {
+    // An empty caps map is a wallet that can spend nothing. That may be
+    // deliberate for a kind, but it is not something to arrive at by leaving a
+    // key out of a file, so it has to be written rather than defaulted into.
+    throw new Error(`chain-svc: policy defaults at ${path}: "${kind}" sets no caps`);
+  }
+
+  const out: Record<string, TokenCaps> = {};
+  let wildcard: TokenCaps | undefined;
+  for (const [key, value] of entries) {
+    if (!isTokenCaps(value)) {
+      throw new Error(
+        `chain-svc: policy defaults at ${path}: "${kind}" caps "${key}" is not ` +
+          `{max_per_tx, max_per_stage} of usable amounts`,
+      );
+    }
+    if (key === CAPS_WILDCARD) {
+      wildcard = value;
+      continue;
+    }
+    if (!tokenKeys.includes(key)) {
+      // At LOAD, where the operator who wrote it is looking. A key naming a
+      // token that is not deployed is a cap that will never be consulted, and
+      // its author believes it will.
+      throw new Error(
+        `chain-svc: policy defaults at ${path}: "${kind}" caps names "${key}", not a deployed token`,
+      );
+    }
+    out[key] = value;
+  }
+
+  if (wildcard) {
+    for (const key of tokenKeys) {
+      if (out[key] === undefined) out[key] = wildcard;
+    }
+  }
+  return out;
+}
+
+/// Reads either policy shape and returns the current one.
+///
+/// The LEGACY shape - top-level `max_per_tx`/`max_per_stage` - becomes
+/// `caps[<default token key>]`. A store full of v0.4.0 policy files is the
+/// ordinary upgrade, and refusing them would freeze every wallet in a running
+/// game; splitting them across tokens would invent a bound nobody wrote.
+///
+/// A file carrying BOTH shapes - written by a new binary, edited by hand from
+/// an old example - keeps the NEW one: it is the shape that can express what
+/// the old cannot, and preferring the legacy pair would discard every token but
+/// the default.
+export function normalisePolicy(value: unknown, defaultTokenKey: string | undefined): AgentPolicy {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new HttpError('invalid_request', 'policy must be an object');
+  }
+  const p = value as Record<string, unknown>;
+  if (!isNameList(p.allow) || !isNameList(p.deny)) {
+    throw new HttpError('invalid_request', 'policy must carry allow and deny lists');
+  }
+
+  if (p.caps !== undefined) {
+    if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
+      throw new HttpError('invalid_request', 'caps must be an object keyed by token');
+    }
+    for (const [key, caps] of Object.entries(p.caps as Record<string, unknown>)) {
+      if (!isTokenCaps(caps)) {
+        throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
+      }
+    }
+    return { caps: p.caps as Record<string, TokenCaps>, allow: p.allow, deny: p.deny };
+  }
+
+  if (isCap(p.max_per_tx) && isCap(p.max_per_stage)) {
+    if (defaultTokenKey === undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'a legacy policy names no token and this deployment has none to read it against',
+      );
+    }
+    return {
+      caps: { [defaultTokenKey]: { max_per_tx: p.max_per_tx, max_per_stage: p.max_per_stage } },
+      allow: p.allow,
+      deny: p.deny,
+    };
+  }
+
+  throw new HttpError('invalid_request', 'policy must carry caps, or max_per_tx and max_per_stage');
+}
 
 /// Loaded from policy-defaults.json rather than held as a constant here, so the
 /// numbers are game balance the owner tunes and not something a builder chose
@@ -119,6 +262,11 @@ function fillPatterns(
 export function loadPolicyDefaults(
   path: string,
   tld: string | undefined,
+  /// The DEPLOYED token keys, in manifest order. Needed because `*` means
+  /// "every token this deployment has", which the file cannot know and this
+  /// function can - and because an explicit key naming a token that is not
+  /// there is refused rather than kept as a cap nothing will consult.
+  tokenKeys: string[],
   warn: (message: string) => void = console.warn,
 ): PolicyDefaults {
   let parsed: unknown;
@@ -129,12 +277,12 @@ export function loadPolicyDefaults(
   }
   const out = {} as PolicyDefaults;
   for (const kind of WALLET_KINDS) {
-    const entry = (parsed as Record<string, unknown>)?.[kind];
-    if (!isPolicy(entry)) {
+    const entry = (parsed as Record<string, unknown>)?.[kind] as Record<string, unknown> | undefined;
+    if (typeof entry !== 'object' || entry === null || !isNameList(entry.allow) || !isNameList(entry.deny)) {
       throw new Error(`chain-svc: policy defaults at ${path} have no valid "${kind}" entry`);
     }
     out[kind] = {
-      ...entry,
+      caps: expandCaps(entry.caps, tokenKeys, kind, path),
       allow: fillPatterns(entry.allow, tld, 'allow', warn),
       deny: fillPatterns(entry.deny, tld, 'deny', warn),
     };
@@ -180,7 +328,14 @@ const isNameList = (a: unknown): a is string[] =>
 /// with the caps left to the defaults, which is the harness's whole use - was
 /// refused outright. Found by running the stack rather than
 /// reading it.
-export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy {
+export function mergePolicy(
+  value: unknown,
+  defaults: AgentPolicy,
+  /// The default token's KEY, for reading a caller's legacy `max_per_tx` pair.
+  /// Optional because a deployment may have no token at all, in which case a
+  /// legacy pair has nothing to be about and is refused rather than guessed at.
+  defaultTokenKey?: string,
+): AgentPolicy {
   if (value === undefined || value === null) return defaults;
   if (typeof value !== 'object') {
     throw new HttpError('invalid_request', 'policy must be an object');
@@ -205,9 +360,48 @@ export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy 
     }
   }
 
+  // A SUPPLIED CAPS MAP IS TAKEN WHOLE, replacing the kind's. The same rule as
+  // the defaults file's explicit key, one level up: a caps map is what THIS
+  // wallet may spend, not an amendment to what its kind may - and merging would
+  // let a caller widen one token by naming another.
+  //
+  // The LEGACY pair is still accepted from a caller and read against the
+  // default token, leaving the other tokens' defaults in place: a caller
+  // writing the old shape is saying something about the default token, not
+  // about every token.
+  let caps = defaults.caps;
+  if (p.caps !== undefined) {
+    if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
+      throw new HttpError('invalid_request', 'caps must be an object keyed by token');
+    }
+    for (const [key, value] of Object.entries(p.caps as Record<string, unknown>)) {
+      if (!isTokenCaps(value)) {
+        throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
+      }
+    }
+    caps = p.caps as Record<string, TokenCaps>;
+  } else if (p.max_per_tx !== undefined || p.max_per_stage !== undefined) {
+    if (defaultTokenKey === undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'max_per_tx and max_per_stage name no token and this deployment has none to read them against',
+      );
+    }
+    const existing = defaults.caps[defaultTokenKey];
+    caps = {
+      ...defaults.caps,
+      [defaultTokenKey]: {
+        max_per_tx: (p.max_per_tx as VeeCap) ?? existing?.max_per_tx,
+        max_per_stage: (p.max_per_stage as VeeCap) ?? existing?.max_per_stage,
+      },
+    };
+    if (!isTokenCaps(caps[defaultTokenKey])) {
+      throw new HttpError('invalid_request', 'max_per_tx and max_per_stage must be usable amounts');
+    }
+  }
+
   const merged: AgentPolicy = {
-    max_per_tx: (p.max_per_tx as VeeCap) ?? defaults.max_per_tx,
-    max_per_stage: (p.max_per_stage as VeeCap) ?? defaults.max_per_stage,
+    caps,
     allow: (p.allow as string[]) ?? defaults.allow,
     deny: (p.deny as string[]) ?? defaults.deny,
   };
@@ -221,19 +415,48 @@ export function mergePolicy(value: unknown, defaults: AgentPolicy): AgentPolicy 
 export function isPolicy(value: unknown): value is AgentPolicy {
   if (typeof value !== 'object' || value === null) return false;
   const p = value as Record<string, unknown>;
-  return isCap(p.max_per_tx) && isCap(p.max_per_stage) && isNameList(p.allow) && isNameList(p.deny);
+  if (!isNameList(p.allow) || !isNameList(p.deny)) return false;
+  // EITHER SHAPE IS A VALID DOCUMENT ON DISK. A store full of v0.4.0 policy
+  // files is the ordinary upgrade, and a predicate that recognised only the new
+  // shape would make every one of them unreadable - which `readPolicyFile`
+  // turns into "no policy", which falls back to the KIND DEFAULTS. A wallet
+  // whose operator had narrowed its caps would silently get the wider ones.
+  if (p.caps !== undefined) {
+    if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) return false;
+    return Object.values(p.caps as Record<string, unknown>).every(isTokenCaps);
+  }
+  return isCap(p.max_per_tx) && isCap(p.max_per_stage);
 }
 
 
 /// The policy chain-svc enforces for an agent is the SAME file it writes for
 /// wallet-mcp to read, so the boundary and the fast path cannot drift into
 /// disagreeing about what the caps are.
-export async function readPolicyFile(policyDir: string, agentId: string): Promise<AgentPolicy | null> {
+export async function readPolicyFile(
+  policyDir: string,
+  agentId: string,
+  /// The default token's key, for reading a LEGACY file. Optional: a
+  /// deployment with no token has nothing for a legacy pair to be about, and a
+  /// file in the new shape needs no default at all.
+  defaultTokenKey?: string,
+): Promise<AgentPolicy | null> {
   try {
     const raw = await readFile(join(policyDir, keyFileName(agentId)), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
-    return isPolicy(parsed) ? parsed : null;
+    if (!isPolicy(parsed)) return null;
+    // MIGRATED IN MEMORY, NOT REWRITTEN HERE. A read is a read; the file is
+    // rewritten in the new shape by the next `writePolicyFile`, which is a
+    // write somebody asked for. Migrating on read would have every send
+    // rewriting a file, and a read path that writes is a read path that can
+    // fail for reasons the caller never asked about.
+    return normalisePolicy(parsed, defaultTokenKey);
   } catch {
+    // UNREADABLE IS NOT DENIED. Missing, corrupt, or caught mid-rewrite: this
+    // defers to the caller's fallback rather than refusing, because a transient
+    // read error must not freeze a wallet in a running game. That is the
+    // opposite silence from an absent CAP, which does refuse - one is "we could
+    // not read the rules", the other is "the rules say nothing about this
+    // token", and only the second is a decision the file made.
     return null;
   }
 }
@@ -306,8 +529,11 @@ export function isAllowed(policy: AgentPolicy, name: string): boolean {
 /// The stage cap in wei. Deliberately NOT checked by enforcePolicy: the check
 /// and the spend record have to be one atomic step, or concurrent sends all
 /// read the same pre-spend total and all pass. See Store.reserveStageSpend.
-export function stageCapWei(policy: AgentPolicy, decimals: number): bigint {
-  return capToWei(policy.max_per_stage, decimals);
+export function stageCapWei(policy: AgentPolicy, tokenKey: string, decimals: number): bigint {
+  // Through capsFor, so a token with no entry refuses HERE rather than
+  // defaulting to an unbounded stage. The reservation would otherwise take a
+  // hold against a cap nobody set.
+  return capToWei(capsFor(policy, tokenKey).max_per_stage, decimals);
 }
 
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
@@ -347,9 +573,17 @@ export function enforcePolicy(args: {
   /// the scale the amount was parsed at.
   decimals: number;
   symbol: string;
+  /// WHICH TOKEN's caps to check against. The key, not the symbol: caps are
+  /// keyed by the manifest's own name, and `resolveToken` is the one place a
+  /// symbol becomes a key.
+  tokenKey: string;
 }): void {
-  const { policy, to, canonical, amount, decimals, symbol } = args;
-  const perTx = capToWei(policy.max_per_tx, decimals);
+  const { policy, to, canonical, amount, decimals, symbol, tokenKey } = args;
+  // capsFor, not policy.max_per_tx: a wallet with no entry for this token
+  // cannot spend it, and that refusal has to come from the same place every
+  // other cap does.
+  const caps = capsFor(policy, tokenKey);
+  const perTx = capToWei(caps.max_per_tx, decimals);
 
   // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
   // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
@@ -363,7 +597,7 @@ export function enforcePolicy(args: {
     throw new HttpError('invalid_amount', 'vee must be greater than zero');
   }
   if (amount > perTx) {
-    throw new HttpError('over_max_per_tx', `max_per_tx is ${policy.max_per_tx} ${symbol}`);
+    throw new HttpError('over_max_per_tx', `max_per_tx is ${caps.max_per_tx} ${symbol}`);
   }
 
   // BOTH NAMES, and the two lists use them differently ON PURPOSE (ruled).

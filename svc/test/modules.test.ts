@@ -288,7 +288,7 @@ describe('spawning without a names module', () => {
       new Keystore(join(dir, 'keys'), 'secret-secret-secret-secret'),
       store,
       { lookup: async () => null, require: async () => null } as never,
-      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined),
+      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, []),
     );
     return { s, store, registryCalls };
   }
@@ -361,7 +361,7 @@ describe('deny entries without a names module', () => {
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x9999999999999999999999999999999999999999' }) } as never,
       store,
       resolver,
-      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined),
+      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined, []),
       closedCallPolicy(),
     );
     return { t, store };

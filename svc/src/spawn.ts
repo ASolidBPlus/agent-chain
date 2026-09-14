@@ -56,7 +56,12 @@ export class Spawner {
     policyDefaults?: PolicyDefaults,
   ) {
     this.policyDefaults =
-      policyDefaults ?? loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld);
+      policyDefaults ??
+      loadPolicyDefaults(
+        config.policyDefaultsPath,
+        chain.modules.names?.tld,
+        chain.modules.tokens.map((t) => t.key),
+      );
   }
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is
@@ -326,7 +331,10 @@ export class Spawner {
 
   private async existingPolicy(agentId: string): Promise<AgentPolicy> {
     // Falls back to the `agent` defaults only when there is no file to preserve.
-    return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
+    return (
+      (await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key)) ??
+      this.policyDefaults.agent
+    );
   }
 
   /// Partial update of a wallet's policy (harness spec S3). Platform scope.
@@ -339,6 +347,12 @@ export class Spawner {
     agentId: string,
     body: {
       frozen?: unknown;
+      /// The current shape.
+      caps?: unknown;
+      /// The LEGACY pair, still accepted from a caller and read against the
+      /// default token. Kept because a patch is the one place an operator
+      /// types a policy by hand, and the shape they have in front of them is
+      /// whatever the last release wrote.
       max_per_tx?: unknown;
       max_per_stage?: unknown;
       allow?: unknown;
@@ -360,7 +374,11 @@ export class Spawner {
     // A patch over the CURRENT policy is the same operation as a patch over
     // the kind defaults, so it is the same function with a different base.
     const current = await this.existingPolicy(agentId);
-    const next = mergePolicy(body, current);
+    // THE DEFAULT TOKEN'S KEY, so a PATCH carrying the legacy `max_per_tx` pair
+    // is read against it rather than refused. A caller patching the old shape
+    // is saying something about the default token; every other token's caps
+    // come through from `current` untouched.
+    const next = mergePolicy(body, current, this.chain.modules.tokens[0]?.key);
 
     // Also called here now. It was on this path only, so `POST /wallets` with
     // `deny: ["mark.play"]` was accepted while PATCH with the identical value
