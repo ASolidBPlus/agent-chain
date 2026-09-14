@@ -63,7 +63,20 @@ export function serialiseResult(value: unknown, fn: AbiFunction): unknown {
   // list: `quote(...)` answering `["40"]` would make every caller index into
   // it, and viem's own shape is the reason - it returns the bare value.
   if (outputs.length === 1) return serialiseOne(value, outputs[0]!);
-  return (value as unknown[]).map((v, i) => serialiseOne(v, outputs[i]!));
+
+  // SEVERAL RETURN VALUES, KEYED BY NAME WHEN THEY HAVE ONE. viem hands these
+  // back as a positional array, which is how the Converter's
+  // `pair() -> (rate, paused, exists)` reached a persona as
+  // `["750000000000000000", false, true]` - three values it cannot tell apart,
+  // and a bool pair it cannot tell apart AT ALL. Found by the compose smoke,
+  // whose own expectation is "→ rate 750000000000000000".
+  //
+  // Positional only when a name is missing, because there is then nothing to
+  // key on and an invented index would be a worse lie than the array.
+  const named = outputs.every((o) => (o.name ?? '') !== '');
+  const list = (value as unknown[]).map((v, i) => serialiseOne(v, outputs[i]!));
+  if (!named) return list;
+  return Object.fromEntries(outputs.map((o, i) => [o.name!, list[i]]));
 }
 
 function serialiseOne(value: unknown, param: AbiParameter): unknown {
@@ -1445,6 +1458,29 @@ export class Treasury {
     return hash;
   }
 
+  /// A failure from a contract call, classified.
+  ///
+  /// A REVERT IS NOT A CHAIN ERROR, and `asChainError` cannot tell them apart:
+  /// it saw "The contract function \"setPair\" reverted." and answered
+  /// `chain_error`, a 502 that says the NODE is broken about a chain doing
+  /// exactly what it was asked. Measured against a real Anvil - `writeContract`
+  /// simulates before it sends, so a contract-level refusal arrives here as an
+  /// exception rather than as a reverted receipt, which is the one way this
+  /// path differs from `call`.
+  ///
+  /// THE REASON GOES TO THE LOG SINK, NEVER TO THE CALLER, exactly as §3.2.9
+  /// requires of the mined case. viem's message carries the function name and
+  /// the decoded custom error, which is the contract's internal state talking.
+  private asCallError(err: unknown, where: string): HttpError {
+    if (err instanceof HttpError) return err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (/revert/i.test(message)) {
+      console.warn(`[chain-svc] ${where} reverted: ${message.split('\n')[0]}`);
+      return new HttpError('revert', 'the call was mined and reverted; nothing changed');
+    }
+    return asChainError(err);
+  }
+
   /// §3.3. The hub calls a contract with the treasury's key.
   ///
   /// NO KIND, FROZEN, CAP, COUNT OR ADDRESS RULE: platform scope is the
@@ -1531,7 +1567,7 @@ export class Treasury {
       // consumes the intent id, so a retry needs a fresh one. The hub generates
       // one per request unless it supplies its own, so in practice this is the
       // operator repeating a command rather than reconciling anything.
-      throw asChainError(err);
+      throw this.asCallError(err, `admin-call ${entry.function} on ${contract.key}`);
     }
     this.store.completeIntent(intentId, hash);
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
@@ -1600,13 +1636,7 @@ export class Treasury {
         args: args as never,
       });
     } catch (err) {
-      if (err instanceof HttpError) throw err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (/revert/i.test(message)) {
-        console.warn(`[chain-svc] read ${entry.function} on ${contract.key} reverted: ${message.split('\n')[0]}`);
-        throw new HttpError('revert', 'the view reverted; it returned nothing');
-      }
-      throw asChainError(err);
+      throw this.asCallError(err, `read ${entry.function} on ${contract.key}`);
     }
 
     const result = serialiseResult(raw, entry.abiFunction);

@@ -17,7 +17,7 @@
 import { describe, it, expect } from 'bun:test';
 import { join } from 'node:path';
 import { decodeFunctionData, type Abi } from 'viem';
-import { Treasury, type Signer } from '../src/treasury.ts';
+import { Treasury, serialiseResult, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
 import { fixedCallPolicy, type CallEntry } from '../src/calls.ts';
@@ -193,6 +193,11 @@ async function harness(
     reverted?: boolean;
     store?: Store;
     keystoreThrows?: boolean;
+    /// Makes writeContract and readContract throw the way a REAL revert
+    /// arrives: `writeContract` simulates before it sends, so a contract-level
+    /// refusal is an exception here rather than a reverted receipt. The message
+    /// is viem's own, measured against a live Anvil.
+    contractReverts?: boolean;
     /// Makes the name argument resolve to the SAME address as the deny entry
     /// `treasury.{tld}`, which is how a deny is evaded in the real world: the
     /// policy names one string and the caller uses another for the same wallet.
@@ -209,11 +214,23 @@ async function harness(
     viemChain: { id: 31337 },
     publicClient: {
       waitForTransactionReceipt: async () => ({ status: opts.reverted ? 'reverted' : 'success' }),
-      readContract: async () => 40n,
+      readContract: async () => {
+        if (opts.contractReverts) {
+          throw new Error('The contract function "quote" reverted.\n\nError: UnknownPair()');
+        }
+        return 40n;
+      },
     },
     walletClient: {
       account: { address: PLAY },
-      writeContract: async () => '0xadminhash',
+      writeContract: async () => {
+        if (opts.contractReverts) {
+          throw new Error(
+            'The contract function "setPair" reverted.\n\nError: LoopMintsValue(0x…, 0x…, 1500000000000000000, 750000000000000000)',
+          );
+        }
+        return '0xadminhash';
+      },
     },
   } as unknown as Chain;
 
@@ -678,6 +695,32 @@ describe('admin-call', () => {
     ).toBe('function_not_allowed');
   });
 
+  it('answers a simulated revert with revert, not chain_error', async () => {
+    // FOUND BY THE COMPOSE SMOKE, and it is the shape of defect a unit test
+    // does not reach on its own: `asChainError` cannot tell a REVERT from a
+    // broken node, so it answered 502 chain_error - "the chain is down" - about
+    // a chain doing exactly what it was asked. writeContract SIMULATES before
+    // it sends, so this arrives as an exception rather than as a reverted
+    // receipt, which is the one way this path differs from `call`.
+    const { t } = await harness(undefined, { contractReverts: true });
+    let err: HttpError | undefined;
+    try {
+      await t.adminCall({
+        contract: 'converter',
+        function: 'setPair',
+        args: [PLAY, GOLD, '1500000000000000000'],
+        intentId: 'a-rev',
+      });
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('revert');
+    expect(err?.status).toBe(409);
+    // The REASON is the contract's internal state and stays in the log sink.
+    expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
+    expect(JSON.stringify(err?.detail)).not.toContain('LoopMintsValue');
+  });
+
   it('emits hub.call', async () => {
     const { t, store } = await harness();
     await t.adminCall({ contract: 'converter', function: 'setPair', args: [PLAY, GOLD, '1'], intentId: 'a-5' });
@@ -722,6 +765,22 @@ describe('read', () => {
     ).toBe('function_not_allowed');
   });
 
+  it('answers a reverting view with revert, and no reason', async () => {
+    const { t } = await harness(undefined, { contractReverts: true });
+    let err: HttpError | undefined;
+    try {
+      await t.read(asWallet('orch:a'), {
+        contract: 'converter',
+        function: 'quote',
+        args: [{ token: 'play' }, { token: 'gold' }, '40'],
+      });
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('revert');
+    expect(JSON.stringify(err?.detail)).not.toContain('UnknownPair');
+  });
+
   it('serves a platform caller without a kind check, with raw addresses', async () => {
     const { t } = await harness();
     expect(
@@ -731,5 +790,70 @@ describe('read', () => {
         args: [PLAY, GOLD, '40'],
       }),
     ).toEqual({ result: '40' });
+  });
+});
+
+// §3.4. HOW A RETURN VALUE REACHES A MODEL.
+//
+// Every rule here exists because a model reads the answer and has to act on it:
+// a bigint has no JSON form, an address has a canonical spelling that is not
+// the one the chain returns, and a positional array of three values is three
+// values nobody can tell apart.
+describe('serialiseResult', () => {
+  const fn = (outputs: Array<{ type: string; name: string; components?: unknown[] }>) =>
+    ({ type: 'function', name: 'f', inputs: [], outputs, stateMutability: 'view' }) as never;
+
+  it('returns a single value bare, not wrapped in a list', () => {
+    expect(serialiseResult(40n, fn([{ type: 'uint256', name: 'amountOut' }]))).toBe('40');
+  });
+
+  it('keys several NAMED return values by name', () => {
+    // THE DEFECT THE COMPOSE SMOKE FOUND. The Converter's
+    // `pair() -> (rate, paused, exists)` reached a persona as
+    // ["750000000000000000", false, true] - and the two booleans are not even
+    // distinguishable from each other by inspection.
+    expect(
+      serialiseResult(
+        [750000000000000000n, false, true],
+        fn([
+          { type: 'uint256', name: 'rate' },
+          { type: 'bool', name: 'paused' },
+          { type: 'bool', name: 'exists' },
+        ]),
+      ),
+    ).toEqual({ rate: '750000000000000000', paused: false, exists: true });
+  });
+
+  it('stays positional when a name is missing', () => {
+    // There is nothing to key on, and an invented index would be a worse lie
+    // than the array.
+    expect(
+      serialiseResult([1n, 2n], fn([{ type: 'uint256', name: 'a' }, { type: 'uint256', name: '' }])),
+    ).toEqual(['1', '2']);
+  });
+
+  it('checksums an address', () => {
+    expect(
+      serialiseResult('0x5fbdb2315678afecb367f032d93f642f64180aa3', fn([{ type: 'address', name: 'who' }])),
+    ).toBe('0x5FbDB2315678afecb367f032d93F642f64180aa3');
+  });
+
+  it('walks into arrays and structs', () => {
+    expect(serialiseResult([1n, 2n], fn([{ type: 'uint256[]', name: 'xs' }]))).toEqual(['1', '2']);
+    expect(
+      serialiseResult(
+        { token: '0x5fbdb2315678afecb367f032d93f642f64180aa3', amount: 5n },
+        fn([
+          {
+            type: 'tuple',
+            name: 'p',
+            components: [
+              { type: 'address', name: 'token' },
+              { type: 'uint256', name: 'amount' },
+            ],
+          },
+        ]),
+      ),
+    ).toEqual({ token: '0x5FbDB2315678afecb367f032d93F642f64180aa3', amount: '5' });
   });
 });
