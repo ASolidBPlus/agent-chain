@@ -11,6 +11,12 @@ import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
 import { assertDeploymentUnchanged, ChainSwapError, type DeploymentIdentity } from '../src/deployment.ts';
+import { Resolver } from '../src/resolver.ts';
+import type { Chain } from '../src/chain.ts';
+import type { HttpError } from '../src/errors.ts';
+
+const ADDR_A = '0x1111111111111111111111111111111111111111' as const;
+const ADDR_B = '0x2222222222222222222222222222222222222222' as const;
 
 const A: DeploymentIdentity = { chainId: '31337', modules: [{ kind: 'token' as const, key: 'vee', address: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }, { kind: 'names' as const, address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512' }] };
 const B: DeploymentIdentity = {
@@ -180,5 +186,75 @@ describe('the call site in index.ts', () => {
     expect(at).toBeGreaterThan(-1);
     const line = src.slice(src.lastIndexOf('\n', at) + 1, at);
     expect(line).toContain('recordedDeployment === null');
+  });
+});
+
+// §4.5. A deployment with no names module still has wallets, and the store is
+// the only record of which agent owns which address. These pin that the branch
+// answers from the store and does NOT invent registry behaviour to go with it.
+describe('resolution without a names module', () => {
+  const namesless = (store: Store) =>
+    new Resolver(
+      {
+        modules: { tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }] },
+        publicClient: {
+          readContract: () => {
+            throw new Error('the chain must not be reached: there is no registry to read');
+          },
+          getContractEvents: () => {
+            throw new Error('the chain must not be reached: there is no registry to read');
+          },
+        },
+      } as unknown as Chain,
+      store,
+    );
+
+  it('resolves a spawned agent id exactly, from the store', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).lookup('orch:a')).toEqual({ address: ADDR_A, canonical: 'orch:a' });
+    store.close();
+  });
+
+  // NO BARE-ID FALLBACK. With a registry, `a` inside namespace `orch` can reach
+  // `orch:a`; without one, inventing that rule would give a names-less
+  // deployment a second resolution rule nothing else knows about.
+  it('does not resolve a bare id, and does not resolve an unspawned name', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).lookup('a')).toBeNull();
+    expect(await namesless(store).lookup('alpha.vee')).toBeNull();
+    store.close();
+  });
+
+  it('reverses an address to the agent that owns it, and to null for a stranger', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).reverseOf(ADDR_A)).toBe('orch:a');
+    expect(await namesless(store).reverseOf(ADDR_B)).toBeNull();
+    store.close();
+  });
+
+  // An empty list is the honest answer, not a degraded one: there are no
+  // aliases, as distinct from "none could be found".
+  it('has no aliases at all', async () => {
+    const store = new Store(':memory:');
+    expect(await namesless(store).aliasesOf(ADDR_A)).toEqual([]);
+    store.close();
+  });
+
+  it('refuses registrantOf by name rather than reading a registry that is absent', async () => {
+    const store = new Store(':memory:');
+    let code = 'no-throw';
+    try {
+      await namesless(store).registrantOf('alpha.vee');
+    } catch (e) {
+      code = (e as HttpError).code ?? 'not-an-HttpError';
+    }
+    expect(code).toBe('module_not_deployed');
+    store.close();
   });
 });

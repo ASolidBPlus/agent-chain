@@ -329,6 +329,21 @@ export class Store {
     return row?.address ?? null;
   }
 
+  /// The reverse of `spawnedAddress`: which agent a wallet address belongs to.
+  ///
+  /// Only reached on a deployment with NO names module, where it is the whole
+  /// of `reverseOf`. Equality is exact rather than case-insensitive because
+  /// both sides are viem `Address` values: `markSpawned` stores what the
+  /// keystore produced, and the callers pass what a contract read returned,
+  /// and viem checksums both. A `lower(address)` comparison here would read as
+  /// defensive and would instead hide the day that stops being true.
+  agentIdForAddress(address: string): string | null {
+    const row = this.db.query(`SELECT agent_id FROM spawns WHERE address = ?`).get(address) as
+      | { agent_id: string }
+      | null;
+    return row?.agent_id ?? null;
+  }
+
   // --- which chain this store belongs to (spec S4) --------------------------
 
   /// The deployment this store was first used against, or null on a store that

@@ -80,7 +80,7 @@ async function main(): Promise<void> {
       acknowledged: config.acknowledgeLedgerReset,
     }),
   );
-  const resolver = new Resolver(chain);
+  const resolver = new Resolver(chain, store);
   const services = {
     config,
     chain,

@@ -289,7 +289,7 @@ describe('the alias index', () => {
       },
     } as unknown as import('../src/chain.ts').Chain;
 
-    const aliases = await new Resolver(chain).aliasesOf(WALLET);
+    const aliases = await new Resolver(chain, store).aliasesOf(WALLET);
 
     expect(aliases).toEqual(['mine.vee']);
     expect(aliases).not.toContain('strangers-label.vee'); // owned by someone else
