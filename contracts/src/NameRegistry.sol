@@ -8,7 +8,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /// (spec S0). Two kinds of name live here:
 ///   * a CANONICAL name is a qualified agent id, `<org label>:<local id>`,
 ///     registered by chain-svc at spawn with owner == target == the wallet;
-///   * a VANITY alias (`shadowbroker.vee`) is any other name owned by a wallet
+///   * a VANITY alias (`vendor.play`) is any other name owned by a wallet
 ///     that already has a canonical name.
 /// @dev The registry deliberately CANNOT tell the two apart. The rule "exactly
 /// one colon iff canonical" is enforced in chain-svc (400 invalid_name), not
@@ -228,7 +228,7 @@ contract NameRegistry is AccessControl {
     /// @dev Length and charset are enforced on-chain (spec S3.2); the colon
     /// rule is not (see the contract notice). Names are stored AS GIVEN: no
     /// normalisation and no lookalike checks, because phishing-by-name is a
-    /// game mechanic - `aIpha.vee` (capital i) and `alpha.vee` (lowercase L)
+    /// game mechanic - `aIpha.play` (capital i) and `alpha.play` (lowercase L)
     /// are two different, equally valid names, and telling them apart is the
     /// UI's job. That is precisely why the charset admits A-Z: see the 1a PR.
     function _validateName(string calldata name) private pure {

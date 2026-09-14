@@ -42,7 +42,7 @@ export class WalletStore {
       // this comment used to give.
       //
       // It said the authority for double-spend prevention is the chain. That
-      // was never true: VEEBux is a plain ERC-20, and a second identical
+      // was never true: the token is a plain ERC-20, and a second identical
       // transfer is a valid second transfer, not a rejected replay. Nothing
       // downstream was ever going to catch a duplicate, so this file losing
       // its memory was a double-charge waiting for a dropped response.

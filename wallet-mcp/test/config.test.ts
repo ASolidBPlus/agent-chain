@@ -8,7 +8,7 @@ import { loadWalletConfig, CLIENT_MARKER } from '../src/config.ts';
 import { Wallet } from '../src/wallet.ts';
 
 const COMPLETE = {
-  WALLET_AGENT_ID: 'orch:shadowbroker',
+  WALLET_AGENT_ID: 'orch:vendor',
   CHAIN_SVC_URL: 'http://chain-svc:7000',
   // 32 chars, not the 7-char 'a-token' this used to be. the harness's
   // transcript redactor does not redact values under 8 characters (it warns,
@@ -16,13 +16,13 @@ const COMPLETE = {
   // be copied into a real config. chain-svc issues 32-byte tokens, so a
   // realistic fixture is also the honest one.
   WALLET_TOKEN: 'tok_0123456789abcdef0123456789',
-  POLICY_FILE: '/policies/orch%3Ashadowbroker.json',
+  POLICY_FILE: '/policies/orch%3Avendor.json',
 };
 
 describe('configuration', () => {
   it('accepts a complete environment', () => {
     const config = loadWalletConfig({ ...COMPLETE });
-    expect(config.agentId).toBe('orch:shadowbroker');
+    expect(config.agentId).toBe('orch:vendor');
     expect(config.walletToken).toBe(COMPLETE.WALLET_TOKEN);
   });
 
@@ -52,7 +52,7 @@ describe('configuration', () => {
   });
 
   it('keeps the dedupe ledger beside the policy file by default', () => {
-    expect(loadWalletConfig({ ...COMPLETE }).stateFile).toBe('/policies/orch%3Ashadowbroker.state.json');
+    expect(loadWalletConfig({ ...COMPLETE }).stateFile).toBe('/policies/orch%3Avendor.state.json');
     expect(loadWalletConfig({ ...COMPLETE, WALLET_STATE_FILE: '/tmp/s.json' }).stateFile).toBe('/tmp/s.json');
   });
 

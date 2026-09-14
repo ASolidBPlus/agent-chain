@@ -186,11 +186,15 @@ export class Store {
       -- no names by design while still getting a marker. This asks the only
       -- question that matters instead: are these the same two artefacts they
       -- were? That also catches a chain SWAP, which a name check never could.
+      -- v5: one JSON column instead of two address columns, because a
+      -- deployment is now a LIST of modules and a column per contract cannot
+      -- express one. A fresh store gets this shape directly; a v4 store is
+      -- carried across by the numbered migration in migrate.ts, and §8 asserts
+      -- the two land on the same PRAGMA table_info.
       CREATE TABLE IF NOT EXISTS deployment (
         id             INTEGER PRIMARY KEY CHECK (id = 1),
         chain_id       TEXT NOT NULL,
-        veebux         TEXT NOT NULL,
-        name_registry  TEXT NOT NULL,
+        modules_json   TEXT NOT NULL,
         recorded_at    INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS stage_state (
@@ -325,16 +329,31 @@ export class Store {
     return row?.address ?? null;
   }
 
+  /// The reverse of `spawnedAddress`: which agent a wallet address belongs to.
+  ///
+  /// Only reached on a deployment with NO names module, where it is the whole
+  /// of `reverseOf`. Equality is exact rather than case-insensitive because
+  /// both sides are viem `Address` values: `markSpawned` stores what the
+  /// keystore produced, and the callers pass what a contract read returned,
+  /// and viem checksums both. A `lower(address)` comparison here would read as
+  /// defensive and would instead hide the day that stops being true.
+  agentIdForAddress(address: string): string | null {
+    const row = this.db.query(`SELECT agent_id FROM spawns WHERE address = ?`).get(address) as
+      | { agent_id: string }
+      | null;
+    return row?.agent_id ?? null;
+  }
+
   // --- which chain this store belongs to (spec S4) --------------------------
 
   /// The deployment this store was first used against, or null on a store that
   /// has never seen one.
   recordedDeployment(): DeploymentIdentity | null {
     const row = this.db
-      .query(`SELECT chain_id, veebux, name_registry FROM deployment WHERE id = 1`)
-      .get() as { chain_id: string; veebux: string; name_registry: string } | null;
+      .query(`SELECT chain_id, modules_json FROM deployment WHERE id = 1`)
+      .get() as { chain_id: string; modules_json: string } | null;
     return row
-      ? { chainId: row.chain_id, veeBux: row.veebux, nameRegistry: row.name_registry }
+      ? { chainId: row.chain_id, modules: JSON.parse(row.modules_json) as DeploymentIdentity['modules'] }
       : null;
   }
 
@@ -345,10 +364,10 @@ export class Store {
   recordDeployment(id: DeploymentIdentity): void {
     this.db
       .query(
-        `INSERT INTO deployment (id, chain_id, veebux, name_registry, recorded_at)
-         VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+        `INSERT INTO deployment (id, chain_id, modules_json, recorded_at)
+         VALUES (1, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
       )
-      .run(id.chainId, id.veeBux, id.nameRegistry, Date.now());
+      .run(id.chainId, JSON.stringify(id.modules), Date.now());
   }
 
   // --- the bare-id detector (spec S5) --------------------------------------
@@ -370,7 +389,7 @@ export class Store {
   /// whether the namespace fallback then succeeded, was skipped for shape, or
   /// failed - so it keeps firing exactly as `unknown_name` did, and a
   /// mixed-case persona stays visible. It does NOT count a legitimate
-  /// colon-less alias or platform name (`treasury.vee`), because those are an
+  /// colon-less alias or platform name (`treasury.play`), because those are an
   /// exact hit and using them is correct.
   countBareId(agentId: string): void {
     this.db
@@ -586,7 +605,7 @@ export class Store {
   /// maybe-landed transfer. That is the conservative direction and it is the
   /// correct one.
   ///
-  /// This becomes answerable, not merely conservative, once VEEBux emits
+  /// This becomes answerable, not merely conservative, once the token emits
   /// IntentTransfer: the sweep can then resolve each reserved intent by event
   /// scan - landed means confirm and KEEP the hold, provably not landed means
   /// fail and release - so hold release and intent resolution become one
@@ -635,19 +654,27 @@ export class Store {
     topic: string;
     txHash: string;
     from: string | null;
+    /// Whether the contract that emitted this is the DEFAULT token. Required
+    /// rather than defaulted: this increment issues intents for the default
+    /// token only, so an emission from any other instance quoting one of our
+    /// ids is an anomaly, and a parameter with a default would let a new caller
+    /// silently claim it was the default token.
+    isDefaultToken: boolean;
   }): {
     anomalous: boolean;
     /// `repeat_emission` - two or more for one intent; `foreign_sender` - an
     /// emission under our intent id from an address that is not the reserving
-    /// wallet. Different causes, different instructions to the facilitator.
-    reason: 'repeat_emission' | 'foreign_sender';
+    /// wallet; `foreign_token` - an emission from a token instance this intent
+    /// was not issued for. Different causes, different instructions to the
+    /// facilitator.
+    reason: 'repeat_emission' | 'foreign_sender' | 'foreign_token';
     agentId: string;
     /// 'caller', 'server', or null for a row written before the column existed.
     idSource: string | null;
     emissions: number;
     transfers: Array<{ txHash: string; from: string | null }>;
   } | null {
-    const { topic, txHash, from } = args;
+    const { topic, txHash, from, isDefaultToken } = args;
     const apply = this.db.transaction(() => {
       const intent = this.db
         .query(`SELECT intent_id, agent_id, emissions, first_tx, first_from, id_source FROM intents WHERE topic = ?`)
@@ -669,6 +696,30 @@ export class Store {
         .query(`SELECT 1 AS present FROM intent_anomalies WHERE topic = ? AND tx_hash = ?`)
         .get(topic, txHash);
       if (already) return null;
+
+      // AFTER the three early returns above and BEFORE the emissions count,
+      // and the position is the whole behaviour:
+      //
+      //   - after `!intent`, so an emission under an id THIS STORE NEVER
+      //     RESERVED is not an anomaly. Every ordinary transfer of a second
+      //     token would otherwise be one.
+      //   - after the first-tx and intent_anomalies dedupes, so one foreign
+      //     emission is reported ONCE rather than on every poll that sees it.
+      //   - before the emissions count, so it is flagged whether or not this is
+      //     the first sighting of the id.
+      if (!isDefaultToken) {
+        this.db
+          .query(`INSERT INTO intent_anomalies (topic, tx_hash, from_addr, seen_at) VALUES (?, ?, ?, ?)`)
+          .run(topic, txHash, from, Date.now());
+        return {
+          anomalous: true,
+          reason: 'foreign_token' as const,
+          agentId: intent.agent_id,
+          idSource: intent.id_source,
+          emissions: intent.emissions,
+          transfers: [{ txHash, from }],
+        };
+      }
 
       if (intent.emissions === 0) {
         this.db

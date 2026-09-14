@@ -8,7 +8,7 @@
 import { createWalletClient, encodeFunctionData, http, keccak256, toBytes, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { randomUUID } from 'node:crypto';
-import { VEEBuxAbi } from './abi.ts';
+import { TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
@@ -26,6 +26,7 @@ import {
   type PolicyDefaults,
 } from './policy.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from './validate.ts';
+import { defaultToken } from './modules.ts';
 
 /// Which path a spend arrived by, for the `agent.spend` event.
 ///
@@ -73,6 +74,14 @@ export interface HistoryEntry {
   blockNumber: string;
   memo?: string;
 }
+
+/// Deny entries already reported as unresolvable, so the line is printed once
+/// per distinct entry per process rather than once per send. Module-level
+/// because the lifetime is the PROCESS, not a Treasury instance - and EXPORTED
+/// for the same reason `droppedPatternsLogged` is: a test asserting a
+/// once-per-process property has to own the process state, or it passes alone
+/// and fails beside another file that consumed the first occurrence.
+export const skippedDenyEntriesLogged = new Set<string>();
 
 export class Treasury {
   /// hub-core's stage, cached briefly (spec S5). Only consulted when
@@ -174,7 +183,38 @@ export class Treasury {
         throw asChainError(err);
       }
 
-      if (address && address === targetAddress.toLowerCase()) {
+      if (address === null) {
+        // UNRESOLVABLE, which means two different things and only one of them
+        // is worth saying out loud.
+        //
+        // WITH a registry: the entry names nobody YET. Ordinary - deny a
+        // counterparty before it is spawned and this is the state until it is -
+        // so it is silent, and the re-resolution above is what picks it up
+        // later.
+        //
+        // WITHOUT one: `lookup` answers only exact spawned ids, so an entry
+        // that is a NAME can never resolve and the rule can never bind. That is
+        // worth one line, because a deny list is a safety expectation and an
+        // operator should not have to infer that part of theirs is inert.
+        //
+        // Entry-keyed and once per process. Not per agent: on a names-less
+        // deployment every agent without its own policy file inherits the
+        // defaults, so an agent-keyed set would print the same fact once per
+        // wallet. Not per send: `policyFor` re-reads the file every send by
+        // design. Once per process is the signal; once ever would need a store
+        // row, and a configuration oddity does not earn one.
+        if (this.chain.modules.names === undefined && !skippedDenyEntriesLogged.has(entry)) {
+          skippedDenyEntriesLogged.add(entry);
+          console.warn(
+            `[chain-svc] deny entry ${JSON.stringify(entry)} cannot be resolved on a deployment ` +
+              `with no names module, so it is skipped. Nothing here can be addressed by name; ` +
+              `deny entries that are agent ids still bind.`,
+          );
+        }
+        continue;
+      }
+
+      if (address === targetAddress.toLowerCase()) {
         throw new HttpError('counterparty_denied', `${requested} is not an allowed counterparty`);
       }
     }
@@ -206,7 +246,8 @@ export class Treasury {
     intentId?: unknown;
   }): Promise<{ txHash: string; intentId: string }> {
     const name = assertLookupName(body.to);
-    const amount = parseVee(body.vee, 'vee');
+    const tok = defaultToken(this.chain.modules);
+    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
     const target = await this.resolver.require(name);
     const intentId =
       typeof body.intentId === 'string' && body.intentId !== ''
@@ -217,8 +258,8 @@ export class Treasury {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(this.chain.modules).address,
+        abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
         ...ZERO_FEES,
@@ -261,16 +302,17 @@ export class Treasury {
       );
     }
 
-    const target = parseVee(body.vee, 'vee');
+    const tok = defaultToken(this.chain.modules);
+    const target = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
     const wallet = await this.resolver.require(agentId);
     const current = (await this.chain.publicClient.readContract({
-      address: this.chain.deployment.VEEBux,
-      abi: VEEBuxAbi,
+      address: defaultToken(this.chain.modules).address,
+      abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
     })) as bigint;
 
-    if (current === target) return { balance: formatVee(current) };
+    if (current === target) return { balance: formatVee(current, tok.decimals) };
 
     const reason = typeof body.reason === 'string' ? body.reason : null;
     const suppliedId = typeof body.intentId === 'string' && body.intentId !== '';
@@ -300,7 +342,7 @@ export class Treasury {
     if (reservation.outcome === 'duplicate') {
       // Also measured rather than assumed: a replay reports what the wallet
       // holds now, which is the point of asking again.
-      if (reservation.txHash) return { balance: formatVee(current), txHash: reservation.txHash, intentId };
+      if (reservation.txHash) return { balance: formatVee(current, tok.decimals), txHash: reservation.txHash, intentId };
       throw new HttpError(
         'intent_unresolved',
         `intent ${intentId} is reserved with no recorded transaction; reconcile before retrying`,
@@ -315,7 +357,7 @@ export class Treasury {
         // top-up would be the one money movement whose intent cannot be joined
         // from /history, and BOTH SIDES WOULD COMPILE. Review recorded the
         // asymmetry against the pre-merge trees; this is where it dissolves.
-        ? await this.fund({ to: agentId, vee: formatVee(target - current), reason, intentId })
+        ? await this.fund({ to: agentId, vee: formatVee(target - current, tok.decimals), reason, intentId })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId);
 
     this.store.completeIntent(intentId, result.txHash);
@@ -326,13 +368,13 @@ export class Treasury {
     // is what the harness's Wallets panel shows, and a panel showing a number
     // nobody observed is the observer reporting its own state as the subject's.
     const settled = (await this.chain.publicClient.readContract({
-      address: this.chain.deployment.VEEBux,
-      abi: VEEBuxAbi,
+      address: defaultToken(this.chain.modules).address,
+      abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
     })) as bigint;
 
-    return { balance: formatVee(settled), txHash: result.txHash, intentId };
+    return { balance: formatVee(settled, tok.decimals), txHash: result.txHash, intentId };
   }
 
   /// Wallet -> treasury, signed by chain-svc from that wallet's key under
@@ -373,14 +415,14 @@ export class Treasury {
       // contract PR, which sequences after this one. The intent is recorded in
       // the store either way, so idempotency here does not wait on it.
       const data = encodeFunctionData({
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transfer',
         args: [this.chain.deployment.treasury, amount],
       });
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: this.chain.deployment.VEEBux,
+        to: defaultToken(this.chain.modules).address,
         data,
         ...ZERO_FEES,
       });
@@ -541,7 +583,8 @@ export class Treasury {
     // rather than a silent override, so a caller that lies is told so.
     const fromAgentId = walletPrincipal(principal, body.fromAgentId);
     const name = assertLookupName(body.to);
-    const amount = parseVee(body.vee, 'vee');
+    const tok = defaultToken(this.chain.modules);
+    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
 
     // The store is the single truth for frozen (spec S4); the per-agent policy
     // file is only wallet-mcp's local fast-path copy, and loses any disagreement.
@@ -563,7 +606,8 @@ export class Treasury {
     // itself derived from the credential a few lines above and never from the
     // body - so the fallback cannot be steered by the request.
     const target = await this.resolveTo(name, fromAgentId);
-    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount });
+    const { decimals, symbol } = defaultToken(this.chain.modules);
+    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount, decimals, symbol });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
 
@@ -589,7 +633,7 @@ export class Treasury {
     // way - a decision and its durable record were not one operation - so the
     // cap was check-then-act (concurrent sends all read the same pre-spend
     // total) and the intent was act-then-record (a dropped response made the
-    // correct retry a second real transfer, because VEEBux is a plain ERC-20
+    // correct retry a second real transfer, because the token is a plain ERC-20
     // and a second identical transfer is a valid second transfer).
     const reservation = this.store.reserve({
       intentId,
@@ -607,11 +651,11 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
-      capWei: stageCapWei(policy),
+      capWei: stageCapWei(policy, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
-      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} VEE for this stage`);
+      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} ${symbol} for this stage`);
     }
     if (reservation.outcome === 'duplicate') {
       // The promise wallet-mcp makes to the model: a replay of the same send
@@ -647,14 +691,14 @@ export class Treasury {
       const account = privateKeyToAccount(privateKey);
       wallet = this.signerFor(account);
       const data = encodeFunctionData({
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
       });
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: this.chain.deployment.VEEBux,
+        to: defaultToken(this.chain.modules).address,
         data,
         ...ZERO_FEES,
       });
@@ -748,7 +792,7 @@ export class Treasury {
         kind: 'agent.spend',
         name: args.fromAgentId,
         to: args.to,
-        vee: formatVee(args.amount),
+        vee: formatVee(args.amount, defaultToken(this.chain.modules).decimals),
         intent_id: args.intentId,
         via: args.via,
         txHash: hash,
@@ -769,16 +813,16 @@ export class Treasury {
     try {
       const [sent, received] = await Promise.all([
         this.chain.publicClient.getContractEvents({
-          address: this.chain.deployment.VEEBux,
-          abi: VEEBuxAbi,
+          address: defaultToken(this.chain.modules).address,
+          abi: TokenAbi,
           eventName: 'Transfer',
           args: { from: who.address },
           fromBlock: 0n,
           toBlock: 'latest',
         }),
         this.chain.publicClient.getContractEvents({
-          address: this.chain.deployment.VEEBux,
-          abi: VEEBuxAbi,
+          address: defaultToken(this.chain.modules).address,
+          abi: TokenAbi,
           eventName: 'Transfer',
           args: { to: who.address },
           fromBlock: 0n,
@@ -814,7 +858,7 @@ export class Treasury {
         txHash,
         from: await nameFor(args.from),
         to: await nameFor(args.to),
-        vee: formatVee(args.value),
+        vee: formatVee(args.value, defaultToken(this.chain.modules).decimals),
         blockNumber: String(log.blockNumber ?? 0n),
         ...(memo ? { memo } : {}),
       });

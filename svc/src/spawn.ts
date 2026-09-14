@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { parseEther, type Address } from 'viem';
 import { writeFile, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { NameRegistryAbi, VEEBuxAbi } from './abi.ts';
+import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
@@ -19,6 +19,7 @@ import type { Keystore } from './keystore.ts';
 import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
+import { defaultToken, requireNames } from './modules.ts';
 import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
   type AgentPolicy, type PolicyDefaults, type WalletKind,
   assertPatternsUsable,
@@ -54,7 +55,8 @@ export class Spawner {
     private readonly resolver: Resolver,
     policyDefaults?: PolicyDefaults,
   ) {
-    this.policyDefaults = policyDefaults ?? loadPolicyDefaults(config.policyDefaultsPath);
+    this.policyDefaults =
+      policyDefaults ?? loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld);
   }
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is
@@ -82,7 +84,13 @@ export class Spawner {
     const agentId = assertCanonicalAgentId(body.agentId);
     const kind = this.parseKind(body.kind);
     const alias = body.alias === undefined || body.alias === null ? undefined : assertAlias(body.alias);
-    const fundVee = parseVee(body.fundVee ?? 0, 'fundVee');
+    // The default token may be ABSENT here: spawn runs on a names-only
+    // deployment too, and only the funding half needs a token. The scale is
+    // used to parse a value that must then be zero, and the check below is
+    // what refuses a non-zero one - so this cannot quietly parse money at the
+    // wrong scale.
+    const tok = this.chain.modules.tokens[0];
+    const fundVee = parseVee(body.fundVee ?? 0, tok?.decimals ?? 18, tok?.symbol ?? 'tokens', 'fundVee');
     // hub-core may set per-agent caps; otherwise they come by kind from the
     // game-balance file, never from a constant in this module.
     // A supplied policy is a PATCH over the kind defaults, not a complete
@@ -95,6 +103,29 @@ export class Spawner {
     // named burner is a contradiction rather than a request to be helpful about.
     if (kind === 'burner' && alias !== undefined) {
       throw new HttpError('invalid_request', 'a burner registers no names, so it cannot have an alias');
+    }
+
+    // THE MODULE CHECKS SIT HERE, beside the other request-shape refusals, and
+    // the position is the point: BEFORE the idempotency return and BEFORE the
+    // first side effect (`keystore.create`). A spawn asking for something this
+    // deployment cannot do must refuse without leaving a key file, a policy
+    // file or a store row behind - otherwise the retry after the refusal takes
+    // the idempotent path and reports success for the request that was refused.
+    //
+    // Spawn itself needs NEITHER module: a wallet is a key, a token and a
+    // policy file, and all three exist on a deployment with no contracts at
+    // all. Only the two optional halves need one each.
+    if (fundVee > 0n && this.chain.modules.tokens.length === 0) {
+      throw new HttpError(
+        'module_not_deployed',
+        'fundVee requires a token module; omit it or deploy one',
+      );
+    }
+    if (alias !== undefined && this.chain.modules.names === undefined) {
+      throw new HttpError(
+        'module_not_deployed',
+        'alias requires a names module; omit it or deploy one',
+      );
     }
 
     // Fully idempotent (spec S4): a retried spawn must never mint money. The
@@ -123,7 +154,16 @@ export class Spawner {
 
     await this.endowGas(address);
     if (fundVee > 0n) await this.fundVee(address, fundVee);
-    if (kind !== 'burner') {
+    // REGISTRATION NEEDS A REGISTRY, and a burner deliberately has no name.
+    // Both conditions, not just the kind: without this the call reached
+    // `requireNames` inside the registry write, threw module_not_deployed, and
+    // came back to the caller as a 502 chain_error - a refusal about the
+    // deployment's shape, reported as the chain being broken.
+    //
+    // The wallet is still spawned: a key, a wallet token and a policy file do
+    // not need a registry. It simply has no name, which is what a deployment
+    // without a names module means.
+    if (kind !== 'burner' && this.chain.modules.names !== undefined) {
       await this.registerIfAbsent(agentId, address);
       if (alias) await this.registerIfAbsent(alias, address);
     }
@@ -216,8 +256,8 @@ export class Spawner {
   private async fundVee(address: Address, amount: bigint): Promise<void> {
     try {
       const balance = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(this.chain.modules).address,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [address],
       })) as bigint;
@@ -228,8 +268,8 @@ export class Spawner {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(this.chain.modules).address,
+        abi: TokenAbi,
         functionName: 'transfer',
         args: [address, amount - balance],
         ...ZERO_FEES,
@@ -271,7 +311,7 @@ export class Spawner {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName,
         args: args as never,
@@ -323,7 +363,7 @@ export class Spawner {
     const next = mergePolicy(body, current);
 
     // Also called here now. It was on this path only, so `POST /wallets` with
-    // `deny: ["mark.vee"]` was accepted while PATCH with the identical value
+    // `deny: ["mark.play"]` was accepted while PATCH with the identical value
     // was refused - the same asymmetry in the other direction.
     await this.assertDenyEntriesAreCanonical(next.deny);
 
@@ -339,7 +379,7 @@ export class Spawner {
 
   /// A deny entry must name a CANONICAL id or a PLATFORM name, never a vanity
   /// alias (chain spec S5's durable rule). The two are indistinguishable by
-  /// shape - `treasury.vee` and `mark.vee` are the same string form - so the
+  /// shape - `treasury.play` and `mark.play` are the same string form - so the
   /// REGISTRY is the authority: an entry is canonical when it IS the primary
   /// name for the address it resolves to.
   ///
@@ -353,6 +393,16 @@ export class Spawner {
   /// itself uses - and refusing it would make a policy un-writable until the
   /// wallet it names exists, which inverts the spawn order.
   private async assertDenyEntriesAreCanonical(deny: string[]): Promise<void> {
+    // WITHOUT A REGISTRY THERE ARE NO VANITY ALIASES, so there is nothing for
+    // this rule to catch: it exists to stop a deny entry that resolves to
+    // somebody else's canonical id today and to nobody's tomorrow. On a
+    // names-less deployment `lookup` answers only exact spawned ids, so an
+    // entry either IS a canonical id or names nothing - and running the check
+    // would turn every deny entry into a store query for no decision.
+    //
+    // Deny entries are kept verbatim here, and §4.7 says what they then mean.
+    if (this.chain.modules.names === undefined) return;
+
     for (const entry of deny) {
       if (entry.includes('*')) continue; // a pattern names no single identity
       const found = await this.resolver.lookup(entry).catch(() => null);

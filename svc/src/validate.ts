@@ -17,7 +17,7 @@ const CANONICAL_ID = /^[a-z0-9._@-]{1,48}:[a-z0-9._@-]{1,48}$/;
 
 /// A vanity alias uses the full on-chain charset MINUS the colon, because the
 /// colon is what namespaces canonical ids and an alias must never impersonate
-/// one. Case is preserved: `aIpha.vee` and `alpha.vee` are different names and
+/// one. Case is preserved: `aIpha.play` and `alpha.play` are different names and
 /// that difference is a game mechanic (spec S3.2).
 const ALIAS = /^[a-zA-Z0-9._@-]+$/;
 
@@ -101,9 +101,15 @@ export function assertLookupName(value: unknown): string {
 }
 
 /// Amounts arrive as a JSON number or a decimal string and leave as decimal
-/// strings in whole VEE (spec S4). Never as JSON numbers: 18 decimals do not
+/// strings in whole units (spec S4). Never as JSON numbers: 18 decimals do not
 /// survive an IEEE double, and this is the money.
-export function parseVee(value: unknown, field = 'vee'): bigint {
+///
+/// THE NAMES STAY `parseVee`/`formatVee` DELIBERATELY. They are called from
+/// token-gated paths only, so the token is present by construction; what
+/// changed is that the SYMBOL AND THE SCALE are the deployed token's rather
+/// than two literals. Renaming them would be a diff across every money path in
+/// the service for no behaviour, and this increment already moves enough.
+export function parseVee(value: unknown, decimals: number, symbol: string, field = 'vee'): bigint {
   let text: string;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new HttpError('invalid_amount', `${field} must be finite`);
@@ -120,22 +126,22 @@ export function parseVee(value: unknown, field = 'vee'): bigint {
   }
 
   if (!/^\d+(\.\d+)?$/.test(text)) {
-    throw new HttpError('invalid_amount', `${field} must be a non-negative decimal amount in whole VEE`);
+    throw new HttpError('invalid_amount', `${field} must be a non-negative decimal amount in whole ${symbol}`);
   }
   const fraction = text.split('.')[1] ?? '';
-  if (fraction.length > 18) {
-    throw new HttpError('invalid_amount', `${field} has more than 18 decimal places`);
+  if (fraction.length > decimals) {
+    throw new HttpError('invalid_amount', `${field} has more than ${decimals} decimal places`);
   }
 
   try {
-    return parseUnits(text, 18);
+    return parseUnits(text, decimals);
   } catch {
     throw new HttpError('invalid_amount', `${field} could not be parsed as an amount`);
   }
 }
 
-export function formatVee(wei: bigint): string {
-  return formatUnits(wei, 18);
+export function formatVee(wei: bigint, decimals: number): string {
+  return formatUnits(wei, decimals);
 }
 
 /// Key and policy files are named by the URL-encoded id, so the colon never

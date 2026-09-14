@@ -5,19 +5,24 @@
 // exist and has no repair path.
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
 import { assertDeploymentUnchanged, ChainSwapError, type DeploymentIdentity } from '../src/deployment.ts';
+import { Resolver } from '../src/resolver.ts';
+import { loadDeployment, type Chain } from '../src/chain.ts';
+import type { HttpError } from '../src/errors.ts';
 
-const A: DeploymentIdentity = {
-  chainId: '31337',
-  veeBux: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-  nameRegistry: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+const ADDR_A = '0x1111111111111111111111111111111111111111' as const;
+const ADDR_B = '0x2222222222222222222222222222222222222222' as const;
+
+const A: DeploymentIdentity = { chainId: '31337', modules: [{ kind: 'token' as const, key: 'play', address: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }, { kind: 'names' as const, address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512' }] };
+const B: DeploymentIdentity = {
+  ...A,
+  modules: [{ ...A.modules[0]!, address: '0x0000000000000000000000000000000000000BBB' }, A.modules[1]!],
 };
-const B: DeploymentIdentity = { ...A, veeBux: '0x0000000000000000000000000000000000000BBB' };
 
 const codeOf = (fn: () => void) => {
   try {
@@ -59,15 +64,15 @@ describe('the chain this store belongs to', () => {
   // choice, and a store written before a client started checksumming would
   // otherwise report a swap that never happened.
   it('does not report a swap on a checksum difference alone', () => {
-    const lower = { ...A, veeBux: A.veeBux.toLowerCase(), nameRegistry: A.nameRegistry.toLowerCase() };
+    const lower = { ...A, modules: A.modules.map((m) => ({ ...m, address: m.address.toLowerCase() })) };
     expect(codeOf(() => assertDeploymentUnchanged(A, lower, false))).toBe('no-throw');
   });
 
   it('names BOTH deployments and the way out', () => {
     let message = '';
     try { assertDeploymentUnchanged(A, B, false); } catch (e) { message = (e as Error).message; }
-    expect(message).toContain(A.veeBux);
-    expect(message).toContain(B.veeBux);
+    expect(message).toContain(A.modules[0]!.address);
+    expect(message).toContain(B.modules[0]!.address);
     expect(message).toContain('--acknowledge-chain-reset');
     // The symptom points at the one component that is fine, so the message has
     // to say which thing is actually wrong.
@@ -144,10 +149,13 @@ describe('the call site in index.ts', () => {
     expect(call).toBeGreaterThan(-1);
     const wiring = src.slice(src.indexOf('const liveDeployment ='), call + 160);
 
-    // Each fact from its own source, not a literal.
+    // Each fact from its own source, not a literal. The identity is now a
+    // module LIST, so the wiring to check is that the list is built from the
+    // loaded deployment's own modules rather than from anything reconstructed.
     expect(wiring).toContain('deployment.chainId');
-    expect(wiring).toContain('deployment.VEEBux');
-    expect(wiring).toContain('deployment.NameRegistry');
+    expect(wiring).toContain('deployment.modules.map(');
+    expect(wiring).toContain('kind: m.kind');
+    expect(wiring).toContain('address: m.address');
     expect(wiring).toContain('store.recordedDeployment()');
     expect(wiring).toContain('config.acknowledgeChainReset');
   });
@@ -178,5 +186,202 @@ describe('the call site in index.ts', () => {
     expect(at).toBeGreaterThan(-1);
     const line = src.slice(src.lastIndexOf('\n', at) + 1, at);
     expect(line).toContain('recordedDeployment === null');
+  });
+});
+
+// §4.5. A deployment with no names module still has wallets, and the store is
+// the only record of which agent owns which address. These pin that the branch
+// answers from the store and does NOT invent registry behaviour to go with it.
+describe('resolution without a names module', () => {
+  const namesless = (store: Store) =>
+    new Resolver(
+      {
+        modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }] },
+        publicClient: {
+          readContract: () => {
+            throw new Error('the chain must not be reached: there is no registry to read');
+          },
+          getContractEvents: () => {
+            throw new Error('the chain must not be reached: there is no registry to read');
+          },
+        },
+      } as unknown as Chain,
+      store,
+    );
+
+  it('resolves a spawned agent id exactly, from the store', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).lookup('orch:a')).toEqual({ address: ADDR_A, canonical: 'orch:a' });
+    store.close();
+  });
+
+  // NO BARE-ID FALLBACK. With a registry, `a` inside namespace `orch` can reach
+  // `orch:a`; without one, inventing that rule would give a names-less
+  // deployment a second resolution rule nothing else knows about.
+  it('does not resolve a bare id, and does not resolve an unspawned name', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).lookup('a')).toBeNull();
+    expect(await namesless(store).lookup('alpha.play')).toBeNull();
+    store.close();
+  });
+
+  it('reverses an address to the agent that owns it, and to null for a stranger', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', ADDR_A, 'agent');
+
+    expect(await namesless(store).reverseOf(ADDR_A)).toBe('orch:a');
+    expect(await namesless(store).reverseOf(ADDR_B)).toBeNull();
+    store.close();
+  });
+
+  // An empty list is the honest answer, not a degraded one: there are no
+  // aliases, as distinct from "none could be found".
+  it('has no aliases at all', async () => {
+    const store = new Store(':memory:');
+    expect(await namesless(store).aliasesOf(ADDR_A)).toEqual([]);
+    store.close();
+  });
+
+  it('refuses registrantOf by name rather than reading a registry that is absent', async () => {
+    const store = new Store(':memory:');
+    let code = 'no-throw';
+    try {
+      await namesless(store).registrantOf('alpha.play');
+    } catch (e) {
+      code = (e as HttpError).code ?? 'not-an-HttpError';
+    }
+    expect(code).toBe('module_not_deployed');
+    store.close();
+  });
+});
+
+// §8.2. EVERY REFUSAL IN loadDeployment, which had no coverage at all until a
+// mutation run said so: disabling the schema check and disabling the
+// duplicate-key check both left the suite green.
+//
+// This file is written by a deploy the operator may not have watched, and a
+// service that will not start is the only symptom they get - so each refusal is
+// asserted on its words, not just on throwing.
+describe('loadDeployment refuses a local.json it cannot trust', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chain-svc-load-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (body: unknown) => writeFileSync(join(dir, 'local.json'), JSON.stringify(body));
+  const load = () => loadDeployment(dir);
+
+  const TOKEN_ENTRY = { kind: 'token', key: 'play', contract: 'Token', address: ADDR_A };
+  const NAMES_ENTRY = { kind: 'names', contract: 'NameRegistry', address: ADDR_B, tld: 'play' };
+  const GOOD = { schema: 1, chainId: 31337, treasury: ADDR_A, modules: [TOKEN_ENTRY, NAMES_ENTRY] };
+
+  it('accepts the shape chain-deploy writes', () => {
+    write(GOOD);
+    const d = load();
+    expect(d.modules.map((m) => m.kind)).toEqual(['token', 'names']);
+    expect(d.modules[0]?.key).toBe('play');
+    expect(d.modules[1]?.tld).toBe('play');
+  });
+
+  // ALL FOUR SHIPPED EXAMPLES, because "accepts the shape" above asserts ONE
+  // shape and the four are what a deployment actually picks from. A loader that
+  // happened to require a names entry, or a token, would pass the case above
+  // and fail half of these.
+  it('accepts the local.json each example manifest produces', () => {
+    const shapes: Array<[string, Array<Record<string, unknown>>]> = [
+      ['token-and-names', [{ ...TOKEN_ENTRY, key: 'play' }, { ...NAMES_ENTRY, tld: 'play' }]],
+      ['token-only', [{ ...TOKEN_ENTRY, key: 'play' }]],
+      ['names-only', [{ ...NAMES_ENTRY, tld: 'play' }]],
+      [
+        'two-tokens',
+        [
+          { ...TOKEN_ENTRY, key: 'play' },
+          { ...TOKEN_ENTRY, key: 'gold', address: ADDR_B },
+          { ...NAMES_ENTRY, tld: 'play' },
+        ],
+      ],
+    ];
+
+    for (const [name, modules] of shapes) {
+      write({ schema: 1, chainId: 31337, treasury: ADDR_A, modules });
+      const d = load();
+      // The shape's name is in the failure via the module list itself; bun's
+      // expect takes no label argument.
+      expect(d.modules.map((m) => `${name}:${m.kind}`)).toEqual(modules.map((m) => `${name}:${m.kind as string}`));
+    }
+  });
+
+  // The old four-key file is RETIRED rather than supported: reading it would
+  // mean inventing a key and a TLD for contracts deployed before either
+  // existed, and inventing them is how a wallet gets looked up under a name
+  // nobody registered.
+  it('names the retired shape rather than failing on a missing field', () => {
+    write({ chainId: 31337, VEEBux: ADDR_A, NameRegistry: ADDR_B, treasury: ADDR_A });
+    expect(() => load()).toThrow(/predates the manifest .*redeploy with chain-deploy/);
+  });
+
+  it('refuses a schema it does not know', () => {
+    write({ ...GOOD, schema: 2 });
+    expect(() => load()).toThrow(/schema 2 unsupported/);
+  });
+
+  it('refuses an empty module list', () => {
+    write({ ...GOOD, modules: [] });
+    expect(() => load()).toThrow(/declares no modules/);
+  });
+
+  it('refuses a module kind it has no contract for', () => {
+    write({ ...GOOD, modules: [{ kind: 'oracle', contract: 'Oracle', address: ADDR_A }] });
+    expect(() => load()).toThrow(/unknown module kind "oracle"/);
+  });
+
+  // The contract name is the kind's, or the file and the chain disagree about
+  // what is at that address.
+  it('refuses a contract that is not the one its kind deploys', () => {
+    write({ ...GOOD, modules: [{ ...TOKEN_ENTRY, contract: 'Foo' }] });
+    expect(() => load()).toThrow(/module "play" is "Foo", expected "Token"/);
+  });
+
+  it('refuses a token module with no key', () => {
+    write({ ...GOOD, modules: [{ kind: 'token', contract: 'Token', address: ADDR_A }] });
+    expect(() => load()).toThrow(/token module with no key/);
+  });
+
+  // Two instances under one key: every later lookup of that key would answer
+  // about whichever came first, silently.
+  it('refuses a duplicate token key', () => {
+    write({ ...GOOD, modules: [TOKEN_ENTRY, { ...TOKEN_ENTRY, address: ADDR_B }] });
+    expect(() => load()).toThrow(/duplicate token key "play"/);
+  });
+
+  it('refuses a second names module', () => {
+    write({ ...GOOD, modules: [NAMES_ENTRY, { ...NAMES_ENTRY, address: ADDR_A }] });
+    expect(() => load()).toThrow(/more than one names module/);
+  });
+
+  it('refuses a names module with no tld', () => {
+    write({ ...GOOD, modules: [{ kind: 'names', contract: 'NameRegistry', address: ADDR_B }] });
+    expect(() => load()).toThrow(/names module has no tld/);
+  });
+
+  it('refuses a missing treasury', () => {
+    write({ schema: 1, chainId: 31337, modules: [TOKEN_ENTRY] });
+    expect(() => load()).toThrow(/missing treasury/);
+  });
+
+  // `Number(undefined)` is NaN, which used to reach assertPrivateChain and fail
+  // there as a chain-id mismatch: a true message about the wrong thing.
+  it('refuses a non-numeric chainId here, rather than as a chain mismatch later', () => {
+    write({ ...GOOD, chainId: 'thirty-one-three-three-seven' });
+    expect(() => load()).toThrow(/no numeric chainId/);
+  });
+
+  it('refuses a file that is not there at all, naming the deploy step', () => {
+    expect(() => load()).toThrow(/no deployment at .*Run Deploy\.s\.sol first/);
   });
 });

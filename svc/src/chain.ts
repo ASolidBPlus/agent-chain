@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
+import { MODULES, type ModuleKind, type Modules } from './modules.ts';
 
 /// Bounded so a stalled Anvil cannot hold a poll open indefinitely.
 const RPC_TIMEOUT_MS = 10_000;
@@ -41,13 +42,27 @@ const RPC_TIMEOUT_MS = 10_000;
 /// ruled (spec S4, "Play money is structural, not configured").
 const PRIVATE_CHAIN_ID = 31337;
 
-export interface Deployment {
-  chainId: number;
-  VEEBux: Address;
-  NameRegistry: Address;
-  treasury: Address;
+export interface DeployedModule {
+  kind: ModuleKind;
+  /// Token entries only. The manifest's stable label for the instance.
+  key?: string;
+  contract: string;
+  address: Address;
+  /// Names entries only.
+  tld?: string;
 }
 
+export interface Deployment {
+  schema: 1;
+  chainId: number;
+  treasury: Address;
+  /// In manifest order, so the first `token` entry is the default token.
+  modules: DeployedModule[];
+}
+
+/// EVERY REFUSAL HERE NAMES WHAT IS WRONG AND WHAT TO DO, because this file is
+/// written by a deploy the operator may not have watched, and a service that
+/// will not start is the only symptom they get.
 export function loadDeployment(deploymentsDir: string): Deployment {
   const path = join(deploymentsDir, 'local.json');
   let raw: string;
@@ -59,16 +74,90 @@ export function loadDeployment(deploymentsDir: string): Deployment {
         `compose does this before starting the service (spec S7).`,
     );
   }
-  const parsed = JSON.parse(raw) as Partial<Deployment>;
-  if (!parsed.VEEBux || !parsed.NameRegistry || !parsed.treasury) {
-    throw new Error(`chain-svc: ${path} is missing VEEBux / NameRegistry / treasury`);
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+  // The old four-key shape is retired rather than supported. Reading it would
+  // mean inventing a key and a TLD for contracts deployed before either
+  // existed, and inventing them is how a wallet ends up looked up under a name
+  // nobody registered.
+  if (parsed.schema === undefined) {
+    throw new Error(
+      `chain-svc: ${path} predates the manifest (no "schema" field); redeploy with chain-deploy`,
+    );
   }
-  return {
-    chainId: Number(parsed.chainId),
-    VEEBux: getAddress(parsed.VEEBux),
-    NameRegistry: getAddress(parsed.NameRegistry),
-    treasury: getAddress(parsed.treasury),
-  };
+  if (parsed.schema !== 1) {
+    throw new Error(`chain-svc: ${path} schema ${String(parsed.schema)} unsupported`);
+  }
+  // `Number(undefined)` is NaN, which used to reach assertPrivateChain and fail
+  // there as a chain-id mismatch - a true message about the wrong thing.
+  if (typeof parsed.chainId !== 'number' || !Number.isFinite(parsed.chainId)) {
+    throw new Error(`chain-svc: ${path} has no numeric chainId`);
+  }
+  if (typeof parsed.treasury !== 'string') {
+    throw new Error(`chain-svc: ${path} is missing treasury`);
+  }
+  const declared = parsed.modules;
+  if (!Array.isArray(declared) || declared.length === 0) {
+    throw new Error(`chain-svc: ${path} declares no modules`);
+  }
+
+  const modules: DeployedModule[] = [];
+  const keys = new Set<string>();
+  let namesSeen = 0;
+  for (const entry of declared as Array<Record<string, unknown>>) {
+    const kind = entry.kind as ModuleKind;
+    const expected = MODULES[kind];
+    if (!expected) {
+      throw new Error(`chain-svc: ${path} has an unknown module kind "${String(entry.kind)}"`);
+    }
+    const label = String(entry.key ?? kind);
+    if (entry.contract !== expected) {
+      throw new Error(
+        `chain-svc: ${path} module "${label}" is "${String(entry.contract)}", expected "${expected}"`,
+      );
+    }
+    if (typeof entry.address !== 'string') {
+      throw new Error(`chain-svc: ${path} module "${label}" has no address`);
+    }
+    // ONE BRANCH PER KIND, never `token` versus everything-else. The
+    // else-form was correct while there were exactly two kinds and became
+    // silently wrong the moment a third could exist: a module that is not a
+    // token was validated AS a names module, so it was rejected for having no
+    // tld, and a deployment carrying both tripped "more than one names module".
+    // Neither message would have named the real problem.
+    //
+    // An unknown kind cannot reach here - MODULES is checked above - so the
+    // default is unreachable today and is written anyway, because the next kind
+    // should fail loudly here rather than be mistaken for one of these.
+    if (kind === 'token') {
+      if (typeof entry.key !== 'string' || entry.key.length === 0) {
+        throw new Error(`chain-svc: ${path} has a token module with no key`);
+      }
+      if (keys.has(entry.key)) {
+        throw new Error(`chain-svc: ${path} has duplicate token key "${entry.key}"`);
+      }
+      keys.add(entry.key);
+    } else if (kind === 'names') {
+      namesSeen++;
+      if (namesSeen > 1) {
+        throw new Error(`chain-svc: ${path} declares more than one names module`);
+      }
+      if (typeof entry.tld !== 'string' || entry.tld.length === 0) {
+        throw new Error(`chain-svc: ${path} names module has no tld`);
+      }
+    } else {
+      throw new Error(`chain-svc: ${path} module kind "${String(kind)}" has no validation rule`);
+    }
+    modules.push({
+      kind,
+      key: kind === 'token' ? (entry.key as string) : undefined,
+      contract: expected,
+      address: getAddress(entry.address),
+      tld: kind === 'names' ? (entry.tld as string) : undefined,
+    });
+  }
+
+  return { schema: 1, chainId: parsed.chainId, treasury: getAddress(parsed.treasury), modules };
 }
 
 /// EVERY transaction chain-svc sends carries these, and the reason is that
@@ -101,6 +190,12 @@ export class Chain {
   readonly deployment: Deployment;
   readonly treasury: Address;
   readonly viemChain: ViemChain;
+  /// The ONLY non-readonly field here, and it is populated immediately after
+  /// construction in index.ts rather than in the constructor: building it needs
+  /// a live contract read through `publicClient` (each token's symbol and
+  /// decimals), and a constructor that awaits is a constructor nothing can
+  /// call. `Chain` stays a viem wrapper; the boot sequence owns the order.
+  modules!: Modules;
 
   constructor(config: Config, deployment: Deployment) {
     this.deployment = deployment;
@@ -219,6 +314,18 @@ export async function assertPrivateChain(chain: Chain): Promise<void> {
 /// Turns a viem failure into the right wire error: a node that is unreachable
 /// is a 503 the caller can retry, a revert is a 502 they cannot (spec S4).
 export function asChainError(err: unknown): HttpError {
+  // A REFUSAL IS NOT A CHAIN ERROR. Anything that already decided what it is -
+  // module_not_deployed, unknown_name, wallet_frozen - passes through with its
+  // code intact.
+  //
+  // Without this, a guard that throws inside a call this function wraps has its
+  // answer overwritten: module_not_deployed left a token-only spawn reporting
+  // 502 chain_error, which says "the chain is broken" about a deployment that
+  // is working exactly as configured. The rule is for the whole file, not just
+  // that path: this function exists to CLASSIFY things that are not already
+  // classified.
+  if (err instanceof HttpError) return err;
+
   const message = err instanceof Error ? err.message : String(err);
   const unreachable =
     /fetch failed|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|HttpRequestError/i.test(message);

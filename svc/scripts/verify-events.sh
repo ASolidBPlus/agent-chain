@@ -41,6 +41,19 @@ docker volume create "$VOLUME" >/dev/null
 docker run -d --name "$NAME" -e ANVIL_MNEMONIC="$MNEMONIC" -v "$VOLUME:/state" -p 127.0.0.1:8545:8545 "$IMAGE" >/dev/null
 for _ in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$NAME")" = healthy ] && break; sleep 1; done
 rm -f "$DEPLOYMENTS/local.json"
+# The manifest this script's deployment declares. chain-deploy requires one and
+# has no built-in default, so a script that deploys must say what it deploys --
+# and the TLD here is the suffix every name below is registered under. Without
+# this the deploy refuses and every check afterwards is testing nothing.
+cat > "$DEPLOYMENTS/manifest.json" <<'MANIFEST_JSON'
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "token", "key": "play", "name": "Play Token", "symbol": "PLAY", "initialSupply": "1000000" },
+    { "kind": "names", "tld": "play" }
+  ]
+}
+MANIFEST_JSON
 KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
 ( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
     forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) >/dev/null 2>&1
@@ -57,19 +70,19 @@ A=(-H "Authorization: Bearer $TOKEN" -H 'content-type: application/json')
 jget() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
 step "spawn two wallets and make one accepted send"
-SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":250,"kind":"agent","alias":"shadowbroker.vee"}')
+SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:vendor","fundVee":250,"kind":"agent","alias":"vendor.play"}')
 SB_TOKEN=$(echo "$SB" | jget "['walletToken']")
-curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
+curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.play"}' >/dev/null
 # No X-Wallet-Client header: this is a caller going straight at chain-svc, the
 # shape a persona bypassing its own MCP would take.
 TX=$(curl -fsS -H "Authorization: Bearer $SB_TOKEN" -H 'content-type: application/json' \
-     -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":50,"memo":"for the stream job","intentId":"a1"}' | jget "['txHash']")
+     -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":50,"memo":"for the stream job","intentId":"a1"}' | jget "['txHash']")
 echo "  txHash: $TX"
 
 # And one WITH the marker, the way wallet-mcp will send it in C3.
 TX_MCP=$(curl -fsS -H "Authorization: Bearer $SB_TOKEN" -H 'content-type: application/json' \
      -H 'X-Wallet-Client: wallet-mcp/0.1.0' \
-     -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":10,"intentId":"a2"}' | jget "['txHash']")
+     -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":10,"intentId":"a2"}' | jget "['txHash']")
 echo "  txHash (via wallet-mcp): $TX_MCP"
 
 step "criterion 5 - what the sink actually received"

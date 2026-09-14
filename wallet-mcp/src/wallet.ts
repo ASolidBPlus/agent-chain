@@ -4,6 +4,7 @@
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
 import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
+import { defaultTokenOf, type ModulesReply } from './modules.ts';
 // TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
 // erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
 // runs on node or bun with chain-svc absent (spec S5 - org-core imports this as
@@ -33,6 +34,11 @@ export type LogSink = (message: string) => void;
 
 export interface WalletOptions {
   log: LogSink;
+  /// The chain-svc /modules reply, fetched by the host and passed in - REQUIRED,
+  /// the same way `log` is, so no construction site can forget it and no fetch
+  /// happens inside Wallet. The default token's symbol and decimals come from
+  /// here; a library host (org-core, once it exists) passes what it fetched.
+  modules: ModulesReply;
 }
 
 export interface SendResult {
@@ -127,6 +133,13 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // private key". A persona learning any of these learns about the custody of
   // keys it must never learn about, and can act on none of it.
   internal_error: null,
+  // The route needs a module this deployment does not have. GENERIC, and it
+  // should be unreachable: wallet-mcp reads /modules at startup and never
+  // advertises a tool whose module is absent, so a persona cannot call one. If
+  // it ever arrives, the tool set and the deployment have diverged - which is a
+  // fact about the deployment, not about the persona's request, and it goes to
+  // the log sink by name like every other generic mapping.
+  module_not_deployed: null,
 };
 /// The reason a persona sees for a chain-svc error code, or null for generic.
 ///
@@ -160,10 +173,16 @@ export class Wallet {
   private readonly client: ChainSvcClient;
   private readonly store: WalletStore;
   private readonly log: LogSink;
+  /// The default token's symbol and decimals, from the /modules reply. Only the
+  /// money methods use them, and those are only advertised when a default token
+  /// exists (server.ts), so the fallbacks below are unreachable in the stdio
+  /// path and org-core does not exist yet.
+  private readonly symbol: string;
+  private readonly decimals: number;
 
-  /// `options` is REQUIRED, and so is `options.log`. Every construction site
-  /// then has to name a destination, and typecheck is what makes them - see
-  /// LogSink above for why a default would have defeated the point.
+  /// `options` is REQUIRED, and so are `options.log` and `options.modules`.
+  /// Every construction site then has to name both, and typecheck is what makes
+  /// them - see LogSink above for why a default would have defeated the point.
   constructor(
     private readonly config: WalletConfig,
     options: WalletOptions,
@@ -171,6 +190,9 @@ export class Wallet {
     this.client = new ChainSvcClient(config);
     this.store = new WalletStore(config.stateFile);
     this.log = options.log;
+    const token = defaultTokenOf(options.modules);
+    this.symbol = token?.symbol ?? 'tokens';
+    this.decimals = token?.decimals ?? 0;
   }
 
   /// Strips the wallet token from anything on its way to the model.
@@ -339,24 +361,24 @@ export class Wallet {
     }));
   }
 
-  async send(args: { to: unknown; vee: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
+  async send(args: { to: unknown; amount: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
     const to = typeof args.to === 'string' ? args.to.trim() : '';
     const intentId = typeof args.intent_id === 'string' ? args.intent_id.trim() : '';
-    // `vee` IS A DECIMAL STRING on every money wire (ruled). A number is
+    // `amount` IS A DECIMAL STRING on every money wire (ruled). A number is
     // tolerated only when it is an INTEGER, which is exactly representable and
     // has nothing to round; a non-integer number is REFUSED rather than
     // rounded, because silent rounding on an amount is the one outcome worth
     // more than the convenience. The tolerance exists because an LLM writes 50
     // as often as it writes "50" - it is not a second supported type.
-    const vee = normaliseVee(args.vee);
+    const amount = normaliseVee(args.amount);
     const memo = typeof args.memo === 'string' ? args.memo : undefined;
 
     if (to === '') return this.fail('error', 'to is required and must be a name');
     if (intentId === '') return this.fail('error', 'intent_id is required');
-    if (vee === null) {
+    if (amount === null) {
       return this.fail(
         'error',
-        'vee must be a positive decimal string, e.g. "50" or "12.5". A whole number is accepted; ' +
+        'amount must be a positive decimal string, e.g. "50" or "12.5". A whole number is accepted; ' +
           'a fractional number is not, because it cannot be carried exactly - send it as a string.',
       );
     }
@@ -370,12 +392,12 @@ export class Wallet {
       // The dedupe KEY is the intent id alone (ruled). These are not
       // key components - they are what makes "same id, different send" a
       // REFUSAL rather than a silent replay of the wrong transfer.
-      if (previous.to === to && previous.vee === vee) {
+      if (previous.to === to && previous.vee === amount) {
         return { ok: true, txHash: previous.txHash };
       }
       return this.fail(
         'duplicate_intent',
-        `intent_id ${intentId} was already used to send ${previous.vee} VEE to ${previous.to}`,
+        `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbol} to ${previous.to}`,
       );
     }
 
@@ -433,10 +455,15 @@ export class Wallet {
       return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, vee);
+    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, this.decimals);
     if (local) return this.fail(local);
 
-    const res = await this.client.signTransfer({ to, vee, intentId, ...(memo ? { memo } : {}) });
+    // THE ONE PLACE THE TWO NAMES MEET. The model fills `amount`; the HTTP
+    // body carries `vee`, which is chain-svc's field name until increment 4
+    // renames the wire alongside the token argument. Mapped here rather than
+    // renamed on both sides, so the tool a persona reads stops naming one
+    // deployment's currency without a breaking change to the service contract.
+    const res = await this.client.signTransfer({ to, vee: amount, intentId, ...(memo ? { memo } : {}) });
 
     // THE DISTINCTION THIS WHOLE TYPE EXISTS FOR. A transport failure used to
     // arrive as a raw exception, which carries no answer to the only question
@@ -464,7 +491,7 @@ export class Wallet {
     const body = res.body as { txHash?: string; error?: string; detail?: string } | null;
 
     if (res.status === 200 && body?.txHash) {
-      this.store.remember(intentId, { txHash: body.txHash, vee, to, at: Date.now() });
+      this.store.remember(intentId, { txHash: body.txHash, vee: amount, to, at: Date.now() });
       return { ok: true, txHash: body.txHash };
     }
 
@@ -473,7 +500,7 @@ export class Wallet {
     // way to act on - and whose only obvious action, re-sending, is the double
     // charge this whole mechanism exists to prevent.
     if (res.status === 409 && body?.error === 'intent_unresolved') {
-      return await this.reconcile(intentId, to, vee);
+      return await this.reconcile(intentId, to, amount);
     }
 
     // The DETAIL travels with a persona-facing reason and NEVER with a generic
@@ -514,7 +541,7 @@ export class Wallet {
           return { ok: true, txHash: body.txHash };
         }
         if (body?.status === 'failed') {
-          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no VEE moved`);
+          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no ${this.symbol} moved`);
         }
         // reserved or broadcast: not settled yet. Keep waiting.
       }

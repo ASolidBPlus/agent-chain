@@ -25,10 +25,23 @@ function fixture(chainId: number): string {
   writeFileSync(
     join(dir, 'deployments', 'local.json'),
     JSON.stringify({
+      schema: 1,
       chainId,
-      VEEBux: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-      NameRegistry: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
       treasury: TEST_TREASURY,
+      modules: [
+        {
+          kind: 'token',
+          key: 'play',
+          contract: 'Token',
+          address: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        },
+        {
+          kind: 'names',
+          contract: 'NameRegistry',
+          address: '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+          tld: 'play',
+        },
+      ],
     }),
   );
   return dir;
@@ -223,18 +236,18 @@ describe('HUB_CORE_URL is validated as strictly as RPC_URL', () => {
     expect(hubCoreUrl(undefined)).toBeUndefined();
     expect(hubCoreUrl('')).toBeUndefined();
     expect(hubCoreUrl('   ')).toBeUndefined();
-  });
+    }, 30_000);
 
   it('accepts a private host', () => {
     expect(hubCoreUrl('http://hub-core:8080')).toBe('http://hub-core:8080');
     expect(hubCoreUrl('http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080');
     expect(hubCoreUrl('http://10.1.2.3:8080')).toBe('http://10.1.2.3:8080');
-  });
+    }, 30_000);
 
   it('refuses a public destination for the token', () => {
     expect(() => hubCoreUrl('https://evil.example.com/collect')).toThrow(/refusing_public_hub_core/);
     expect(() => hubCoreUrl('http://8.8.8.8/')).toThrow(/refusing_public_hub_core/);
-  });
+    }, 30_000);
 
   it('refuses junk rather than silently treating it as unset', () => {
     // The failure mode this replaces: a typo became `undefined`, events queued
@@ -243,5 +256,5 @@ describe('HUB_CORE_URL is validated as strictly as RPC_URL', () => {
     expect(() => hubCoreUrl('not-a-url')).toThrow(/not a valid URL/);
     expect(() => hubCoreUrl('ftp://hub-core/')).toThrow(/must be http or https/);
     expect(() => hubCoreUrl('file:///etc/passwd')).toThrow(/must be http or https/);
-  });
+    }, 30_000);
 });

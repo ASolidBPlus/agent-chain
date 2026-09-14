@@ -54,10 +54,10 @@ contract RegistryHandler is Test {
         }
         names.push("orch:alpha");
         names.push("orch:bravo");
-        names.push("alpha.vee");
-        names.push("bravo.vee");
-        names.push("aIpha.vee");
-        names.push("charlie.vee");
+        names.push("alpha.play");
+        names.push("bravo.play");
+        names.push("aIpha.play");
+        names.push("charlie.play");
     }
 
     function _wallet(uint256 seed) internal view returns (address) {
@@ -123,7 +123,7 @@ contract RegistryHandler is Test {
     /// try/catch rather than a bare call so fail_on_revert stays meaningful:
     /// the revert is the CORRECT behaviour here, and succeeding is the finding.
     function repointUnregistered(uint256 nameSeed, uint256 walletSeed) public {
-        string memory name = string(abi.encodePacked("ghost", vm.toString(nameSeed % 32), ".vee"));
+        string memory name = string(abi.encodePacked("ghost", vm.toString(nameSeed % 32), ".play"));
         if (_taken(name)) return;
 
         vm.prank(treasury);
@@ -142,7 +142,7 @@ contract RegistryHandler is Test {
     /// reading the handler - the same defect I had already found one function
     /// over, on setTargetFor, and did not generalise.
     function registerZeroOwner(uint256 nameSeed, uint256 walletSeed) public {
-        string memory name = string(abi.encodePacked("zero", vm.toString(nameSeed % 32), ".vee"));
+        string memory name = string(abi.encodePacked("zero", vm.toString(nameSeed % 32), ".play"));
         if (_taken(name)) return;
 
         vm.prank(treasury);
@@ -175,7 +175,7 @@ contract RegistryHandler is Test {
     /// never run. The stranger case has its own action rather than being
     /// folded in here - two behaviours in one action tests neither.
     function registerForeignTarget(uint256 nameSeed, uint256 targetSeed) public {
-        string memory name = string(abi.encodePacked("foreign", vm.toString(nameSeed % 32), ".vee"));
+        string memory name = string(abi.encodePacked("foreign", vm.toString(nameSeed % 32), ".play"));
         if (_taken(name)) return;
 
         address target = _wallet(targetSeed);
@@ -194,7 +194,7 @@ contract RegistryHandler is Test {
     /// than swallowed, so removing the modifier is visible here and not only in
     /// the example tests.
     function strangerRegisters(uint256 nameSeed, uint256 callerSeed) public {
-        string memory name = string(abi.encodePacked("squat", vm.toString(nameSeed % 32), ".vee"));
+        string memory name = string(abi.encodePacked("squat", vm.toString(nameSeed % 32), ".play"));
         if (_taken(name)) return;
 
         vm.prank(_wallet(callerSeed));

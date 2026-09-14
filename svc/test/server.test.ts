@@ -27,14 +27,23 @@ let base: string;
 const services = {
   config: { token: TOKEN },
   store,
+  // The module view the router and /health read. A token-plus-names deployment,
+  // which is what every expectation in this file was written against.
+  chain: {
+    deployment: { chainId: 31337, treasury: '0xtreasury' },
+    modules: {
+      tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+      names: { address: '0xreg', tld: 'play' },
+    },
+  },
   resolver: {
-    lookup: async (name: string) => (name === 'alpha.vee' ? { address: WALLET, canonical: 'alpha:client' } : null),
+    lookup: async (name: string) => (name === 'alpha.play' ? { address: WALLET, canonical: 'alpha:client' } : null),
     require: async (name: string) => {
-      if (name !== 'alpha.vee') throw new HttpError('unknown_name', `no registry entry for ${name}`);
+      if (name !== 'alpha.play') throw new HttpError('unknown_name', `no registry entry for ${name}`);
       return { address: WALLET, canonical: 'alpha:client' };
     },
     reverseOf: async () => 'alpha:client',
-    aliasesOf: async () => ['alpha.vee'],
+    aliasesOf: async () => ['alpha.play'],
   },
 } as unknown as Services;
 
@@ -76,7 +85,10 @@ describe('authentication', () => {
   it('serves /health unauthenticated', async () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // The module list is part of /health so an operator can see what a
+    // deployment actually has without a credential. Sorted, so two deployments
+    // with the same modules compare equal whatever order the manifest used.
+    expect(await res.json()).toEqual({ ok: true, modules: ['names', 'token:play'] });
   });
 
   it('compares tokens without leaking length through an exception', () => {
@@ -113,14 +125,14 @@ describe('credential scopes', () => {
     const res = await fetch(`${base}/sign-transfer`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ to: 'alpha.vee', vee: 1 }),
+      body: JSON.stringify({ to: 'alpha.play', vee: 1 }),
     });
     expect(res.status).toBe(403);
     expect((await body(res)).error).toBe('wrong_scope');
   });
 
   it('lets a wallet read itself and refuses another wallet', async () => {
-    const mine = await fetch(`${base}/balance/alpha.vee`, { headers: wallet });
+    const mine = await fetch(`${base}/balance/alpha.play`, { headers: wallet });
     // Reaches the handler, which then needs a chain the stub does not provide -
     // the point is that authorisation did not refuse it.
     expect(mine.status).not.toBe(403);
@@ -179,7 +191,7 @@ describe('GET /wallets/:agentId', () => {
 
 describe('routing', () => {
   it('resolves a percent-encoded canonical id', async () => {
-    const res = await fetch(`${base}/resolve/${encodeURIComponent('alpha.vee')}`, { headers: auth });
+    const res = await fetch(`${base}/resolve/${encodeURIComponent('alpha.play')}`, { headers: auth });
     expect(res.status).toBe(200);
     // `resolvedVia` on every answer, platform scope included (§5). Constant
     // there rather than absent: a caller should not have to know which scope it
@@ -212,7 +224,7 @@ describe('routing', () => {
   it('returns the canonical name and aliases for an address', async () => {
     const res = await fetch(`${base}/reverse/${WALLET}`, { headers: auth });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ canonical: 'alpha:client', aliases: ['alpha.vee'] });
+    expect(await res.json()).toEqual({ canonical: 'alpha:client', aliases: ['alpha.play'] });
   });
 
   it('404s an unknown route as invalid_request, not as a crash', async () => {
@@ -223,7 +235,7 @@ describe('routing', () => {
 
   // /resolve/a/b is not a name that happens to contain a slash.
   it('does not treat a multi-segment path as a name', async () => {
-    const res = await fetch(`${base}/resolve/alpha/vee`, { headers: auth });
+    const res = await fetch(`${base}/resolve/alpha/play`, { headers: auth });
     expect(res.status).toBe(400);
     expect((await body(res)).error).toBe('invalid_request');
   });
@@ -257,14 +269,15 @@ describe('the alias index', () => {
     const { Resolver } = await import('../src/resolver.ts');
 
     const registered = [
-      { args: { name: 'mine.vee', owner: WALLET, target: WALLET } },
+      { args: { name: 'mine.play', owner: WALLET, target: WALLET } },
       { args: { name: 'orch:me', owner: WALLET, target: WALLET } },
-      { args: { name: 'strangers-label.vee', owner: '0xbad', target: WALLET } },
-      { args: { name: 'elsewhere.vee', owner: WALLET, target: '0xother' } },
+      { args: { name: 'strangers-label.play', owner: '0xbad', target: WALLET } },
+      { args: { name: 'elsewhere.play', owner: WALLET, target: '0xother' } },
     ];
 
     const chain = {
-      deployment: { NameRegistry: '0xreg' },
+      deployment: {},
+      modules: { tokens: [], names: { address: '0xreg', tld: 'play' } },
       publicClient: {
         getContractEvents: async () => registered,
         readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {
@@ -276,12 +289,12 @@ describe('the alias index', () => {
       },
     } as unknown as import('../src/chain.ts').Chain;
 
-    const aliases = await new Resolver(chain).aliasesOf(WALLET);
+    const aliases = await new Resolver(chain, store).aliasesOf(WALLET);
 
-    expect(aliases).toEqual(['mine.vee']);
-    expect(aliases).not.toContain('strangers-label.vee'); // owned by someone else
+    expect(aliases).toEqual(['mine.play']);
+    expect(aliases).not.toContain('strangers-label.play'); // owned by someone else
     expect(aliases).not.toContain('orch:me'); // the canonical, not an alias
-    expect(aliases).not.toContain('elsewhere.vee'); // points at another wallet
+    expect(aliases).not.toContain('elsewhere.play'); // points at another wallet
   });
 });
 

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "token", "key": "play", "name": "Play Token", "symbol": "PLAY", "initialSupply": "1000000" },
+    { "kind": "token", "key": "gold", "name": "Gold", "symbol": "GOLD", "initialSupply": "0" },
+    { "kind": "names", "tld": "play" }
+  ]
+}

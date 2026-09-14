@@ -46,32 +46,32 @@ async function main(): Promise<void> {
   const before = await call('balance');
   console.log(`  balance before: ${JSON.stringify(before)}`);
 
-  const first = await call('send', { to: 'alpha.vee', vee: 50, intent_id: 'a1', memo: 'for the stream job' });
+  const first = await call('send', { to: 'alpha.play', amount: 50, intent_id: 'a1', memo: 'for the stream job' });
   check('send 50 accepted', first.ok, true);
 
-  const replay = await call('send', { to: 'alpha.vee', vee: 50, intent_id: 'a1' });
+  const replay = await call('send', { to: 'alpha.play', amount: 50, intent_id: 'a1' });
   check('replay returns the same txHash', replay.txHash, first.txHash);
 
   const afterReplay = await call('balance');
-  check('the money moved once', afterReplay.vee, String(Number(before.vee) - 50));
+  check('the money moved once', afterReplay.play, String(Number(before.play) - 50));
 
-  check('150 is over max_per_tx', (await call('send', { to: 'alpha.vee', vee: 150, intent_id: 'b1' })).reason, 'over_max_per_tx');
+  check('150 is over max_per_tx', (await call('send', { to: 'alpha.play', amount: 150, intent_id: 'b1' })).reason, 'over_max_per_tx');
 
   // 50 + 4x100 = 450, under max_per_stage 500; the next 100 reaches 550.
   for (let i = 1; i <= 4; i++) {
-    const r = await call('send', { to: 'alpha.vee', vee: 100, intent_id: `s${i}` });
+    const r = await call('send', { to: 'alpha.play', amount: 100, intent_id: `s${i}` });
     if (r.ok !== true) {
       console.log(`  FAIL stage send ${i} should have been accepted: ${JSON.stringify(r)}`);
       failures++;
     }
   }
   console.log('  four sends of 100 accepted (stage total 450)');
-  check('the fifth trips the stage cap', (await call('send', { to: 'alpha.vee', vee: 100, intent_id: 's5' })).reason, 'over_stage_cap');
+  check('the fifth trips the stage cap', (await call('send', { to: 'alpha.play', amount: 100, intent_id: 's5' })).reason, 'over_stage_cap');
 
-  check('treasury.vee is denied', (await call('send', { to: 'treasury.vee', vee: 1, intent_id: 'c1' })).reason, 'counterparty_denied');
-  check('nobody.vee is unknown', (await call('send', { to: 'nobody.vee', vee: 1, intent_id: 'd1' })).reason, 'unknown_name');
+  check('treasury.play is denied', (await call('send', { to: 'treasury.play', amount: 1, intent_id: 'c1' })).reason, 'counterparty_denied');
+  check('nobody.play is unknown', (await call('send', { to: 'nobody.play', amount: 1, intent_id: 'd1' })).reason, 'unknown_name');
   // Criterion 9 at the tool: a bare local id is not a name the ledger knows.
-  check('a bare local id is unknown', (await call('send', { to: 'client', vee: 1, intent_id: 'd2' })).reason, 'unknown_name');
+  check('a bare local id is unknown', (await call('send', { to: 'client', amount: 1, intent_id: 'd2' })).reason, 'unknown_name');
 
   console.log('\n=== the other tools');
   const who = await call('whoami');
@@ -79,10 +79,10 @@ async function main(): Promise<void> {
   console.log(`  whoami: ${JSON.stringify(who)}`);
   const history = await call('history', { limit: 3 });
   console.log(`  history: ${JSON.stringify(history)}`);
-  const lookalike = await call('resolve', { name: 'aIpha.vee' });
-  const real = await call('resolve', { name: 'alpha.vee' });
-  console.log(`  resolve aIpha.vee -> ${JSON.stringify(lookalike)}`);
-  console.log(`  resolve alpha.vee -> ${JSON.stringify(real)}`);
+  const lookalike = await call('resolve', { name: 'aIpha.play' });
+  const real = await call('resolve', { name: 'alpha.play' });
+  console.log(`  resolve aIpha.play -> ${JSON.stringify(lookalike)}`);
+  console.log(`  resolve alpha.play -> ${JSON.stringify(real)}`);
   check('the lookalike is a different wallet', lookalike.address !== real.address, true);
 
   console.log('\n=== secret hygiene (spec S5): the token in no tool output');

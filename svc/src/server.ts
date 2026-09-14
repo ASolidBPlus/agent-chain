@@ -5,7 +5,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { formatEther, isAddress, getAddress } from 'viem';
-import { VEEBuxAbi } from './abi.ts';
+import { TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
 import { assertMayRead, authenticate, requirePlatform, type Principal } from './auth.ts';
@@ -17,6 +17,7 @@ import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
 import type { Treasury } from './treasury.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
+import { defaultToken, type ModuleKind, type Modules } from './modules.ts';
 
 export interface Services {
   config: Config;
@@ -63,6 +64,14 @@ export interface Route {
   scope: Scope;
   /// For routes shaped /prefix/<param>/suffix, e.g. /wallets/<id>/rotate.
   suffix?: string;
+  /// The modules this route cannot work without. Empty for a route that works
+  /// on any deployment.
+  ///
+  /// DECLARED ON THE ROUTE RATHER THAN CHECKED IN THE HANDLER, so that adding a
+  /// route is a decision about which modules it needs. A handler-side check is
+  /// one a new route silently omits, and the failure then looks like a chain
+  /// error rather than a deployment that does not have the thing.
+  requires: ModuleKind[];
 }
 
 // --- handlers ------------------------------------------------------------
@@ -75,19 +84,24 @@ async function getSupply({ services, principal }: RouteContext): Promise<unknown
   try {
     const [total, treasury] = (await Promise.all([
       chain.publicClient.readContract({
-        address: chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(chain.modules).address,
+        abi: TokenAbi,
         functionName: 'totalSupply',
       }),
       chain.publicClient.readContract({
-        address: chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(chain.modules).address,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [chain.treasury],
       }),
     ])) as [bigint, bigint];
 
-    return { total: formatVee(total), treasury: formatVee(treasury), inPlay: formatVee(total - treasury) };
+    const { decimals } = defaultToken(chain.modules);
+    return {
+      total: formatVee(total, decimals),
+      treasury: formatVee(treasury, decimals),
+      inPlay: formatVee(total - treasury, decimals),
+    };
   } catch (err) {
     throw asChainError(err);
   }
@@ -226,14 +240,14 @@ async function getBalance({ services, param, principal }: RouteContext): Promise
   try {
     const [vee, eth] = await Promise.all([
       services.chain.publicClient.readContract({
-        address: services.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        address: defaultToken(services.chain.modules).address,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [found.address],
       }) as Promise<bigint>,
       services.chain.publicClient.getBalance({ address: found.address }),
     ]);
-    return { vee: formatVee(vee), eth: formatEther(eth) };
+    return { vee: formatVee(vee, defaultToken(services.chain.modules).decimals), eth: formatEther(eth) };
   } catch (err) {
     throw asChainError(err);
   }
@@ -304,29 +318,55 @@ async function postStage({ services, body, principal }: RouteContext): Promise<u
   return { stage: stage.trim() };
 }
 
+/// Sorted so the list is a set rather than an order: a caller comparing two
+/// deployments should not see a difference that is only the manifest's order.
+/// The DEFAULT token's identity is carried by `/modules`, not by this.
+function healthModules(m: Modules): string[] {
+  return [...m.tokens.map((t) => `token:${t.key}`), ...(m.names ? ['names'] : [])].sort();
+}
+
+/// What wallet-mcp reads at startup to decide which tools to advertise.
+///
+/// Scope `any`: a wallet caller learns the deployed tokens' addresses, symbols
+/// and decimals, and the registry's address. Those are already visible to a
+/// platform caller in local.json and derivable by anyone who can watch the
+/// chain; nothing here is about another wallet.
+async function getModules({ services }: RouteContext): Promise<unknown> {
+  const m = services.chain.modules;
+  return {
+    schema: 1,
+    chainId: services.chain.deployment.chainId,
+    treasury: services.chain.deployment.treasury,
+    defaultToken: m.tokens[0]?.key ?? null,
+    tokens: m.tokens.map((t) => ({ key: t.key, address: t.address, symbol: t.symbol, decimals: t.decimals })),
+    names: m.names ? { address: m.names.address, tld: m.names.tld } : null,
+  };
+}
+
 export const ROUTES: Route[] = [
-  { method: 'GET', path: '/supply', prefix: false, scope: 'platform', handler: getSupply },
-  { method: 'GET', path: '/resolve/', prefix: true, scope: 'any', handler: getResolve },
-  { method: 'GET', path: '/reverse/', prefix: true, scope: 'any', handler: getReverse },
+  { method: 'GET', path: '/modules', prefix: false, scope: 'any', handler: getModules, requires: [] },
+  { method: 'GET', path: '/supply', prefix: false, scope: 'platform', handler: getSupply, requires: ['token'] },
+  { method: 'GET', path: '/resolve/', prefix: true, scope: 'any', handler: getResolve, requires: ['names'] },
+  { method: 'GET', path: '/reverse/', prefix: true, scope: 'any', handler: getReverse, requires: ['names'] },
   // 'any' at the router, then self-only inside: the handler has to resolve the
   // name before it can know whose wallet it is.
   // Platform scope, and deliberately not 'any': the row carries the bare-id
   // counter, which is a facilitator's measurement OF the persona. A wallet
   // reading its own detector score is the observed party reading the observer's
   // notes.
-  { method: 'GET', path: '/wallets/', prefix: true, scope: 'platform', handler: getWallet },
-  { method: 'GET', path: '/balance/', prefix: true, scope: 'any', handler: getBalance },
-  { method: 'GET', path: '/history/', prefix: true, scope: 'any', handler: getHistory },
-  { method: 'GET', path: '/intents/', prefix: true, scope: 'any', handler: getIntent },
-  { method: 'POST', path: '/wallets', prefix: false, scope: 'platform', handler: postWallets },
-  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/rotate', scope: 'platform', handler: postRotate },
-  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/balance', scope: 'platform', handler: postBalance },
-  { method: 'PATCH', path: '/wallets/', prefix: true, suffix: '/policy', scope: 'platform', handler: patchPolicy },
-  { method: 'POST', path: '/aliases', prefix: false, scope: 'platform', handler: postAliases },
-  { method: 'POST', path: '/fund', prefix: false, scope: 'platform', handler: postFund },
-  { method: 'POST', path: '/stage', prefix: false, scope: 'platform', handler: postStage },
-  { method: 'POST', path: '/sign-transfer', prefix: false, scope: 'wallet', handler: postSignTransfer },
-  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet },
+  { method: 'GET', path: '/wallets/', prefix: true, scope: 'platform', handler: getWallet, requires: [] },
+  { method: 'GET', path: '/balance/', prefix: true, scope: 'any', handler: getBalance, requires: ['token'] },
+  { method: 'GET', path: '/history/', prefix: true, scope: 'any', handler: getHistory, requires: ['token'] },
+  { method: 'GET', path: '/intents/', prefix: true, scope: 'any', handler: getIntent, requires: [] },
+  { method: 'POST', path: '/wallets', prefix: false, scope: 'platform', handler: postWallets, requires: [] },
+  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/rotate', scope: 'platform', handler: postRotate, requires: [] },
+  { method: 'POST', path: '/wallets/', prefix: true, suffix: '/balance', scope: 'platform', handler: postBalance, requires: ['token'] },
+  { method: 'PATCH', path: '/wallets/', prefix: true, suffix: '/policy', scope: 'platform', handler: patchPolicy, requires: [] },
+  { method: 'POST', path: '/aliases', prefix: false, scope: 'platform', handler: postAliases, requires: ['names'] },
+  { method: 'POST', path: '/fund', prefix: false, scope: 'platform', handler: postFund, requires: ['token'] },
+  { method: 'POST', path: '/stage', prefix: false, scope: 'platform', handler: postStage, requires: [] },
+  { method: 'POST', path: '/sign-transfer', prefix: false, scope: 'wallet', handler: postSignTransfer, requires: ['token'] },
+  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },
 ];
 
 /// @throws HttpError for a malformed percent-escape - a caller error, not a
@@ -410,6 +450,25 @@ export function assertRouteScope(route: Route, principal: Principal, what: strin
   }
 }
 
+/// The router-level module check, a named function for the same reason
+/// `assertRouteScope` is one.
+///
+/// RUNS AFTER THE SCOPE CHECK AND BEFORE THE HANDLER, and both halves of that
+/// order matter. After scope: an UNAUTHENTICATED caller still gets
+/// `unauthorized`, so a deployment's shape is not something a stranger can
+/// enumerate by watching which paths answer differently. Before the handler: a
+/// platform caller asking a names-only deployment for /fund gets a refusal that
+/// names the reason, instead of a chain error from a call to an address that
+/// does not exist.
+export function assertModulesDeployed(route: Route, modules: Modules, what: string): void {
+  for (const kind of route.requires) {
+    const present = kind === 'token' ? modules.tokens.length > 0 : modules.names !== undefined;
+    if (!present) {
+      throw new HttpError('module_not_deployed', `${what} needs a ${kind} module; this deployment has none`);
+    }
+  }
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
@@ -422,7 +481,7 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
     // Unauthenticated on purpose: compose's healthcheck must not need the
     // token, and it reveals nothing a caller could not learn by connecting.
     if (req.method === 'GET' && url.pathname === '/health') {
-      return send(res, 200, { ok: true });
+      return send(res, 200, { ok: true, modules: healthModules(services.chain.modules) });
     }
 
     const principal = authenticate(req.headers.authorization, services.config.token, services.store);
@@ -431,6 +490,7 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
     if (!found) throw new HttpError('invalid_request', `no route for ${req.method} ${url.pathname}`);
 
     assertRouteScope(found.route, principal, `${req.method} ${url.pathname}`);
+    assertModulesDeployed(found.route, services.chain.modules, `${req.method} ${url.pathname}`);
 
     const method = req.method ?? 'GET';
     const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);

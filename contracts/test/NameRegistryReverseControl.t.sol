@@ -34,9 +34,9 @@ contract NameRegistryReverseControlTest is Test {
     function test_AStrangerCannotRegisterAtAll() public {
         vm.prank(attacker);
         vm.expectRevert();
-        registry.register("attacker.vee", victim);
+        registry.register("attacker.play", victim);
 
-        assertEq(registry.resolve("attacker.vee"), address(0), "a stranger took a name");
+        assertEq(registry.resolve("attacker.play"), address(0), "a stranger took a name");
     }
 
     /// The inner gate, independently: even the REGISTRAR's `register` is
@@ -45,9 +45,9 @@ contract NameRegistryReverseControlTest is Test {
     /// leave every test here green.
     function test_EvenTheRegistrarsRegisterDoesNotSetAPrimaryName() public {
         vm.prank(treasury);
-        registry.register("label.vee", victim);
+        registry.register("label.play", victim);
 
-        assertEq(registry.resolve("label.vee"), victim, "the forward mapping should still work");
+        assertEq(registry.resolve("label.play"), victim, "the forward mapping should still work");
         assertEq(registry.reverseOf(victim), "", "register wrote a primary name");
     }
 
@@ -55,9 +55,9 @@ contract NameRegistryReverseControlTest is Test {
     /// and the reason the finding matters even though no funds move.
     function test_AnAddressThatNeverGetsACanonicalNameKeepsNoPrimaryName() public {
         vm.prank(treasury);
-        registry.register("burner-label.vee", victim);
+        registry.register("burner-label.play", victim);
         vm.prank(treasury);
-        registry.register("another-label.vee", victim);
+        registry.register("another-label.play", victim);
 
         assertEq(registry.reverseOf(victim), "", "an unnamed address acquired a primary name");
     }
@@ -85,7 +85,7 @@ contract NameRegistryReverseControlTest is Test {
         registry.registerFor(CANONICAL, victim, victim);
 
         vm.prank(treasury);
-        registry.register("label.vee", victim);
+        registry.register("label.play", victim);
 
         assertEq(registry.reverseOf(victim), CANONICAL);
     }
@@ -97,10 +97,10 @@ contract NameRegistryReverseControlTest is Test {
         vm.prank(treasury);
         registry.registerFor(CANONICAL, victim, victim);
         vm.prank(treasury);
-        registry.registerFor("victim.vee", victim, victim); // an alias, not the primary
+        registry.registerFor("victim.play", victim, victim); // an alias, not the primary
 
         vm.prank(victim);
-        registry.transfer("victim.vee", attacker);
+        registry.transfer("victim.play", attacker);
 
         assertEq(registry.reverseOf(victim), CANONICAL, "transferring an alias cleared the primary name");
     }

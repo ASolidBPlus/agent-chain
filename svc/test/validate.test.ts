@@ -20,7 +20,7 @@ function codeOf(fn: () => unknown): string {
 
 describe('canonical agent ids', () => {
   it('accepts a qualified lowercase id', () => {
-    expect(assertCanonicalAgentId('orch:shadowbroker')).toBe('orch:shadowbroker');
+    expect(assertCanonicalAgentId('orch:vendor')).toBe('orch:vendor');
     expect(assertCanonicalAgentId('alpha:client')).toBe('alpha:client');
   });
 
@@ -40,8 +40,8 @@ describe('canonical agent ids', () => {
   // under an id the caller did not ask for, and the mesh does NOT enforce case
   // on local ids, so this is the only check standing.
   it('rejects uppercase instead of normalising it', () => {
-    expect(codeOf(() => assertCanonicalAgentId('Orch:shadowbroker'))).toBe('invalid_agent_id');
-    expect(codeOf(() => assertCanonicalAgentId('orch:ShadowBroker'))).toBe('invalid_agent_id');
+    expect(codeOf(() => assertCanonicalAgentId('Orch:vendor'))).toBe('invalid_agent_id');
+    expect(codeOf(() => assertCanonicalAgentId('orch:Vendor'))).toBe('invalid_agent_id');
   });
 
   // Without a TOTAL length bound, a 60-character id passes the shape check and
@@ -71,14 +71,14 @@ describe('canonical agent ids', () => {
 
 describe('vanity aliases', () => {
   it('preserves case, because lookalikes are the game mechanic', () => {
-    expect(assertAlias('aIpha.vee')).toBe('aIpha.vee');
-    expect(assertAlias('alpha.vee')).toBe('alpha.vee');
-    expect(assertAlias('aIpha.vee')).not.toBe(assertAlias('alpha.vee'));
+    expect(assertAlias('aIpha.play')).toBe('aIpha.play');
+    expect(assertAlias('alpha.play')).toBe('alpha.play');
+    expect(assertAlias('aIpha.play')).not.toBe(assertAlias('alpha.play'));
   });
 
   // An alias with a colon could impersonate a namespaced canonical id.
   it('rejects a colon', () => {
-    expect(codeOf(() => assertAlias('orch:shadowbroker'))).toBe('invalid_name');
+    expect(codeOf(() => assertAlias('orch:vendor'))).toBe('invalid_name');
   });
 
   it('enforces the 3-48 length bounds', () => {
@@ -90,8 +90,8 @@ describe('vanity aliases', () => {
 
 describe('lookup names', () => {
   it('accepts a canonical id or an alias', () => {
-    expect(assertLookupName('orch:shadowbroker')).toBe('orch:shadowbroker');
-    expect(assertLookupName('alpha.vee')).toBe('alpha.vee');
+    expect(assertLookupName('orch:vendor')).toBe('orch:vendor');
+    expect(assertLookupName('alpha.play')).toBe('alpha.play');
   });
 
   // A bare local id is SYNTACTICALLY a valid alias, so it is the registry
@@ -108,39 +108,39 @@ describe('lookup names', () => {
 
 describe('amounts', () => {
   it('accepts numbers and decimal strings alike', () => {
-    expect(parseVee(250)).toBe(250n * 10n ** 18n);
-    expect(parseVee('250')).toBe(250n * 10n ** 18n);
-    expect(parseVee('0.5')).toBe(5n * 10n ** 17n);
-    expect(parseVee(0)).toBe(0n);
+    expect(parseVee(250, 18, 'PLAY')).toBe(250n * 10n ** 18n);
+    expect(parseVee('250', 18, 'PLAY')).toBe(250n * 10n ** 18n);
+    expect(parseVee('0.5', 18, 'PLAY')).toBe(5n * 10n ** 17n);
+    expect(parseVee(0, 18, 'PLAY')).toBe(0n);
   });
 
   it('round-trips through the output format', () => {
-    expect(formatVee(parseVee('1000000'))).toBe('1000000');
-    expect(formatVee(parseVee('0.000000000000000001'))).toBe('0.000000000000000001');
+    expect(formatVee(parseVee('1000000', 18, 'PLAY'), 18)).toBe('1000000');
+    expect(formatVee(parseVee('0.000000000000000001', 18, 'PLAY'), 18)).toBe('0.000000000000000001');
   });
 
   it('rejects more than 18 decimal places', () => {
-    expect(codeOf(() => parseVee('0.0000000000000000001'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('0.0000000000000000001', 18, 'PLAY'))).toBe('invalid_amount');
   });
 
   it('rejects negatives, junk and non-finite numbers', () => {
-    expect(codeOf(() => parseVee('-1'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee('abc'))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(Number.NaN))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(Number.POSITIVE_INFINITY))).toBe('invalid_amount');
-    expect(codeOf(() => parseVee(null))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('-1', 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee('abc', 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(Number.NaN, 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(Number.POSITIVE_INFINITY, 18, 'PLAY'))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(null, 18, 'PLAY'))).toBe('invalid_amount');
   });
 
   // A JS number big enough to render as 1e+21 cannot be handed to parseUnits.
   // Refusing beats silently rounding the game's money.
   it('rejects a number that renders in exponent form', () => {
-    expect(codeOf(() => parseVee(1e21))).toBe('invalid_amount');
+    expect(codeOf(() => parseVee(1e21, 18, 'PLAY'))).toBe('invalid_amount');
   });
 });
 
 describe('key file names', () => {
   it('encodes the colon so it never reaches a path', () => {
-    expect(keyFileName('orch:shadowbroker')).toBe('orch%3Ashadowbroker.json');
+    expect(keyFileName('orch:vendor')).toBe('orch%3Avendor.json');
   });
 
   it('leaves no separator or traversal sequence in the result', () => {

@@ -5,38 +5,44 @@ import { join } from 'node:path';
 import { checkLocally, normaliseVee, veeToWei, matchesPattern, readPolicy, type WalletPolicy } from '../src/policy.ts';
 import { WalletStore } from '../src/store.ts';
 
+// `decimals` is now threaded from chain-svc's /modules (spec S5). These cases
+// exercise an 18-place token, so they pin decimals = 18 at the call rather than
+// repeating it fifteen times.
+const chk = (policy: WalletPolicy | null, to: string, vee: string) => checkLocally(policy, to, vee, 18);
+const wei = (vee: string) => veeToWei(vee, 18);
+
 const POLICY: WalletPolicy = {
-  agentId: 'orch:shadowbroker',
+  agentId: 'orch:vendor',
   max_per_tx: 100,
   max_per_stage: 500,
-  allow: ['*.vee'],
-  deny: ['treasury.vee'],
+  allow: ['*.play'],
+  deny: ['treasury.play'],
   frozen: false,
 };
 
 describe('pattern matching', () => {
   it('uses the same restricted dialect as chain-svc', () => {
     expect(matchesPattern('*', 'anything')).toBe(true);
-    expect(matchesPattern('*.vee', 'alpha.vee')).toBe(true);
-    expect(matchesPattern('*.vee', 'alpha.veex')).toBe(false);
-    expect(matchesPattern('treasury.vee', 'treasury.vee')).toBe(true);
+    expect(matchesPattern('*.play', 'alpha.play')).toBe(true);
+    expect(matchesPattern('*.play', 'alpha.playx')).toBe(false);
+    expect(matchesPattern('treasury.play', 'treasury.play')).toBe(true);
   });
 });
 
 describe('the local pre-check', () => {
   it('refuses over max_per_tx, a denied counterparty, and a frozen wallet', () => {
-    expect(checkLocally(POLICY, 'alpha.vee', '150')).toBe('over_max_per_tx');
-    expect(checkLocally(POLICY, 'treasury.vee', '1')).toBe('counterparty_denied');
-    expect(checkLocally({ ...POLICY, frozen: true }, 'alpha.vee', '1')).toBe('frozen');
+    expect(chk(POLICY, 'alpha.play', '150')).toBe('over_max_per_tx');
+    expect(chk(POLICY, 'treasury.play', '1')).toBe('counterparty_denied');
+    expect(chk({ ...POLICY, frozen: true }, 'alpha.play', '1')).toBe('frozen');
   });
 
   it('refuses a counterparty no allow rule covers', () => {
-    expect(checkLocally({ ...POLICY, allow: [] }, 'alpha.vee', '1')).toBe('counterparty_denied');
-    expect(checkLocally(POLICY, 'alpha.wat', '1')).toBe('counterparty_denied');
+    expect(chk({ ...POLICY, allow: [] }, 'alpha.play', '1')).toBe('counterparty_denied');
+    expect(chk(POLICY, 'alpha.wat', '1')).toBe('counterparty_denied');
   });
 
   it('passes a send nothing local objects to', () => {
-    expect(checkLocally(POLICY, 'alpha.vee', '100')).toBeNull();
+    expect(chk(POLICY, 'alpha.play', '100')).toBeNull();
   });
 
   // Deliberate: the stage cap counts spends since the last stage change, and
@@ -44,14 +50,14 @@ describe('the local pre-check', () => {
   // credential, which by design never reaches the agent side. So the refusal
   // comes from chain-svc, which is the authority anyway.
   it('does not attempt the stage cap locally', () => {
-    expect(checkLocally(POLICY, 'alpha.vee', '100')).toBeNull();
+    expect(chk(POLICY, 'alpha.play', '100')).toBeNull();
   });
 
   // An unreadable policy is NOT permission and NOT a refusal: chain-svc decides.
   // Returning 'frozen' here would strand an agent on a transient read error;
   // approving would be worse.
   it('defers to chain-svc when the policy cannot be read', () => {
-    expect(checkLocally(null, 'alpha.vee', '999999')).toBeNull();
+    expect(chk(null, 'alpha.play', '999999')).toBeNull();
   });
 });
 
@@ -112,11 +118,11 @@ describe('normaliseVee', () => {
   });
 
   it('compares against max_per_tx in wei, not as a float', () => {
-    expect(veeToWei('12.5')).toBe(12_500_000_000_000_000_000n);
-    expect(veeToWei('1')).toBe(10n ** 18n);
+    expect(wei('12.5')).toBe(12_500_000_000_000_000_000n);
+    expect(wei('1')).toBe(10n ** 18n);
     // The comparison the cap actually makes, at a value a float would fumble.
-    expect(checkLocally({ ...POLICY, max_per_tx: 100 }, 'alpha.vee', '100')).toBeNull();
-    expect(checkLocally({ ...POLICY, max_per_tx: 100 }, 'alpha.vee', '100.000000000000000001')).toBe(
+    expect(chk({ ...POLICY, max_per_tx: 100 }, 'alpha.play', '100')).toBeNull();
+    expect(chk({ ...POLICY, max_per_tx: 100 }, 'alpha.play', '100.000000000000000001')).toBe(
       'over_max_per_tx',
     );
   });
@@ -138,8 +144,8 @@ describe('reading the policy chain-svc actually writes', () => {
         agentId: 'orch:a',
         max_per_tx: '25',
         max_per_stage: '100',
-        allow: ['*.vee'],
-        deny: ['treasury.vee'],
+        allow: ['*.play'],
+        deny: ['treasury.play'],
         frozen: false,
       }),
     );
@@ -148,8 +154,8 @@ describe('reading the policy chain-svc actually writes', () => {
     expect(policy).not.toBeNull();
     expect(policy!.max_per_tx).toBe('25');
     // And the cap it read actually enforces, in wei rather than as a float.
-    expect(checkLocally(policy, 'bob.vee', '26')).toBe('over_max_per_tx');
-    expect(checkLocally(policy, 'bob.vee', '25')).toBeNull();
+    expect(chk(policy, 'bob.play', '26')).toBe('over_max_per_tx');
+    expect(chk(policy, 'bob.play', '25')).toBeNull();
   });
 
   it('still accepts numeric caps, so an older file keeps working', () => {
@@ -157,9 +163,9 @@ describe('reading the policy chain-svc actually writes', () => {
     const file = join(dir, 'policy.json');
     writeFileSync(
       file,
-      JSON.stringify({ agentId: 'orch:a', max_per_tx: 25, max_per_stage: 100, allow: ['*.vee'], deny: [], frozen: false }),
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 25, max_per_stage: 100, allow: ['*.play'], deny: [], frozen: false }),
     );
-    expect(checkLocally(readPolicy(file), 'bob.vee', '26')).toBe('over_max_per_tx');
+    expect(chk(readPolicy(file), 'bob.play', '26')).toBe('over_max_per_tx');
   });
 });
 
@@ -172,8 +178,8 @@ describe('the intent ledger never forgets', () => {
     const file = join(dir, 'state.json');
 
     const first = new WalletStore(file);
-    first.remember('a', { txHash: '0xaaa', vee: '10', to: 'bob.vee', at: 1 });
-    first.remember('b', { txHash: '0xbbb', vee: '20', to: 'carol.vee', at: 2 });
+    first.remember('a', { txHash: '0xaaa', vee: '10', to: 'bob.play', at: 1 });
+    first.remember('b', { txHash: '0xbbb', vee: '20', to: 'carol.play', at: 2 });
 
     // Still there after another intent was written...
     expect(first.recall('a')?.txHash).toBe('0xaaa');

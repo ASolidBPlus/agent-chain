@@ -13,8 +13,8 @@ function freshDir(): string {
 describe('keystore', () => {
   it('round-trips a wallet key', async () => {
     const ks = new Keystore(freshDir(), 'secret');
-    const created = await ks.create('orch:shadowbroker');
-    const loaded = await ks.load('orch:shadowbroker');
+    const created = await ks.create('orch:vendor');
+    const loaded = await ks.load('orch:vendor');
 
     expect(loaded.address).toBe(created.address);
     expect(loaded.privateKey).toBe(created.privateKey);
@@ -24,15 +24,15 @@ describe('keystore', () => {
   it('writes the file under the URL-encoded id, so no colon reaches a path', async () => {
     const dir = freshDir();
     const ks = new Keystore(dir, 'secret');
-    await ks.create('orch:shadowbroker');
-    expect(() => readFileSync(join(dir, 'orch%3Ashadowbroker.json'), 'utf8')).not.toThrow();
+    await ks.create('orch:vendor');
+    expect(() => readFileSync(join(dir, 'orch%3Avendor.json'), 'utf8')).not.toThrow();
   }, 20_000);
 
   it('never stores the private key in the clear', async () => {
     const dir = freshDir();
     const ks = new Keystore(dir, 'secret');
-    const { privateKey } = await ks.create('orch:shadowbroker');
-    const onDisk = readFileSync(join(dir, 'orch%3Ashadowbroker.json'), 'utf8');
+    const { privateKey } = await ks.create('orch:vendor');
+    const onDisk = readFileSync(join(dir, 'orch%3Avendor.json'), 'utf8');
     expect(onDisk).not.toContain(privateKey);
     expect(onDisk).not.toContain(privateKey.slice(2));
   }, 20_000);
@@ -41,8 +41,8 @@ describe('keystore', () => {
   // names, and nothing on chain would show the swap.
   it('refuses to overwrite an existing key file', async () => {
     const ks = new Keystore(freshDir(), 'secret');
-    await ks.create('orch:shadowbroker');
-    await expect(ks.create('orch:shadowbroker')).rejects.toThrow(HttpError);
+    await ks.create('orch:vendor');
+    await expect(ks.create('orch:vendor')).rejects.toThrow(HttpError);
   }, 20_000);
 
   it('reports a missing wallet as wallet_not_found, not a crash', async () => {
@@ -54,8 +54,8 @@ describe('keystore', () => {
 
   it('refuses to decrypt with the wrong KEYSTORE_SECRET', async () => {
     const dir = freshDir();
-    await new Keystore(dir, 'right-secret').create('orch:shadowbroker');
-    await expect(new Keystore(dir, 'wrong-secret').load('orch:shadowbroker')).rejects.toThrow(HttpError);
+    await new Keystore(dir, 'right-secret').create('orch:vendor');
+    await expect(new Keystore(dir, 'wrong-secret').load('orch:vendor')).rejects.toThrow(HttpError);
   }, 20_000);
 
   // The address is stored in the clear for lookups, so it is editable by anyone
@@ -70,14 +70,14 @@ describe('keystore', () => {
   it('rejects a SHORT tampered address as a refusal, not a RangeError', async () => {
     const dir = freshDir();
     const ks = new Keystore(dir, 'secret');
-    await ks.create('orch:shadowbroker');
+    await ks.create('orch:vendor');
 
-    const path = join(dir, 'orch%3Ashadowbroker.json');
+    const path = join(dir, 'orch%3Avendor.json');
     const file = JSON.parse(readFileSync(path, 'utf8')) as { address: string };
     file.address = '0xdeadbeef'; // deliberately not 42 characters
     writeFileSync(path, JSON.stringify(file));
 
-    const err = await ks.load('orch:shadowbroker').catch((e) => e);
+    const err = await ks.load('orch:vendor').catch((e) => e);
     expect(err).toBeInstanceOf(HttpError);
     expect((err as HttpError).code).toBe('internal_error');
   }, 20_000);
@@ -88,10 +88,10 @@ describe('keystore', () => {
   it('rejects a key file that is not JSON as a refusal', async () => {
     const dir = freshDir();
     const ks = new Keystore(dir, 'secret');
-    await ks.create('orch:shadowbroker');
-    writeFileSync(join(dir, 'orch%3Ashadowbroker.json'), '{ truncated');
+    await ks.create('orch:vendor');
+    writeFileSync(join(dir, 'orch%3Avendor.json'), '{ truncated');
 
-    const err = await ks.load('orch:shadowbroker').catch((e) => e);
+    const err = await ks.load('orch:vendor').catch((e) => e);
     expect(err).toBeInstanceOf(HttpError);
     expect((err as HttpError).code).toBe('internal_error');
   }, 20_000);
@@ -101,21 +101,21 @@ describe('keystore', () => {
   /// world-readable.
   it('writes the key file and its directory with restrictive modes', async () => {
     const dir = freshDir();
-    await new Keystore(dir, 'secret').create('orch:shadowbroker');
+    await new Keystore(dir, 'secret').create('orch:vendor');
 
-    expect(statSync(join(dir, 'orch%3Ashadowbroker.json')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, 'orch%3Avendor.json')).mode & 0o777).toBe(0o600);
   }, 20_000);
 
   it('rejects a key file whose stored address was tampered with', async () => {
     const dir = freshDir();
     const ks = new Keystore(dir, 'secret');
-    await ks.create('orch:shadowbroker');
+    await ks.create('orch:vendor');
 
-    const path = join(dir, 'orch%3Ashadowbroker.json');
+    const path = join(dir, 'orch%3Avendor.json');
     const file = JSON.parse(readFileSync(path, 'utf8')) as { address: string };
     file.address = '0x000000000000000000000000000000000000dEaD';
     writeFileSync(path, JSON.stringify(file));
 
-    await expect(ks.load('orch:shadowbroker')).rejects.toThrow(HttpError);
+    await expect(ks.load('orch:vendor')).rejects.toThrow(HttpError);
   }, 20_000);
 });

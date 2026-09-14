@@ -4,13 +4,13 @@
 
 import { describe, it, expect } from 'bun:test';
 import { decodeFunctionData } from 'viem';
-import { VEEBuxAbi } from '../src/abi.ts';
+import { TokenAbi } from '../src/abi.ts';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
+import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
@@ -22,7 +22,7 @@ import type { Keystore } from '../src/keystore.ts';
 import type { Resolver } from '../src/resolver.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'));
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
 
 const config = {
   policyDir: '/tmp/does-not-exist',
@@ -30,11 +30,24 @@ const config = {
   policyDefaultsPath: join(PKG, 'policy-defaults.json'),
 } as Config;
 
+/// Throws on any access EXCEPT the module view.
+///
+/// `chain.modules` is local state built at boot, not a call - it is how a
+/// handler learns the deployed token's scale and symbol, and reading it emits
+/// no RPC. The property these tests guard is that validation refuses before any
+/// CHAIN CALL, and a proxy that cannot tell a field read from a request would
+/// fail them for the wrong reason.
+const STUB_MODULES = {
+  tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+  names: { address: '0xreg', tld: 'play' },
+};
+
 function exploding(what: string) {
   return new Proxy(
     {},
     {
-      get() {
+      get(_t, prop) {
+        if (what === 'chain' && prop === 'modules') return STUB_MODULES;
         throw new Error(`${what} must not be reached: validation should have refused this first`);
       },
     },
@@ -84,14 +97,14 @@ describe('POST /wallets validation', () => {
     const { spawner: s } = spawner();
     expect(await codeOf(() => s.spawn({ agentId: 'client' }))).toBe('invalid_agent_id');
     expect(await codeOf(() => s.spawn({ agentId: 'orch:pod1:alice' }))).toBe('invalid_agent_id');
-    expect(await codeOf(() => s.spawn({ agentId: 'orch:ShadowBroker' }))).toBe('invalid_agent_id');
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:Vendor' }))).toBe('invalid_agent_id');
   });
 
   // A burner is deliberately an unnamed address the game must trace, so a named
   // burner is a contradiction rather than a request to be helpful about.
   it('refuses a burner with an alias', async () => {
     const { spawner: s } = spawner();
-    expect(await codeOf(() => s.spawn({ agentId: 'orch:ghost', kind: 'burner', alias: 'ghost.vee' }))).toBe(
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:ghost', kind: 'burner', alias: 'ghost.play' }))).toBe(
       'invalid_request',
     );
   });
@@ -194,9 +207,9 @@ describe('POST /wallets validation', () => {
   it('returns the recorded wallet without touching the chain once spawned', async () => {
     const store = new Store(':memory:');
     const { spawner: s } = spawner(store);
-    store.markSpawned('orch:shadowbroker', '0x1111111111111111111111111111111111111111', null);
+    store.markSpawned('orch:vendor', '0x1111111111111111111111111111111111111111', null);
 
-    const result = await s.spawn({ agentId: 'orch:shadowbroker', fundVee: 250, kind: 'agent' });
+    const result = await s.spawn({ agentId: 'orch:vendor', fundVee: 250, kind: 'agent' });
     expect(result.address).toBe('0x1111111111111111111111111111111111111111');
     store.close();
   });
@@ -224,7 +237,7 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
 
     const chain = {
       viemChain: { id: 31337 },
-      deployment: { VEEBux: '0x3', NameRegistry: '0x4', treasury: '0x5', chainId: 31337 },
+      deployment: { treasury: '0x5', chainId: 31337 }, modules: { tokens: [{ key: 'play', address: '0x3', symbol: 'PLAY', decimals: 18 }], names: { address: '0x4', tld: 'play' } },
       publicClient: {
         getBalance: async () => 10n ** 18n, // already endowed with its 1 ETH
         readContract: async () => seed, // already holds the full seed
@@ -251,13 +264,13 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
     const resolver = {
       // Both names already registered to this wallet by the attempt that died.
       // Name-aware rather than answering the same wallet for everything: the
-      // default deny list contains `treasury.vee`, and a stub claiming that
+      // default deny list contains `treasury.play`, and a stub claiming that
       // resolves to THIS wallet makes it look like a vanity alias, which the
       // canonical-deny check then correctly refuses.
       lookup: async (name: string) =>
-        name === 'treasury.vee'
-          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.vee' }
-          : { address, canonical: 'orch:shadowbroker' },
+        name === 'treasury.play'
+          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.play' }
+          : { address, canonical: 'orch:vendor' },
     } as unknown as Resolver;
 
     const s = new Spawner(
@@ -269,11 +282,11 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
       DEFAULTS,
     );
 
-    const result = await s.spawn({ agentId: 'orch:shadowbroker', fundVee: 250, kind: 'agent', alias: 'sb.vee' });
+    const result = await s.spawn({ agentId: 'orch:vendor', fundVee: 250, kind: 'agent', alias: 'sb.play' });
 
     expect(result.address).toBe(address);
-    expect(writes).toEqual([]); // no ETH, no VEE, no registration - nothing to redo
-    expect(store.spawnedAddress('orch:shadowbroker')).toBe(address);
+    expect(writes).toEqual([]); // no ETH, no tokens, no registration - nothing to redo
+    expect(store.spawnedAddress('orch:vendor')).toBe(address);
     store.close();
   });
 });
@@ -285,7 +298,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury(store);
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.vee', vee: 1 })),
+      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', vee: 1 })),
     ).toBe('wallet_frozen');
     store.close();
   });
@@ -303,7 +316,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury();
     expect(
       await codeOf(() =>
-        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.vee', vee: 1 }),
+        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.play', vee: 1 }),
       ),
     ).toBe('principal_mismatch');
   });
@@ -311,7 +324,7 @@ describe('POST /sign-transfer validation', () => {
   it('refuses the platform credential outright - it has no wallet identity', async () => {
     const t = treasury();
     expect(
-      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.vee', vee: 1 })),
+      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.play', vee: 1 })),
     ).toBe('wrong_scope');
   });
 });
@@ -333,22 +346,60 @@ describe('policy defaults', () => {
       // Compared in WEI, not as numbers: a cap may be a decimal string, and
       // comparing those numerically is the imprecision the string form exists
       // to prevent.
-      expect(capToWei(DEFAULTS[kind].max_per_tx)).toBeGreaterThan(0n);
-      expect(capToWei(DEFAULTS[kind].max_per_stage)).toBeGreaterThanOrEqual(
-        capToWei(DEFAULTS[kind].max_per_tx),
+      expect(capToWei(DEFAULTS[kind].max_per_tx, 18)).toBeGreaterThan(0n);
+      expect(capToWei(DEFAULTS[kind].max_per_stage, 18)).toBeGreaterThanOrEqual(
+        capToWei(DEFAULTS[kind].max_per_tx, 18),
       );
-      expect(DEFAULTS[kind].deny).toContain('treasury.vee');
+      // The file ships `treasury.{tld}`; this is the substitution having
+      // happened, asserted through the value a wallet actually gets.
+      expect(DEFAULTS[kind].deny).toContain('treasury.play');
     }
   });
 
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json')).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play')).toThrow(/cannot read policy defaults/);
+  });
+
+  // §4.7. A pattern naming a TLD can match nothing on a deployment that
+  // resolves no names, so it is DROPPED rather than kept as a literal
+  // containing `{tld}` - which would read as a rule and match nothing.
+  it('drops the TLD patterns when a deployment has no names module, and says so once', () => {
+    // The set is process-wide, so this test owns it rather than inheriting
+    // whatever another file left in it.
+    droppedPatternsLogged.clear();
+    const lines: string[] = [];
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+
+    expect(defaults.agent.deny).toEqual([]);
+    expect(defaults.agent.allow).toEqual([]);
+    // `*` names no TLD, so it survives: the org default still allows anything.
+    expect(defaults.org.allow).toEqual(['*']);
+    expect(defaults.org.deny).toEqual([]);
+
+    // Nothing anywhere contains an unfilled placeholder.
+    for (const kind of ['org', 'agent', 'burner'] as const) {
+      for (const p of [...defaults[kind].allow, ...defaults[kind].deny]) {
+        expect(p).not.toContain('{tld}');
+      }
+    }
+
+    // ONE LINE PER DISTINCT PATTERN, not per kind and not per agent: three
+    // kinds share `treasury.{tld}` and two share `*.{tld}`.
+    expect(lines).toHaveLength(2);
+    expect(lines.filter((l) => l.includes('treasury.{tld}'))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes('*.{tld}'))).toHaveLength(1);
+  });
+
+  it('does not repeat the dropped-pattern line on a second load in the same process', () => {
+    const lines: string[] = [];
+    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(bad, JSON.stringify({ org: {}, agent: {}, burner: {} }));
-    expect(() => loadPolicyDefaults(bad)).toThrow(/no valid/);
+    expect(() => loadPolicyDefaults(bad, 'play')).toThrow(/no valid/);
 
     const negative = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(
@@ -359,7 +410,7 @@ describe('policy defaults', () => {
         burner: DEFAULTS.burner,
       }),
     );
-    expect(() => loadPolicyDefaults(negative)).toThrow(/no valid "agent"/);
+    expect(() => loadPolicyDefaults(negative, 'play')).toThrow(/no valid "agent"/);
   });
 
   // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an
@@ -388,7 +439,7 @@ describe('policy defaults', () => {
       store,
       {
         lookup: async (name: string) =>
-          name === 'mark.vee'
+          name === 'mark.play'
             ? { address: '0x000000000000000000000000000000000000dEaD', canonical: 'orch:mark' }
             : null,
       } as unknown as Resolver,
@@ -396,7 +447,7 @@ describe('policy defaults', () => {
     );
 
     const code = await codeOf(() =>
-      s.spawn({ agentId: 'orch:x', kind: 'agent', policy: { deny: ['mark.vee'] } }),
+      s.spawn({ agentId: 'orch:x', kind: 'agent', policy: { deny: ['mark.play'] } }),
     );
     expect(code).toBe('invalid_request');
   });
@@ -406,7 +457,7 @@ describe('policy defaults', () => {
   it('accepts a partial policy at spawn, the harness shape', async () => {
     const { spawner: s } = spawner();
     const code = await codeOf(() =>
-      s.spawn({ agentId: 'orch:x', policy: { allow: ['acme:*'], deny: ['treasury.vee'] } }),
+      s.spawn({ agentId: 'orch:x', policy: { allow: ['acme:*'], deny: ['treasury.play'] } }),
     );
     // Reaches the chain rather than being refused on the policy - the exploding
     // stub is how we know it got past validation.
@@ -446,14 +497,14 @@ describe('the reservation records a sound lower bound', () => {
     }
     const t = new FailingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x000000000000000000000000000000000000dEaD' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x000000000000000000000000000000000000dEaD', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       store,
-      { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' })) } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:bob' })) } as unknown as Resolver,
       DEFAULTS,
     );
 
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1', intentId: 'bounded' }).catch(() => undefined);
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'bounded' }).catch(() => undefined);
 
     const row = store.unresolvedIntents().find((r) => r.intentId === 'bounded');
     expect(row?.reservedAtBlock).toBe(10n); // the observed head, not the cursor's 3
@@ -526,13 +577,13 @@ describe('the release rule', () => {
         exploding('chain') as Chain,
         { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
         store,
-        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
+        { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
         DEFAULTS,
       );
-    // NOT treasury.vee: that is on the default deny list, so the policy check
+    // NOT treasury.play: that is on the default deny list, so the policy check
     // refuses first and the replay path is never reached - which is the correct
     // ordering, and made this fixture test the wrong thing until it was fixed.
-    const send = { fromAgentId: 'orch:a', to: 'bob.vee', vee: '1', intentId: 'replay' };
+    const send = { fromAgentId: 'orch:a', to: 'bob.play', vee: '1', intentId: 'replay' };
     const seed = (store: Store) => {
       const stage = store.currentStage();
       store.reserve({ intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
@@ -587,7 +638,7 @@ describe('a missing intent id is visible, not silent', () => {
     exploding('chain') as Chain,
     { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
     new Store(':memory:'),
-    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
+    { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
     DEFAULTS,
   );
 
@@ -596,7 +647,7 @@ describe('a missing intent id is visible, not silent', () => {
     const real = console.warn;
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
-      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1' }).catch(() => undefined);
+      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1' }).catch(() => undefined);
     } finally {
       console.warn = real;
     }
@@ -613,7 +664,7 @@ describe('a missing intent id is visible, not silent', () => {
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
       await noIntent
-        .signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1', intentId: 'mine' })
+        .signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'mine' })
         .catch(() => undefined);
     } finally {
       console.warn = real;
@@ -653,17 +704,17 @@ describe('concurrent signTransfer against a stage cap', () => {
         agentId: 'orch:a',
         max_per_tx: 100,
         max_per_stage: veePerStage,
-        allow: ['*.vee'],
+        allow: ['*.play'],
         deny: [],
         frozen: false,
       }),
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null })) } as unknown as Resolver,
       DEFAULTS,
     );
   }
@@ -678,10 +729,10 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical })) } as unknown as Resolver,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: '0x000000000000000000000000000000000000dEaD', canonical })) } as unknown as Resolver,
       DEFAULTS,
     );
   }
@@ -691,9 +742,9 @@ describe('concurrent signTransfer against a stage cap', () => {
   // RESOLVES FIRST and hands it over. Measured: with the call site reverted to
   // the pre-resolution order, every unit test still passes and this one fails.
   it('refuses an ALIAS of a denied wallet, and never reaches the chain', async () => {
-    const t = await treasuryResolving('treasury.vee', ['treasury.vee']);
+    const t = await treasuryResolving('treasury.play', ['treasury.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'treasure.vee', vee: '1', intentId: 'alias-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'treasure.play', vee: '1', intentId: 'alias-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -703,7 +754,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // a probe that refuses everything would pass the test above.
   it('still sends to an alias whose wallet is not denied', async () => {
     const t = await treasuryResolving('orch:bob', []);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '1', intentId: 'alias-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'alias-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -720,13 +771,13 @@ describe('concurrent signTransfer against a stage cap', () => {
     const addressOf = (n: string) => (sameAddress.includes(n) ? SHARED : OTHER);
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       {
         require: async (n: string) => ({ address: addressOf(n), canonical: 'orch:someone' }),
         // No NAMESPACE PEERS in this fixture: a real registry resolves the
-        // names that exist, and `orch:marky.vee` does not. A blanket resolver
+        // names that exist, and `orch:marky.play` does not. A blanket resolver
         // makes every bare name ambiguous with its own constructed peer.
         lookup: async (n: string) =>
           n.includes(':') ? null : { address: addressOf(n), canonical: 'orch:someone' },
@@ -739,9 +790,9 @@ describe('concurrent signTransfer against a stage cap', () => {
   // uses a DIFFERENT alias of the same wallet. Neither string matches the entry
   // and the canonical matches neither, so only comparing ADDRESSES catches it.
   it('refuses a wallet denied under a different alias entirely', async () => {
-    const t = await treasuryWithAliases(['mark.vee'], ['mark.vee', 'marky.vee']);
+    const t = await treasuryWithAliases(['mark.play'], ['mark.play', 'marky.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'id-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'id-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -750,8 +801,8 @@ describe('concurrent signTransfer against a stage cap', () => {
   // The control: a different wallet with a similar name still goes through, so
   // the identity check is not simply refusing everything.
   it('still sends to a DIFFERENT wallet when a deny entry exists', async () => {
-    const t = await treasuryWithAliases(['mark.vee'], ['mark.vee']);
-    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.vee', vee: '1', intentId: 'id-2' });
+    const t = await treasuryWithAliases(['mark.play'], ['mark.play']);
+    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.play', vee: '1', intentId: 'id-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -765,12 +816,12 @@ describe('concurrent signTransfer against a stage cap', () => {
       join(dir, 'orch%3Aa.json'),
       JSON.stringify({
         agentId: 'orch:a', max_per_tx: 1000, max_per_stage: 5000,
-        allow: ['*'], deny: ['mark.vee'], frozen: false,
+        allow: ['*'], deny: ['mark.play'], frozen: false,
       }),
     );
     return new CountingTreasury(
       { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: { VEEBux: '0x0' }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
+      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
       new Store(':memory:'),
       {
@@ -779,14 +830,14 @@ describe('concurrent signTransfer against a stage cap', () => {
         // is what every test here varies. Since §5 the resolution path calls
         // `lookup` too, so the TARGET is resolved explicitly rather than
         // falling into the callback and making every test also a test of
-        // whether `marky.vee` exists - which none of them are about.
+        // whether `marky.play` exists - which none of them are about.
         //
         // Wrapped the way the real Resolver.lookup wraps: a failed registry
         // read reaches callers as a chain error, never as a raw Error, so a
         // stub that throws raw would be testing a collaborator that does not
         // exist.
         lookup: async (n: string) => {
-          if (n === 'marky.vee') {
+          if (n === 'marky.play') {
             return { address: '0x000000000000000000000000000000000000bEEF', canonical: 'orch:someone' };
           }
           if (n.includes(':')) return null; // no namespace peers in this fixture
@@ -808,7 +859,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       throw new Error('registry read failed');
     });
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-1' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(code);
     expect(t.broadcasts).toBe(0);
@@ -818,7 +869,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // is a real answer and not an unknown.
   it('sends when a deny entry names nothing registered', async () => {
     const t = treasuryWhoseLookup(async () => null);
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -833,12 +884,12 @@ describe('concurrent signTransfer against a stage cap', () => {
     });
 
     const first = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-3' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-3' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(first);
 
     const second = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'f-4' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-4' }),
     );
     expect(second).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -857,14 +908,14 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     // First send: the deny entry names nothing yet, so nothing matches.
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-1' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-1' });
     expect(t.broadcasts).toBe(1);
 
     // The name is now registered, to the same wallet the alias points at.
     registered = true;
 
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-2' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-2' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(1); // still one: the second never reached the chain
@@ -882,18 +933,18 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-3' })),
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-3' })),
     ).toBe('counterparty_denied');
 
     pointsAtTarget = false;
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.vee', vee: '1', intentId: 'l-4' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-4' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
   it('broadcasts exactly floor(cap/amount) of N concurrent sends', async () => {
     const t = await treasuryWithStageCap(100); // one 100-VEE send fits
     const send = (n: number) =>
-      t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '100', intentId: `i${n}` });
+      t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `i${n}` });
 
     const results = await Promise.allSettled(Array.from({ length: 8 }, (_, n) => send(n)));
 
@@ -913,7 +964,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     const t = await treasuryWithStageCap(500);
     const results = await Promise.allSettled(
       Array.from({ length: 10 }, (_, n) =>
-        t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '100', intentId: `j${n}` }),
+        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `j${n}` }),
       ),
     );
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
@@ -924,7 +975,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // pass for the wrong reason.
   it('broadcasts a single sequential send that fits, so the probe can pass', async () => {
     const t = await treasuryWithStageCap(100);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.vee', vee: '100', intentId: 'solo' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: 'solo' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 });
@@ -950,7 +1001,7 @@ describe('POST /wallets/:agentId/balance', () => {
       let pending = 0n;
       return {
         prepareTransactionRequest: async (req: Record<string, unknown>) => {
-          const { args } = decodeFunctionData({ abi: VEEBuxAbi, data: req.data as `0x${string}` });
+          const { args } = decodeFunctionData({ abi: TokenAbi, data: req.data as `0x${string}` });
           pending = (args as readonly [string, bigint])[1];
           return req;
         },
@@ -972,7 +1023,7 @@ describe('POST /wallets/:agentId/balance', () => {
       { ...config, policyDir: '/tmp/none' } as Config,
       {
         viemChain: {},
-        deployment: { VEEBux: '0xvee', treasury: TREASURY },
+        deployment: { treasury: TREASURY }, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }] },
         publicClient: {
           readContract: async () => t.balance,
           waitForTransactionReceipt: async () => ({}),
@@ -988,7 +1039,7 @@ describe('POST /wallets/:agentId/balance', () => {
       } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: WALLET }) } as unknown as Keystore,
       store,
-      { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.vee' ? null : ({ address: WALLET, canonical: 'orch:a' })) } as unknown as Resolver,
+      { require: async () => ({ address: WALLET, canonical: 'orch:a' }), lookup: async (n: string) => (n.includes(':') || n === 'treasury.play' ? null : ({ address: WALLET, canonical: 'orch:a' })) } as unknown as Resolver,
       DEFAULTS,
     );
     t.balance = balance;
@@ -1190,15 +1241,15 @@ describe('PATCH /wallets/:agentId/policy', () => {
   // §5's durable rule: a deny entry names a canonical id or a platform name.
   // The two are indistinguishable by shape, so the registry decides.
   it('refuses a deny entry that is a vanity alias', async () => {
-    const { s } = spawnerWith({ 'mark.vee': 'orch:mark' });
-    const code = await codeOf(() => s.patchPolicy('orch:a', { deny: ['mark.vee'] }));
+    const { s } = spawnerWith({ 'mark.play': 'orch:mark' });
+    const code = await codeOf(() => s.patchPolicy('orch:a', { deny: ['mark.play'] }));
     expect(code).toBe('invalid_request');
   }, 20_000);
 
   it('accepts a deny entry that IS the canonical name for its address', async () => {
-    const { s, dir } = spawnerWith({ 'treasury.vee': 'treasury.vee' });
-    await s.patchPolicy('orch:a', { deny: ['treasury.vee'] });
-    expect(read(dir).deny).toEqual(['treasury.vee']);
+    const { s, dir } = spawnerWith({ 'treasury.play': 'treasury.play' });
+    await s.patchPolicy('orch:a', { deny: ['treasury.play'] });
+    expect(read(dir).deny).toEqual(['treasury.play']);
   }, 20_000);
 
   // Accepted on purpose: it names no identity today, and refusing it would make
@@ -1251,7 +1302,7 @@ describe('spawn records the kind it enforced', () => {
     const address = '0x000000000000000000000000000000000000bEEF';
     const chain = {
       viemChain: {},
-      deployment: { VEEBux: '0x0', NameRegistry: '0x1' },
+      deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }], names: { address: '0x1', tld: 'play' } },
       publicClient: {
         getBalance: async () => 10n ** 18n,      // already endowed
         readContract: async () => 10n ** 30n,    // already funded
@@ -1266,8 +1317,8 @@ describe('spawn records the kind it enforced', () => {
     const keystore = { has: async () => true, load: async () => ({ address, privateKey: '0x00' }) } as unknown as Keystore;
     const resolver = {
       lookup: async (name: string) =>
-        name === 'treasury.vee'
-          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.vee' }
+        name === 'treasury.play'
+          ? { address: '0x0000000000000000000000000000000000007777', canonical: 'treasury.play' }
           : { address, canonical: 'orch:kindwire' },
       reverseOf: async () => 'orch:kindwire',
       aliasesOf: async () => [],
@@ -1294,6 +1345,81 @@ describe('spawn records the kind it enforced', () => {
     const store = new Store(':memory:');
     await completing(store).spawn({ agentId: 'orch:kindburner', kind: 'burner' });
     expect(store.walletRow('orch:kindburner')?.kind).toBe('burner');
+    store.close();
+  });
+});
+
+// §4.4 / §8.4. THE TWO OPTIONAL HALVES OF A SPAWN, refused before anything is
+// written. Both guards existed with no test until a mutation run said so:
+// disabling either left the whole suite green.
+//
+// The assertion is not only the refusal but WHEN it happens. Refusing after
+// keystore.create would leave a key file behind, and the retry after that
+// refusal would take the idempotent path and report success for the request
+// that was just refused - so each case checks the store has no spawn row and
+// the keystore was never reached.
+describe('a spawn refuses what this deployment cannot do', () => {
+  function spawnerOn(modules: Record<string, unknown>): { s: Spawner; store: Store; touched: string[] } {
+    const touched: string[] = [];
+    const store = new Store(':memory:');
+    const s = new Spawner(
+      config,
+      { modules } as unknown as Chain,
+      new Proxy(
+        {},
+        {
+          get(_t, prop) {
+            touched.push(String(prop));
+            throw new Error('the keystore must not be reached: the request was refused first');
+          },
+        },
+      ) as Keystore,
+      store,
+      exploding('resolver') as Resolver,
+      DEFAULTS,
+    );
+    return { s, store, touched };
+  }
+
+  const TOKENS = [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }];
+  const NAMES = { address: '0xreg', tld: 'play' };
+
+  it('refuses fundVee without a token module, before any side effect', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [], names: NAMES });
+
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fundVee: 10 }))).toBe('module_not_deployed');
+    expect(touched).toEqual([]);
+    expect(store.spawnedAddress('orch:a')).toBeNull();
+    store.close();
+  });
+
+  it('refuses an alias without a names module, before any side effect', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: TOKENS });
+
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', alias: 'a.play' }))).toBe('module_not_deployed');
+    expect(touched).toEqual([]);
+    expect(store.spawnedAddress('orch:a')).toBeNull();
+    store.close();
+  });
+
+  // THE HALVES ARE INDEPENDENT. A spawn needs NEITHER module: a wallet is a
+  // key, a token and a policy file, and all three exist on a deployment with no
+  // contracts at all. Only the optional halves need one each - so asking for
+  // neither must get past both guards, and the proof it got past them is that
+  // it reached the keystore.
+  it('lets a spawn asking for neither reach the keystore on a bare deployment', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [] });
+
+    await s.spawn({ agentId: 'orch:a' }).catch(() => undefined);
+    expect(touched.length).toBeGreaterThan(0);
+    store.close();
+  });
+
+  it('accepts fundVee zero without a token module, because nothing moves', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [] });
+
+    await s.spawn({ agentId: 'orch:a', fundVee: 0 }).catch(() => undefined);
+    expect(touched.length).toBeGreaterThan(0);
     store.close();
   });
 });

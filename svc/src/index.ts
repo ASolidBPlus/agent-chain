@@ -4,6 +4,8 @@
 
 import { loadConfig } from './config.ts';
 import { Chain, assertPrivateChain, assertPrivateRpcUrl, loadDeployment } from './chain.ts';
+import { TokenAbi } from './abi.ts';
+import { buildModules, describeModules, requireNames } from './modules.ts';
 import { Keystore } from './keystore.ts';
 import { Resolver } from './resolver.ts';
 import { loadPolicyDefaults } from './policy.ts';
@@ -24,6 +26,18 @@ async function main(): Promise<void> {
   const chain = new Chain(config, deployment);
 
   await assertPrivateChain(chain);
+
+  // AFTER the private-chain assertion and BEFORE anything that reads a module.
+  // It dials the chain once per token instance, so it must not run against a
+  // node this service has refused; and every later step - the identity, the
+  // lifetime probe, the resolver, the routes - asks `chain.modules` a question.
+  chain.modules = await buildModules(deployment, async (address) => {
+    const [symbol, decimals] = await Promise.all([
+      chain.publicClient.readContract({ address, abi: TokenAbi, functionName: 'symbol' }),
+      chain.publicClient.readContract({ address, abi: TokenAbi, functionName: 'decimals' }),
+    ]);
+    return { symbol: symbol as string, decimals: Number(decimals) };
+  });
 
   const store = new Store(config.storePath);
   const keystore = new Keystore(config.keystoreDir, config.keystoreSecret);
@@ -46,8 +60,7 @@ async function main(): Promise<void> {
   // record - see deployment.ts.
   const liveDeployment = {
     chainId: String(deployment.chainId),
-    veeBux: deployment.VEEBux,
-    nameRegistry: deployment.NameRegistry,
+    modules: deployment.modules.map((m) => ({ kind: m.kind, key: m.key, address: m.address })),
   };
   const recordedDeployment = store.recordedDeployment();
   assertDeploymentUnchanged(recordedDeployment, liveDeployment, config.acknowledgeChainReset);
@@ -57,11 +70,17 @@ async function main(): Promise<void> {
     await gatherLifetimeFacts({
       store,
       keystore,
-      getCode: () => chain.publicClient.getCode({ address: deployment.VEEBux }),
+      // The default token if there is one, else the registry. The control asks
+      // "are the game's contracts on this chain?", and on a names-only
+      // deployment the registry is the whole answer.
+      getCode: () =>
+        chain.publicClient.getCode({
+          address: chain.modules.tokens[0]?.address ?? requireNames(chain.modules).address,
+        }),
       acknowledged: config.acknowledgeLedgerReset,
     }),
   );
-  const resolver = new Resolver(chain);
+  const resolver = new Resolver(chain, store);
   const services = {
     config,
     chain,
@@ -69,7 +88,14 @@ async function main(): Promise<void> {
     store,
     keystore,
     spawner: new Spawner(config, chain, keystore, store, resolver),
-    treasury: new Treasury(config, chain, keystore, store, resolver, loadPolicyDefaults(config.policyDefaultsPath)),
+    treasury: new Treasury(
+      config,
+      chain,
+      keystore,
+      store,
+      resolver,
+      loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld),
+    ),
   };
 
   // Started before the server accepts requests, so a transfer cannot happen
@@ -82,7 +108,7 @@ async function main(): Promise<void> {
   server.listen(config.port, '0.0.0.0', () => {
     console.log(
       `chain-svc listening on :${config.port} (chain ${deployment.chainId}, ` +
-        `VEEBux ${deployment.VEEBux}, treasury ${deployment.treasury}, ` +
+        `treasury ${deployment.treasury}, modules ${describeModules(chain.modules)}, ` +
         `events -> ${config.hubCoreUrl ?? 'buffered, no HUB_CORE_URL set'})`,
     );
   });

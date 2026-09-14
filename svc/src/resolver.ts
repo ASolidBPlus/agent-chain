@@ -10,12 +10,14 @@ import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
 import { HttpError } from './errors.ts';
 import { isCanonicalAgentId } from './validate.ts';
+import { requireNames } from './modules.ts';
+import type { Store } from './store.ts';
 
 export interface Resolved {
   address: Address;
   /// The registry's canonical name for the address: a qualified agent id for an
-  /// agent (`orch:shadowbroker`), a platform name for a platform account
-  /// (`treasury.vee`), or null if it has none - a burner registers no names
+  /// agent (`orch:vendor`), a platform name for a platform account
+  /// (`treasury.play`), or null if it has none - a burner registers no names
   /// (spec S4). Named `canonical` rather than `agentId` because it is not
   /// always an agent (ruled).
   canonical: string | null;
@@ -33,16 +35,38 @@ export interface WalletResolution extends Resolved {
 }
 
 export class Resolver {
-  constructor(private readonly chain: Chain) {}
+  /// The store is here for the NAMES-LESS branch and nothing else. A
+  /// deployment without a registry still has wallets, and the only record of
+  /// which agent owns which address is the spawns table - so on that branch
+  /// this class answers from the store instead of from a contract.
+  constructor(
+    private readonly chain: Chain,
+    private readonly store: Pick<Store, 'spawnedAddress' | 'agentIdForAddress'>,
+  ) {}
+
+  /// Whether this deployment resolves names at all.
+  private get hasNames(): boolean {
+    return this.chain.modules.names !== undefined;
+  }
 
   /// @returns null when the name is not registered. The registry returns
   /// address(0) rather than reverting on a miss, so "unknown" arrives as a
   /// value and becomes a 404 here (ruled).
   async lookup(name: string): Promise<Resolved | null> {
+    // WITHOUT A REGISTRY, the only thing a name can be is a wallet's own
+    // canonical id, matched EXACTLY. No bare-id fallback and no aliases:
+    // both are registry features, and inventing a local imitation of them
+    // would give a names-less deployment a second, quieter resolution rule
+    // that nothing else in the system knows about.
+    if (!this.hasNames) {
+      const address = this.store.spawnedAddress(name);
+      return address === null ? null : { address: getAddress(address), canonical: name };
+    }
+
     let target: Address;
     try {
       target = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName: 'resolve',
         args: [name],
@@ -67,10 +91,16 @@ export class Resolver {
   /// signal: an ambiguity is evidence about whoever registered the colliding
   /// alias, and "go and look at who registered that alias" needs the who.
   async registrantOf(name: string): Promise<Address | null> {
+    // Registry-only, and reached only from the bare-id path, which exists only
+    // when names are deployed. Guarded rather than assumed so a future caller
+    // gets a refusal that names the reason instead of a chain read against a
+    // registry that is not there.
+    requireNames(this.chain.modules);
+
     let logs;
     try {
       logs = await this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         eventName: 'Registered',
         fromBlock: 0n,
@@ -98,9 +128,11 @@ export class Resolver {
   /// The address's primary name: always its canonical id, never a vanity alias
   /// (the registry writes the reverse on register only, spec S3.2).
   async reverseOf(address: Address): Promise<string | null> {
+    if (!this.hasNames) return this.store.agentIdForAddress(address);
+
     try {
       const name = (await this.chain.publicClient.readContract({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         functionName: 'reverseOf',
         args: [address],
@@ -117,10 +149,15 @@ export class Resolver {
   /// enumeration on chain, and adding one would mean an unbounded array in
   /// storage.
   async aliasesOf(address: Address): Promise<string[]> {
+    // An alias is a registry record. Without a registry there are none - which
+    // is different from "we could not find any", and the empty array is the
+    // honest answer rather than a degraded one.
+    if (!this.hasNames) return [];
+
     let logs;
     try {
       logs = await this.chain.publicClient.getContractEvents({
-        address: this.chain.deployment.NameRegistry,
+        address: requireNames(this.chain.modules).address,
         abi: NameRegistryAbi,
         eventName: 'Registered',
         fromBlock: 0n,

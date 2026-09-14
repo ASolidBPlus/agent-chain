@@ -36,7 +36,7 @@ function chainAt(
   logs: Array<{ args: { intentId: string; from?: string }; transactionHash: string }>,
 ): Chain {
   return {
-    deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+    deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
     publicClient: {
       getBlockNumber: async () => block,
       getContractEvents: async ({ eventName }: { eventName: string }) =>
@@ -237,7 +237,7 @@ describe('the intent anomaly', () => {
     intentLogs: Array<{ args: { intentId: string; from: string }; transactionHash: string }>,
   ): Chain {
     return {
-      deployment: { VEEBux: '0xvee', NameRegistry: '0xreg' },
+      deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
       publicClient: {
         getBlockNumber: async () => 1n,
         getContractEvents: async ({ eventName }: { eventName: string }) =>
@@ -653,7 +653,7 @@ describe('sweepOnce', () => {
   it('confirms an intent whose transfer landed, and KEEPS the hold', async () => {
     const { store, tail } = seeded();
     reserve(store, 'landed', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
     store.setCursor('chain-log-tail', 9n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
@@ -668,7 +668,7 @@ describe('sweepOnce', () => {
   it('does NOT confirm an emission from a foreign sender', async () => {
     const { store, tail } = seeded();
     reserve(store, 'foreign', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE' });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE', isDefaultToken: true });
     store.setCursor('chain-log-tail', 9n);
 
     const result = await tail.sweepOnce();
@@ -808,7 +808,7 @@ describe('sweepOnce', () => {
     // so if it were swept it would be confirmed, which is how we can tell the
     // difference between "skipped" and "nothing to do".
     reserve(store, 'old-stage', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
 
     store.setStage('run-2');
 
@@ -817,7 +817,7 @@ describe('sweepOnce', () => {
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
       stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
-    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET });
+    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET, isDefaultToken: true });
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
 
@@ -856,7 +856,7 @@ describe('sweepOnce', () => {
   it('a terminal intent keeps its id consumed and answers with its outcome', async () => {
     const { store, tail } = seeded();
     reserve(store, 'terminal', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
     await tail.sweepOnce();
 
     // Terminal status, from the store rather than a chain call.
@@ -888,7 +888,7 @@ describe('sweepOnce', () => {
   it('still COMPLETES a row with no bound when its transfer landed', async () => {
     const { store, tail } = seeded();
     reserve(store, 'unbounded-landed', undefined);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
 
     expect((await tail.sweepOnce()).confirmed).toBe(1);
     expect(store.intentTxHash('unbounded-landed')).toBe('0xaaa');
@@ -956,4 +956,195 @@ describe('start() schedules the sweep', () => {
     expect(warnings.join('\n')).toContain('intent sweep failed');
     store.close();
   }, 20_000);
+});
+
+// §8.7. WHICH QUERIES A POLL ISSUES, per deployment shape.
+//
+// The poll used to name two fixed addresses. It now builds its query list from
+// the module view, and the property worth pinning is not "does it find events"
+// but "does it ask the right contracts, and only those" - a names-less
+// deployment issuing a Registered query against a registry that is not there
+// would fail as a chain error with nothing naming the cause.
+describe('the poll asks exactly what the deployment has', () => {
+  interface Call {
+    address: string;
+    eventName: string;
+  }
+
+  function recordingChain(modules: Record<string, unknown>): { chain: Chain; calls: Call[] } {
+    const calls: Call[] = [];
+    const chain = {
+      modules,
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: Call) => {
+          calls.push({ address, eventName });
+          return [];
+        },
+      },
+    } as unknown as Chain;
+    return { chain, calls };
+  }
+
+  const TOKEN_A = { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 };
+  const TOKEN_B = { key: 'gold', address: '0xgold', symbol: 'GOLD', decimals: 18 };
+  const NAMES = { address: '0xreg', tld: 'play' };
+
+  async function poll(modules: Record<string, unknown>): Promise<Call[]> {
+    const { chain, calls } = recordingChain(modules);
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chain, store).pollOnce();
+    store.close();
+    return calls;
+  }
+
+  it('token and names: one pair for the token, one Registered', async () => {
+    const calls = await poll({ tokens: [TOKEN_A], names: NAMES });
+    expect(calls).toEqual([
+      { address: '0xplay', eventName: 'Transfer' },
+      { address: '0xplay', eventName: 'IntentTransfer' },
+      { address: '0xreg', eventName: 'Registered' },
+    ]);
+  });
+
+  it('token only: no Registered query at all', async () => {
+    const calls = await poll({ tokens: [TOKEN_A] });
+    expect(calls.map((c) => c.eventName)).toEqual(['Transfer', 'IntentTransfer']);
+    expect(calls.some((c) => c.address === '0xreg')).toBe(false);
+  });
+
+  it('names only: no token queries at all', async () => {
+    const calls = await poll({ tokens: [], names: NAMES });
+    expect(calls).toEqual([{ address: '0xreg', eventName: 'Registered' }]);
+  });
+
+  // A SECOND TOKEN IS POLLED BY THE SAME CODE AS THE FIRST. This is the case
+  // the fixed-address version could not express at all.
+  it('two tokens: a pair each, in manifest order', async () => {
+    const calls = await poll({ tokens: [TOKEN_A, TOKEN_B], names: NAMES });
+    expect(calls).toEqual([
+      { address: '0xplay', eventName: 'Transfer' },
+      { address: '0xplay', eventName: 'IntentTransfer' },
+      { address: '0xgold', eventName: 'Transfer' },
+      { address: '0xgold', eventName: 'IntentTransfer' },
+      { address: '0xreg', eventName: 'Registered' },
+    ]);
+  });
+});
+
+// §4.9's additive field, and the anomaly a second token produces.
+describe('a token event names its token', () => {
+  function chainWithTransfer(modules: Record<string, unknown>, from: string, value: bigint): Chain {
+    return {
+      modules,
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
+          eventName === 'Transfer' && address === '0xplay'
+            ? [{ args: { from, to: '0xdst', value }, transactionHash: '0xtx' }]
+            : [],
+      },
+    } as unknown as Chain;
+  }
+
+  it('carries the symbol of the token that emitted it', async () => {
+    const store = new Store(':memory:');
+    const chain = chainWithTransfer(
+      { tokens: [{ key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 }] },
+      '0xsrc',
+      10n ** 18n,
+    );
+    await new EventTail({} as Config, chain, store).pollOnce();
+
+    const [event] = store.dueEvents(10);
+    const payload = JSON.parse(event?.payload as unknown as string) as { token: string; vee: string };
+    expect(payload.token).toBe('PLAY');
+    // Formatted at the TOKEN'S scale, not at a literal 18.
+    expect(payload.vee).toBe('1');
+    store.close();
+  });
+});
+
+// §8.7. THE foreign_token ANOMALY. Increment 2 issues intents for the default
+// token only, so an IntentTransfer from any OTHER instance quoting one of our
+// reserved ids is somebody spending a different money against our reservation -
+// the same class as a foreign sender, and detected in the same place.
+describe('an IntentTransfer from a token we did not issue for', () => {
+  const PLAY = { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 };
+  const GOLD = { key: 'gold', address: '0xgold', symbol: 'GOLD', decimals: 18 };
+  const TOPIC = `0x${'ab'.repeat(32)}`;
+  const WALLET = `0x${'99'.repeat(20)}`;
+
+  function chainEmitting(from: string, txHash: string): Chain {
+    return {
+      modules: { tokens: [PLAY, GOLD] },
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
+          address === '0xgold' && eventName === 'IntentTransfer'
+            ? [{ args: { intentId: TOPIC, from }, transactionHash: txHash }]
+            : [],
+      },
+    } as unknown as Chain;
+  }
+
+  function reserved(): Store {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', WALLET, null);
+    // `topic` is how the chain logs the id (keccak256 of it); the emission is
+    // matched on that, not on the id string. Passing it explicitly keeps the
+    // fixture honest about which of the two the poll compares.
+    store.reserve({
+      intentId: 'gold-anomaly', topic: TOPIC, agentId: 'orch:a', stage: store.currentStage(),
+      amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
+    });
+    return store;
+  }
+
+  it('raises chain.anomaly with reason foreign_token, and names the token', async () => {
+    const store = reserved();
+    await new EventTail({} as Config, chainEmitting(WALLET, '0xaaa'), store).pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string; reason?: string; token?: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0]?.reason).toBe('foreign_token');
+    expect(anomalies[0]?.token).toBe('GOLD');
+    store.close();
+  });
+
+  // ANCHORED ON THE DEDUPE, which is the reason the check sits after the
+  // intent_anomalies lookup rather than before it: the same transaction seen by
+  // two polls is one event, not one per poll.
+  it('reports the same transaction once, however many times the poll sees it', async () => {
+    const store = reserved();
+    const chain = chainEmitting(WALLET, '0xaaa');
+    const tail = new EventTail({} as Config, chain, store);
+
+    await tail.pollOnce();
+    store.setCursor('chain', 0n); // re-read the same window, as a crash-restart would
+    await tail.pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+    expect(anomalies).toHaveLength(1);
+    store.close();
+  });
+
+  // AND THE CASE THAT MUST NOT FIRE: an id this store never reserved. Without
+  // the check sitting after that early return, every ordinary transfer of a
+  // second token would be an anomaly.
+  it('says nothing about an intent id this store never reserved', async () => {
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chainEmitting(WALLET, '0xbbb'), store).pollOnce();
+
+    const anomalies = store.dueEvents(10)
+      .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string })
+      .filter((p) => p.kind === 'chain.anomaly');
+    expect(anomalies).toHaveLength(0);
+    store.close();
+  });
 });
