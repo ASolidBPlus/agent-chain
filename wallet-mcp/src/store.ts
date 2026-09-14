@@ -8,11 +8,25 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+/// What an intent id was used for, so a replay can be told from a reuse.
+///
+/// TWO VARIANTS, DISCRIMINATED BY WHICH FIELDS ARE PRESENT rather than by a
+/// tag: a transfer records `to` and `vee`, a call records the contract, the
+/// function and a hash of its arguments. A tag would be a third thing to keep
+/// in step with the two that already say which it is, and an OLD ledger written
+/// before the call op has no tag to read - so the shape is the discriminator
+/// and an absent `call` means "this was a transfer", which is true of every row
+/// that predates it.
 export interface IntentResult {
   txHash: string;
-  vee: string;
-  to: string;
   at: number;
+  /// Transfer intents.
+  vee?: string;
+  to?: string;
+  /// Call intents. `argsHash` is of the WIRE arguments, hashed the same way
+  /// chain-svc hashes them, so the local refusal and the server's authoritative
+  /// one cannot disagree about what "the same call" means.
+  call?: { contract: string; function: string; argsHash: string };
 }
 
 interface StoreShape {
