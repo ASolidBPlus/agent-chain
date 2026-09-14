@@ -120,15 +120,23 @@ export function normaliseVee(raw: unknown): string | null {
   return null;
 }
 
-export function veeToWei(vee: string): bigint {
+/// `decimals` is the default token's, read from chain-svc's /modules at startup -
+/// not a hardcoded 18. Both amounts are scaled by the same figure, so the
+/// comparison in `checkLocally` is exact whatever the token's precision.
+export function veeToWei(vee: string, decimals: number): bigint {
   const [whole, frac = ''] = vee.split('.');
-  return BigInt(whole + frac.padEnd(18, '0').slice(0, 18));
+  return BigInt(whole + frac.padEnd(decimals, '0').slice(0, decimals));
 }
 
-export function checkLocally(policy: WalletPolicy | null, to: string, vee: string): Refusal | null {
+export function checkLocally(
+  policy: WalletPolicy | null,
+  to: string,
+  vee: string,
+  decimals: number,
+): Refusal | null {
   if (!policy) return null; // unreadable: let chain-svc decide rather than guess either way
   if (policy.frozen) return 'frozen';
-  if (veeToWei(vee) > veeToWei(String(policy.max_per_tx))) return 'over_max_per_tx';
+  if (veeToWei(vee, decimals) > veeToWei(String(policy.max_per_tx), decimals)) return 'over_max_per_tx';
   // Deny beats allow, and an empty allow list denies everything.
   if (policy.deny.some((p) => matchesPattern(p, to))) return 'counterparty_denied';
   if (!policy.allow.some((p) => matchesPattern(p, to))) return 'counterparty_denied';

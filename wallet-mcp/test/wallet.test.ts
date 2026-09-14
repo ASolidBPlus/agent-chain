@@ -14,6 +14,18 @@ import type { WalletConfig } from '../src/config.ts';
 const TOKEN = 'wallet-token-that-must-never-leak';
 const AGENT = 'orch:shadowbroker';
 
+// The /modules reply the host passes into Wallet (spec S5). A single-token,
+// 18-place deployment whose symbol is VEE - so the money-message wording these
+// tests assert is exactly what a VEE deployment produces.
+const MODULES = {
+  schema: 1,
+  chainId: 31337,
+  treasury: '0xtreasury',
+  defaultToken: 'vee',
+  tokens: [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }],
+  names: { address: '0xreg', tld: 'vee' },
+};
+
 interface Fake {
   url: string;
   server: Server;
@@ -129,7 +141,7 @@ function walletWith(policy: Record<string, unknown> | null): {
     stateFile: join(dir, 'state.json'),
   };
   const logs: string[] = [];
-  return { wallet: new Wallet(config, { log: (m) => logs.push(m) }), config, logs };
+  return { wallet: new Wallet(config, { log: (m) => logs.push(m), modules: MODULES }), config, logs };
 }
 
 const AGENT_POLICY = {
@@ -542,7 +554,7 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
       walletToken: TOKEN,
       policyFile: join(dir, 'policy.json'),
       stateFile: join(dir, 'state-offline.json'),
-    }, { log: () => {} });
+    }, { log: () => {}, modules: MODULES });
   }
 
   it('surfaces the transport failure instead of flattening to unknown_name', async () => {

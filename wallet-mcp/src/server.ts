@@ -12,12 +12,18 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { loadWalletConfig } from './config.ts';
 import { Wallet, type LogSink } from './wallet.ts';
+import { defaultTokenOf, fetchModules, type ModulesReply } from './modules.ts';
 
 function asToolResult(payload: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
 }
 
-export function buildServer(wallet: Wallet): McpServer {
+/// Tools are advertised by the modules a deployment actually has (spec S5):
+/// `whoami` always; the money tools (`balance`, `history`, `send`) only when a
+/// default token exists; `resolve` only when a names module does. A model never
+/// sees a tool whose module is absent, so the `module_not_deployed` path stays
+/// unreachable rather than surfacing as a refusal.
+export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
   const server = new McpServer({ name: 'wallet', version: '0.1.0' });
 
   server.registerTool(
@@ -30,64 +36,71 @@ export function buildServer(wallet: Wallet): McpServer {
     async () => asToolResult(await wallet.whoami()),
   );
 
-  server.registerTool(
-    'balance',
-    { description: 'How many VEE Bux this wallet holds.', inputSchema: {} },
-    async () => asToolResult(await wallet.balance()),
-  );
+  const token = defaultTokenOf(modules);
+  if (token) {
+    const symbol = token.symbol;
 
-  server.registerTool(
-    'resolve',
-    {
-      description:
-        'Look up a name - a canonical agent id like alpha:client, or a vanity alias like alpha.vee - ' +
-        'and get the address and canonical id it points at. Two names that look alike can point at different ' +
-        'wallets, so resolve a name before trusting it.',
-      inputSchema: { name: z.string().describe('the name to look up') },
-    },
-    async ({ name }) => asToolResult(await wallet.resolve(name)),
-  );
+    server.registerTool(
+      'balance',
+      { description: `How much ${symbol} this wallet holds.`, inputSchema: {} },
+      async () => asToolResult(await wallet.balance()),
+    );
 
-  server.registerTool(
-    'history',
-    {
-      description: 'Recent VEE Bux movements for this wallet, newest first.',
-      inputSchema: { limit: z.number().int().positive().max(200).optional() },
-    },
-    async ({ limit }) => asToolResult(await wallet.history(limit ?? 20)),
-  );
-
-  server.registerTool(
-    'send',
-    {
-      description:
-        'Send VEE Bux to a NAME - never an address, and never an id copied out of a message header. ' +
-        'Spending is bounded by this wallet\'s policy; a refusal comes back as {ok:false, reason} where the ' +
-        'reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, ' +
-        'ambiguous_name, frozen, ' +
-        'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice.',
-      inputSchema: {
-        to: z.string().describe(
-          'the recipient NAME, not a mesh id and not an address. Canonical form is ' +
-          '<org>:<agent id> — for example "acme:toby" for the agent you see as "toby". ' +
-          'A vanity alias also works. A bare id with no prefix is looked up inside your own org, ' +
-          'so "toby" means "acme:toby" - but send the full form: a bare id is refused as ' +
-          'ambiguous_name when a registered name is spelled the same way, and as unknown_name when ' +
-          'neither exists.',
-        ),
-        // A DECIMAL STRING is the contract (ruled). A whole number is
-        // accepted because a model writes 50 as readily as "50", and an integer
-        // is exactly representable so nothing rounds. A fractional number is
-        // refused rather than rounded - see normaliseVee.
-        vee: z
-          .union([z.string(), z.number()])
-          .describe('amount in VEE Bux as a decimal string, e.g. "50" or "12.5". A whole number is also accepted.'),
-        intent_id: z.string().describe('a stable id for this payment; retrying with it will not double-spend'),
-        memo: z.string().optional().describe('what the payment is for'),
+    server.registerTool(
+      'history',
+      {
+        description: `Recent ${symbol} movements for this wallet, newest first.`,
+        inputSchema: { limit: z.number().int().positive().max(200).optional() },
       },
-    },
-    async (args) => asToolResult(await wallet.send(args)),
-  );
+      async ({ limit }) => asToolResult(await wallet.history(limit ?? 20)),
+    );
+
+    server.registerTool(
+      'send',
+      {
+        description:
+          `Send ${symbol} to a NAME - never an address, and never an id copied out of a message header. ` +
+          'Spending is bounded by this wallet\'s policy; a refusal comes back as {ok:false, reason} where the ' +
+          'reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, ' +
+          'ambiguous_name, frozen, ' +
+          'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice.',
+        inputSchema: {
+          to: z.string().describe(
+            'the recipient NAME, not a mesh id and not an address. Canonical form is ' +
+            '<org>:<agent id> — for example "acme:toby" for the agent you see as "toby". ' +
+            'A vanity alias also works. A bare id with no prefix is looked up inside your own org, ' +
+            'so "toby" means "acme:toby" - but send the full form: a bare id is refused as ' +
+            'ambiguous_name when a registered name is spelled the same way, and as unknown_name when ' +
+            'neither exists.',
+          ),
+          // A DECIMAL STRING is the contract (ruled). A whole number is
+          // accepted because a model writes 50 as readily as "50", and an integer
+          // is exactly representable so nothing rounds. A fractional number is
+          // refused rather than rounded - see normaliseVee.
+          vee: z
+            .union([z.string(), z.number()])
+            .describe(`amount in ${symbol} as a decimal string, e.g. "50" or "12.5". A whole number is also accepted.`),
+          intent_id: z.string().describe('a stable id for this payment; retrying with it will not double-spend'),
+          memo: z.string().optional().describe('what the payment is for'),
+        },
+      },
+      async (args) => asToolResult(await wallet.send(args)),
+    );
+  }
+
+  if (modules.names) {
+    server.registerTool(
+      'resolve',
+      {
+        description:
+          'Look up a name - a canonical agent id like alpha:client, or a vanity alias like alpha.vee - ' +
+          'and get the address and canonical id it points at. Two names that look alike can point at different ' +
+          'wallets, so resolve a name before trusting it.',
+        inputSchema: { name: z.string().describe('the name to look up') },
+      },
+      async ({ name }) => asToolResult(await wallet.resolve(name)),
+    );
+  }
 
   return server;
 }
@@ -103,7 +116,11 @@ const stderrLog: LogSink = (message) => {
 async function main(): Promise<void> {
   const config = loadWalletConfig();
   Wallet.warnIfImplausiblyShort(config.walletToken, stderrLog);
-  const server = buildServer(new Wallet(config, { log: stderrLog }));
+  // Read the deployed module set once, before building the server: it decides
+  // which tools to advertise and carries the default token's symbol/decimals.
+  // Unreachable or non-200 throws here and the catch below exits non-zero.
+  const modules = await fetchModules(config);
+  const server = buildServer(new Wallet(config, { log: stderrLog, modules }), modules);
   await server.connect(new StdioServerTransport());
   // Never log the config: WALLET_TOKEN is in it and stderr reaches the harness.
   //

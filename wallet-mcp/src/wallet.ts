@@ -4,6 +4,7 @@
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
 import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
+import { defaultTokenOf, type ModulesReply } from './modules.ts';
 // TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
 // erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
 // runs on node or bun with chain-svc absent (spec S5 - org-core imports this as
@@ -33,6 +34,11 @@ export type LogSink = (message: string) => void;
 
 export interface WalletOptions {
   log: LogSink;
+  /// The chain-svc /modules reply, fetched by the host and passed in - REQUIRED,
+  /// the same way `log` is, so no construction site can forget it and no fetch
+  /// happens inside Wallet. The default token's symbol and decimals come from
+  /// here; a library host (org-core, once it exists) passes what it fetched.
+  modules: ModulesReply;
 }
 
 export interface SendResult {
@@ -167,10 +173,16 @@ export class Wallet {
   private readonly client: ChainSvcClient;
   private readonly store: WalletStore;
   private readonly log: LogSink;
+  /// The default token's symbol and decimals, from the /modules reply. Only the
+  /// money methods use them, and those are only advertised when a default token
+  /// exists (server.ts), so the fallbacks below are unreachable in the stdio
+  /// path and org-core does not exist yet.
+  private readonly symbol: string;
+  private readonly decimals: number;
 
-  /// `options` is REQUIRED, and so is `options.log`. Every construction site
-  /// then has to name a destination, and typecheck is what makes them - see
-  /// LogSink above for why a default would have defeated the point.
+  /// `options` is REQUIRED, and so are `options.log` and `options.modules`.
+  /// Every construction site then has to name both, and typecheck is what makes
+  /// them - see LogSink above for why a default would have defeated the point.
   constructor(
     private readonly config: WalletConfig,
     options: WalletOptions,
@@ -178,6 +190,9 @@ export class Wallet {
     this.client = new ChainSvcClient(config);
     this.store = new WalletStore(config.stateFile);
     this.log = options.log;
+    const token = defaultTokenOf(options.modules);
+    this.symbol = token?.symbol ?? 'tokens';
+    this.decimals = token?.decimals ?? 0;
   }
 
   /// Strips the wallet token from anything on its way to the model.
@@ -382,7 +397,7 @@ export class Wallet {
       }
       return this.fail(
         'duplicate_intent',
-        `intent_id ${intentId} was already used to send ${previous.vee} VEE to ${previous.to}`,
+        `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbol} to ${previous.to}`,
       );
     }
 
@@ -440,7 +455,7 @@ export class Wallet {
       return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, vee);
+    const local = checkLocally(readPolicy(this.config.policyFile), to, vee, this.decimals);
     if (local) return this.fail(local);
 
     const res = await this.client.signTransfer({ to, vee, intentId, ...(memo ? { memo } : {}) });
@@ -521,7 +536,7 @@ export class Wallet {
           return { ok: true, txHash: body.txHash };
         }
         if (body?.status === 'failed') {
-          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no VEE moved`);
+          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no ${this.symbol} moved`);
         }
         // reserved or broadcast: not settled yet. Keep waiting.
       }
