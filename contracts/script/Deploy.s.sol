@@ -33,6 +33,10 @@ contract Deploy is Script {
     string internal constant KIND_TOKEN = "token";
     string internal constant KIND_NAMES = "names";
     string internal constant KIND_CONVERTER = "converter";
+    /// A custom contract deployed by name from the manifest. Unlike the kinds
+    /// above there is no fixed contract for it: the manifest's `contract` field
+    /// names the Solidity contract, and `local.json` records that name.
+    string internal constant KIND_CONTRACT = "contract";
     string internal constant CONTRACT_TOKEN = "Token";
     string internal constant CONTRACT_NAMES = "NameRegistry";
     string internal constant CONTRACT_CONVERTER = "Converter";
@@ -47,8 +51,13 @@ contract Deploy is Script {
 
     struct ModuleSpec {
         string kind;
-        string key; // token only
-        string name; // token only
+        string key; // token and contract; unique across ALL kinds (see _readManifest)
+        // TWO MEANINGS, TWO VALIDATION RULES, one field: for a `token` this is the
+        // ERC-20 display name (free prose, 1-64 chars, `_isName`); for a
+        // `contract` it is the Solidity contract name that must match an artifact
+        // (`Fixture` -> out/Fixture.sol/Fixture.json). Do not widen the token
+        // rule without checking it does not loosen the contract one.
+        string name;
         string symbol; // token only
         uint256 initialSupply; // token only, whole units
         string tld; // names only
@@ -93,6 +102,11 @@ contract Deploy is Script {
         // Validated up front so a bad converter manifest fails fast, with the
         // readable message, before anything is broadcast.
         ConverterPair[] memory pairs = _readConverterPairs(manifestPath, mods);
+        // Custom-contract artifacts are checked before broadcast so a missing one
+        // is a readable refusal rather than a raw getCode revert mid-deploy. Their
+        // constructor args are read from the manifest at deploy time in
+        // _deployContract, where @key references resolve to earlier addresses.
+        _requireContractArtifacts(mods);
 
         if (_alreadyDeployed(path, mods)) {
             console.log("Deploy: local.json matches the manifest and every address has code - nothing to do");
@@ -155,7 +169,7 @@ contract Deploy is Script {
                 addrs[i] = address(r);
                 namesAddr = address(r);
                 tld = mods[i].tld;
-            } else {
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
                 // Converter: deployed with no pairs and no grants yet; both are
                 // wired below, once every token address is known. Salted with the
                 // bare kind (one converter per deployment) so its address is
@@ -163,6 +177,12 @@ contract Deploy is Script {
                 Converter c = new Converter{salt: saltFor(KIND_CONVERTER, "")}(treasury);
                 addrs[i] = address(c);
                 converterAddr = address(c);
+            } else {
+                // A custom contract, deployed by name with static-typed args. Kept
+                // in its own function so deploy()'s stack stays within limits.
+                // Registered contracts get NO role grants (spec S1.1); any role
+                // they need comes later through admin-call.
+                addrs[i] = _deployContract(manifestPath, i, mods, addrs, treasury);
             }
         }
         // `treasury.<tld>` names the treasury FOR A TOKEN'S BENEFIT, so it is
@@ -224,7 +244,7 @@ contract Deploy is Script {
                         "Deploy: treasury name does not resolve"
                     );
                 }
-            } else {
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
                 Converter c = Converter(addrs[i]);
                 for (uint256 j = 0; j < pairs.length; j++) {
                     address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
@@ -240,6 +260,10 @@ contract Deploy is Script {
                         "Deploy: converter lacks MINTER_ROLE on a target token"
                     );
                 }
+            } else {
+                // A custom contract: it exists and has code. No roles are asserted
+                // because the deploy grants it none.
+                require(addrs[i].code.length > 0, "Deploy: contract has no code");
             }
         }
 
@@ -289,11 +313,10 @@ contract Deploy is Script {
                 if (!_isKey(mods[i].key)) revert(_bad(mods[i].key, "key"));
                 if (!_isName(mods[i].name)) revert(_bad(mods[i].key, "name"));
                 if (!_isSymbol(mods[i].symbol)) revert(_bad(mods[i].key, "symbol"));
+                // Symbol uniqueness is token-only; key uniqueness is checked
+                // across all kinds below.
                 for (uint256 j = 0; j < i; j++) {
                     if (!_eq(mods[j].kind, KIND_TOKEN)) continue;
-                    if (_eq(mods[j].key, mods[i].key)) {
-                        revert(string.concat('Deploy: manifest: duplicate key "', mods[i].key, '"'));
-                    }
                     if (_eq(mods[j].symbol, mods[i].symbol)) {
                         revert(string.concat('Deploy: manifest: duplicate symbol "', mods[i].symbol, '"'));
                     }
@@ -310,8 +333,31 @@ contract Deploy is Script {
                 mods[i].kind = KIND_CONVERTER;
                 // Pairs are parsed and validated in `_readConverterPairs`, which
                 // needs the full module list to resolve source/target keys.
+            } else if (_eq(kind, KIND_CONTRACT)) {
+                mods[i].kind = KIND_CONTRACT;
+                mods[i].key = vm.parseJsonString(json, string.concat(at, ".key"));
+                // `name` holds the Solidity contract name (see the struct). Its
+                // artifact is checked before broadcast in _requireContractArtifacts;
+                // constructor args are validated and encoded at deploy time in
+                // _encodeContractArgs, where @key references resolve to addresses
+                // deployed earlier in the list.
+                mods[i].name = vm.parseJsonString(json, string.concat(at, ".contract"));
+                if (!_isKey(mods[i].key)) revert(_bad(mods[i].key, "key"));
             } else {
                 revert(string.concat('Deploy: manifest: unknown kind "', kind, '"'));
+            }
+
+            // ONE KEY NAMESPACE across all kinds: token and contract keys, and the
+            // implicit keys of the singletons ("names", "converter"), must all be
+            // distinct - the key is what _alreadyDeployed and local.json identify
+            // an entry by, so two entries sharing one is the ambiguity that guard
+            // exists to prevent. chain-svc's loadDeployment mirrors this exact rule,
+            // including the implicit-key strings "names" and "converter".
+            string memory identifier = _effectiveKey(mods[i]);
+            for (uint256 j = 0; j < i; j++) {
+                if (_eq(_effectiveKey(mods[j]), identifier)) {
+                    revert(string.concat('Deploy: manifest: duplicate key "', identifier, '"'));
+                }
             }
         }
         return mods;
@@ -492,6 +538,129 @@ contract Deploy is Script {
         revert(string.concat('Deploy: manifest: converter pair references unknown token "', key, '"'));
     }
 
+    // ── custom contracts ────────────────────────────────────────────────────
+
+    /// The identifier an entry occupies in the one shared key namespace: its key
+    /// for token/contract, its kind ("names"/"converter") for the singletons.
+    function _effectiveKey(ModuleSpec memory m) internal pure returns (string memory) {
+        return (_eq(m.kind, KIND_TOKEN) || _eq(m.kind, KIND_CONTRACT)) ? m.key : m.kind;
+    }
+
+    /// Reverts, before anything is broadcast, for any custom-contract entry whose
+    /// Solidity contract has no compiled artifact - a readable message instead of
+    /// forge's raw getCode failure mid-deploy.
+    function _requireContractArtifacts(ModuleSpec[] memory mods) internal view {
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (!_eq(mods[i].kind, KIND_CONTRACT)) continue;
+            try this.getCodeExternal(string.concat(mods[i].name, ".sol:", mods[i].name)) {}
+            catch {
+                revert(string.concat('Deploy: manifest: no artifact for "', mods[i].name, '"'));
+            }
+        }
+    }
+
+    /// An external wrapper purely so `_requireContractArtifacts` can try/catch the
+    /// getCode cheatcode; a missing artifact reverts and the catch renames it.
+    function getCodeExternal(string memory what) external view returns (bytes memory) {
+        return vm.getCode(what);
+    }
+
+    /// Deploys one custom contract: getCode ‖ encoded args as init code, CREATE2
+    /// with salt "contract:<key>". Called from deploy()'s broadcast loop as an
+    /// internal function, so the assembly create2 runs in the same broadcast frame
+    /// and is routed through the 0x4e59 factory exactly as new{salt} is - the
+    /// address matches computeCreate2Address(salt, keccak256(initcode), 0x4e59)
+    /// (measured). Its own function so deploy() stays within the stack limit.
+    function _deployContract(
+        string memory manifestPath,
+        uint256 idx,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal returns (address deployed) {
+        string memory json = vm.readFile(manifestPath);
+        bytes memory initcode = abi.encodePacked(
+            vm.getCode(string.concat(mods[idx].name, ".sol:", mods[idx].name)),
+            _encodeContractArgs(json, idx, mods, addrs, treasury)
+        );
+        bytes32 salt = saltFor(KIND_CONTRACT, mods[idx].key);
+        /// @solidity memory-safe-assembly
+        assembly {
+            deployed := create2(0, add(initcode, 0x20), mload(initcode), salt)
+        }
+        require(deployed != address(0), "Deploy: contract deployment failed");
+    }
+
+    /// The constructor payload for a custom contract. Static types only, so
+    /// abi.encode(each) concatenated equals abi.encode(all) and no type-directed
+    /// encoder is needed. Empty when the entry has no `args`.
+    function _encodeContractArgs(
+        string memory json,
+        uint256 idx,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal view returns (bytes memory encoded) {
+        string memory base = string.concat(".modules[", vm.toString(idx), "].args");
+        uint256 n = 0;
+        while (vm.keyExistsJson(json, string.concat(base, "[", vm.toString(n), "]"))) {
+            n++;
+        }
+        encoded = "";
+        for (uint256 a = 0; a < n; a++) {
+            string memory at = string.concat(base, "[", vm.toString(a), "]");
+            string memory typ = vm.parseJsonString(json, string.concat(at, ".type"));
+            string memory val = vm.parseJsonString(json, string.concat(at, ".value"));
+            encoded = abi.encodePacked(encoded, _encodeOneArg(typ, val, idx, mods, addrs, treasury));
+        }
+    }
+
+    function _encodeOneArg(
+        string memory typ,
+        string memory val,
+        uint256 idx,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal view returns (bytes memory) {
+        if (_eq(typ, "address")) return abi.encode(_resolveArgAddress(val, idx, mods, addrs, treasury));
+        if (_eq(typ, "uint256")) return abi.encode(vm.parseUint(val));
+        if (_eq(typ, "bool")) {
+            if (_eq(val, "true")) return abi.encode(true);
+            if (_eq(val, "false")) return abi.encode(false);
+            revert(string.concat('Deploy: manifest: bool arg must be "true" or "false", got "', val, '"'));
+        }
+        if (_eq(typ, "bytes32")) return abi.encode(vm.parseBytes32(val));
+        revert(
+            string.concat(
+                'Deploy: manifest: constructor arg type "', typ, '" is not supported; use an initialiser function'
+            )
+        );
+    }
+
+    // Resolves an `address` arg value: "@treasury", "@<key>" of an entry deployed
+    // EARLIER in the list, or a literal 0x address. A forward or unknown "@"
+    // reference reverts - its address is not known yet.
+    function _resolveArgAddress(
+        string memory val,
+        uint256 idx,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal view returns (address) {
+        bytes memory b = bytes(val);
+        if (b.length > 0 && b[0] == 0x40) {
+            // '@'
+            string memory ref = _slice(b, 1, b.length);
+            if (_eq(ref, "treasury")) return treasury;
+            for (uint256 j = 0; j < idx; j++) {
+                if (_eq(_effectiveKey(mods[j]), ref)) return addrs[j];
+            }
+            revert(string.concat('Deploy: manifest: "', val, '" is not deployed yet'));
+        }
+        return vm.parseAddress(val);
+    }
+
     /// `^\d{1,18}$` as whole units. Rejects an empty string, a sign, a decimal
     /// point and anything over 18 digits - the last because the multiply by 1e18
     /// happens in uint256 and a 19-digit supply times 1e18 is not obviously
@@ -571,12 +740,17 @@ contract Deploy is Script {
             string memory kind = vm.parseJsonString(json, string.concat(at, ".kind"));
             string memory key =
                 vm.keyExistsJson(json, string.concat(at, ".key")) ? vm.parseJsonString(json, string.concat(at, ".key")) : "";
-            declared = string.concat(declared, i == 0 ? "" : ",", _eq(kind, KIND_TOKEN) ? key : kind);
+            // An entry is identified by its key when it has one (token, contract),
+            // else by its kind (the singletons names/converter) - the same
+            // effective key _readManifest enforces unique.
+            declared = string.concat(
+                declared, i == 0 ? "" : ",", (_eq(kind, KIND_TOKEN) || _eq(kind, KIND_CONTRACT)) ? key : kind
+            );
         }
 
         string memory asked = "";
         for (uint256 i = 0; i < mods.length; i++) {
-            asked = string.concat(asked, i == 0 ? "" : ",", _eq(mods[i].kind, KIND_TOKEN) ? mods[i].key : mods[i].kind);
+            asked = string.concat(asked, i == 0 ? "" : ",", _effectiveKey(mods[i]));
         }
 
         if (!_eq(declared, asked)) {
@@ -615,11 +789,15 @@ contract Deploy is Script {
         for (uint256 i = 0; i < mods.length; i++) {
             bool isToken = _eq(mods[i].kind, KIND_TOKEN);
             bool isNames = _eq(mods[i].kind, KIND_NAMES);
-            string memory contractName = isToken ? CONTRACT_TOKEN : isNames ? CONTRACT_NAMES : CONTRACT_CONVERTER;
+            bool isContract = _eq(mods[i].kind, KIND_CONTRACT);
+            // A custom contract records its own Solidity name; the fixed kinds
+            // record their fixed contract.
+            string memory contractName =
+                isToken ? CONTRACT_TOKEN : isNames ? CONTRACT_NAMES : isContract ? mods[i].name : CONTRACT_CONVERTER;
             string memory entry = string.concat(
                 '{"kind":"',
                 mods[i].kind,
-                isToken ? string.concat('","key":"', mods[i].key) : "",
+                (isToken || isContract) ? string.concat('","key":"', mods[i].key) : "",
                 '","contract":"',
                 contractName,
                 '","address":"',
