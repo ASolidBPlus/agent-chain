@@ -29,6 +29,7 @@ The checks below exist to make the silent direction impossible.
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -113,6 +114,31 @@ MUTANTS = [
      "    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {",
      "    function burnFrom(address account, uint256 amount) external {",
      "test_BurnFromRevertsForACallerWithoutTheRole"),
+    # --- Converter (§2 mutation gate) ---------------------------------------
+    ("M21", "src/Converter.sol", "the loop guard is dropped, so a round trip may mint value",
+     "            if (rate * reversePair.rate > RATE_SCALE * RATE_SCALE) {\n                revert LoopMintsValue(source, target, rate, reversePair.rate);\n            }\n",
+     "",
+     "test_LoopGuardRejectsAValueMintingRoundTrip"),
+    ("M22", "src/Converter.sol", "the loop guard rejects a product of exactly 1 (> becomes >=)",
+     "if (rate * reversePair.rate > RATE_SCALE * RATE_SCALE) {",
+     "if (rate * reversePair.rate >= RATE_SCALE * RATE_SCALE) {",
+     "test_LoopGuardAllowsExactlyProductOfOne"),
+    ("M23", "src/Converter.sol", "convert mints before it burns (order swapped)",
+     "        IMintBurnToken(source).burnFrom(msg.sender, amountIn);\n        IMintBurnToken(target).mint(msg.sender, amountOut);",
+     "        IMintBurnToken(target).mint(msg.sender, amountOut);\n        IMintBurnToken(source).burnFrom(msg.sender, amountIn);",
+     "test_ConvertBurnsBeforeItMints"),
+    ("M24", "src/Converter.sol", "convert skips the pause check",
+     "        if (p.paused) revert PairPaused(source, target);\n",
+     "",
+     "test_ConvertRevertsWhenPausedAndResumes"),
+    ("M25", "src/Converter.sol", "quote rounds up instead of flooring",
+     "        return amountIn * p.rate / RATE_SCALE;",
+     "        return (amountIn * p.rate + RATE_SCALE - 1) / RATE_SCALE;",
+     "test_QuoteFloorsAndMatchesTheWorkedExample"),
+    ("M26", "src/Converter.sol", "convert drops the NothingMinted check",
+     "        if (amountOut == 0) revert NothingMinted(amountIn, rate);\n",
+     "",
+     "test_ConvertRevertsWhenNothingMinted"),
 ]
 
 
@@ -219,6 +245,31 @@ def main():
         results.append(died)
 
     print("\n=== restored")
+    # CLEAR THE ARTEFACTS FIRST, AND DO NOT "OPTIMISE" THIS AWAY.
+    #
+    # THIS CHECK COMPARES A BUILD, NOT A SOURCE. What it is meant to assert is
+    # "the restored SOURCE compiles and passes", and that is only true if the
+    # artefacts were built from that source. `forge build` does not own `out/`;
+    # it only adds to it, so restoring the file on disk does not retire the
+    # artefact compiled from the mutant.
+    #
+    # BOTH DIRECTIONS ARE WRONG, and the quiet one is the expensive one:
+    #   * LOUD - a test that cross-checks an artefact against live bytecode
+    #     compares two different builds and fails on a tree that is actually
+    #     clean. Measured: the Converter's CREATE2 address assertion, which
+    #     reads `type(Converter).creationCode` from the artefact and compares it
+    #     with the address the deploy just created. Every mutant reported
+    #     KILLED, then PROBLEM on a tree `rm -rf out && forge build` turned
+    #     green with no source change. Cost: an hour of hunting.
+    #   * QUIET - a restored run that compiles against a MUTANT's artefact and
+    #     PASSES reports a green restore over a tree that was never rebuilt.
+    #     Nobody goes looking, because the instrument said the tree was fine.
+    #
+    # The same root as two other instruments fooled the same day: a compose
+    # smoke that reused a stale image, and `generate-abi.ts` reading the
+    # artefact of a contract that no longer existed. A build directory that
+    # outlives its source is the shape to distrust.
+    shutil.rmtree(os.path.join(ROOT, "out"), ignore_errors=True)
     _, failed_after, _ = parse(run_tests())
     print(f"    failing: {sorted(failed_after) if failed_after else 'none'}")
 

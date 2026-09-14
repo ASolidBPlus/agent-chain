@@ -12,8 +12,9 @@ import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
 import { assertDeploymentUnchanged, ChainSwapError, type DeploymentIdentity } from '../src/deployment.ts';
 import { Resolver } from '../src/resolver.ts';
-import { loadDeployment, type Chain } from '../src/chain.ts';
+import { loadDeployment, type Chain, type Deployment } from '../src/chain.ts';
 import type { HttpError } from '../src/errors.ts';
+import { buildModules } from '../src/modules.ts';
 
 const ADDR_A = '0x1111111111111111111111111111111111111111' as const;
 const ADDR_B = '0x2222222222222222222222222222222222222222' as const;
@@ -383,5 +384,72 @@ describe('loadDeployment refuses a local.json it cannot trust', () => {
 
   it('refuses a file that is not there at all, naming the deploy step', () => {
     expect(() => load()).toThrow(/no deployment at .*Run Deploy\.s\.sol first/);
+  });
+});
+
+/// The converter module is deployment data, like every other module: a local.json
+/// that carries it must load, and the built module view must expose its address.
+/// Both were rejected before `converter` was a known kind - a converter entry has
+/// no tld, so the old not-token-means-names branch failed it as a names module.
+describe('a deployment with a converter module', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'converter-deploy-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const TREASURY = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
+  const PLAY = '0x5fbdb2315678afecb367f032d93f642f64180aa3';
+  const REGISTRY = '0xe7f1725e7734ce288f8367e1bb143e90bb3f0512';
+  const CONVERTER = '0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0';
+
+  it('loadDeployment accepts a converter entry alongside a names module', () => {
+    const local = {
+      schema: 1,
+      chainId: 31337,
+      treasury: TREASURY,
+      modules: [
+        { kind: 'token', key: 'play', contract: 'Token', address: PLAY },
+        { kind: 'names', contract: 'NameRegistry', address: REGISTRY, tld: 'play' },
+        { kind: 'converter', contract: 'Converter', address: CONVERTER },
+      ],
+    };
+    writeFileSync(join(dir, 'local.json'), JSON.stringify(local));
+
+    // Before converter was a known kind this threw - either "no tld" or, with a
+    // names module also present, "more than one names module".
+    const deployment = loadDeployment(dir);
+    const converter = deployment.modules.find((m) => m.kind === 'converter');
+    expect(converter).toBeDefined();
+    expect(converter?.address.toLowerCase()).toBe(CONVERTER);
+    expect(converter?.key).toBeUndefined();
+    expect(converter?.tld).toBeUndefined();
+    // The names module is still the single names module: the converter did not
+    // count toward it.
+    expect(deployment.modules.filter((m) => m.kind === 'names')).toHaveLength(1);
+  });
+
+  it('buildModules exposes the converter by address without reading the chain', async () => {
+    const deployment: Deployment = {
+      schema: 1,
+      chainId: 31337,
+      treasury: TREASURY as `0x${string}`,
+      modules: [
+        { kind: 'token', key: 'play', contract: 'Token', address: PLAY as `0x${string}` },
+        { kind: 'converter', contract: 'Converter', address: CONVERTER as `0x${string}` },
+      ],
+    };
+
+    let reads = 0;
+    const modules = await buildModules(deployment, async () => {
+      reads++;
+      return { symbol: 'PLAY', decimals: 18 };
+    });
+
+    expect(modules.converter).toEqual({ address: CONVERTER });
+    expect(modules.tokens).toHaveLength(1);
+    // One read for the token; none for the converter.
+    expect(reads).toBe(1);
   });
 });

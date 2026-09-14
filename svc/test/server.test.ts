@@ -34,6 +34,7 @@ const services = {
     modules: {
       tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
       names: { address: '0xreg', tld: 'play' },
+      converter: { address: '0xconv' },
     },
   },
   resolver: {
@@ -87,8 +88,26 @@ describe('authentication', () => {
     expect(res.status).toBe(200);
     // The module list is part of /health so an operator can see what a
     // deployment actually has without a credential. Sorted, so two deployments
-    // with the same modules compare equal whatever order the manifest used.
-    expect(await res.json()).toEqual({ ok: true, modules: ['names', 'token:play'] });
+    // with the same modules compare equal whatever order the manifest used -
+    // and "converter" lands first alphabetically.
+    expect(await res.json()).toEqual({ ok: true, modules: ['converter', 'names', 'token:play'] });
+  });
+
+  // /modules is the machine-readable counterpart of /health: wallet-mcp reads it
+  // at startup to learn the deployed addresses. The converter is listed by
+  // address only - nothing is callable through it yet.
+  it('serves /modules with the deployed module addresses, converter included', async () => {
+    const res = await fetch(`${base}/modules`, { headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      schema: 1,
+      chainId: 31337,
+      treasury: '0xtreasury',
+      defaultToken: 'play',
+      tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+      names: { address: '0xreg', tld: 'play' },
+      converter: { address: '0xconv' },
+    });
   });
 
   it('compares tokens without leaking length through an exception', () => {

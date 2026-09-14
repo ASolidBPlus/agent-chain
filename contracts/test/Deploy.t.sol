@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 import {Token} from "../src/Token.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
+import {Converter} from "../src/Converter.sol";
 
 /// The deploy script, driven end to end inside `forge test` - no live Anvil, no
 /// compose, no shell.
@@ -363,5 +364,165 @@ contract DeployTest is Test {
         d.deploy(dir, "");
 
         _clean(dir);
+    }
+
+    // ── the converter (increment 4) ───────────────────────────────────────────
+
+    function test_ConverterDeploysWithItsPairsAndGrants() public {
+        string memory dir = _dir("converter");
+        _write(dir, _example("two-tokens.json"));
+
+        Deploy d = _script();
+        d.deploy(dir, "");
+
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        assertEq(vm.parseJsonString(out, ".modules[3].kind"), "converter");
+        assertEq(vm.parseJsonString(out, ".modules[3].contract"), "Converter");
+        assertFalse(vm.keyExistsJson(out, ".modules[3].tld"), "converter entry must not carry a tld");
+        assertFalse(vm.keyExistsJson(out, ".modules[3].pairs"), "pairs are read from the contract, not local.json");
+
+        Token play = Token(vm.parseJsonAddress(out, ".modules[0].address"));
+        Token gold = Token(vm.parseJsonAddress(out, ".modules[1].address"));
+        Converter c = Converter(vm.parseJsonAddress(out, ".modules[3].address"));
+
+        (uint256 rateFwd,, bool existsFwd) = c.pair(address(play), address(gold));
+        (uint256 rateBack,, bool existsBack) = c.pair(address(gold), address(play));
+        assertTrue(existsFwd && existsBack, "both pairs exist");
+        assertEq(rateFwd, 0.75e18);
+        assertEq(rateBack, 1e18);
+        assertEq(c.quote(address(play), address(gold), 1e18), 0.75e18);
+
+        // Grants per §1.4: the converter burns each source and mints each target;
+        // the treasury keeps MINTER on both and holds BURNER on neither.
+        assertTrue(play.hasRole(play.BURNER_ROLE(), address(c)), "converter burns play");
+        assertTrue(gold.hasRole(gold.MINTER_ROLE(), address(c)), "converter mints gold");
+        assertTrue(gold.hasRole(gold.BURNER_ROLE(), address(c)), "converter burns gold");
+        assertTrue(play.hasRole(play.MINTER_ROLE(), address(c)), "converter mints play");
+        assertFalse(play.hasRole(play.BURNER_ROLE(), treasury), "treasury must not burn play");
+        assertFalse(gold.hasRole(gold.BURNER_ROLE(), treasury), "treasury must not burn gold");
+
+        // The converter's address is CREATE2 from its salt and init code, like
+        // every other module (§3). Same canonical deployer as the token/names
+        // case above, so the address is the one a real --broadcast produces.
+        address CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+        bytes memory converterInit = abi.encodePacked(type(Converter).creationCode, abi.encode(treasury));
+        assertEq(
+            address(c),
+            vm.computeCreate2Address(d.saltFor("converter", ""), keccak256(converterInit), CREATE2_DEPLOYER),
+            "converter address is not CREATE2 from its salt and init code"
+        );
+
+        _clean(dir);
+    }
+
+    function test_ConverterLoopingManifestIsARefusal() public {
+        string memory dir = _dir("converterloop");
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"token","key":"gold","name":"Gold","symbol":"GOLD"},'
+            '{"kind":"converter","pairs":['
+            '{"source":"play","target":"gold","rate":"0.75"},'
+            '{"source":"gold","target":"play","rate":"1.5"}]}'
+            ']}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: pair play->gold x gold->play mints value"));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ConverterUnknownTokenKeyIsARefusal() public {
+        string memory dir = _dir("convunknown");
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"converter","pairs":[{"source":"play","target":"gold","rate":"1"}]}'
+            ']}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: converter pair target "gold" is not a token key'));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ConverterSelfPairIsARefusal() public {
+        string memory dir = _dir("convself");
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"converter","pairs":[{"source":"play","target":"play","rate":"1"}]}'
+            ']}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: converter pair "play" converts to itself'));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_TwoConverterModulesIsARefusal() public {
+        string memory dir = _dir("twoconv");
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"token","key":"gold","name":"Gold","symbol":"GOLD"},'
+            '{"kind":"converter","pairs":[{"source":"play","target":"gold","rate":"1"}]},'
+            '{"kind":"converter","pairs":[{"source":"gold","target":"play","rate":"1"}]}'
+            ']}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: more than one converter module"));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ConverterEmptyPairsIsARefusal() public {
+        string memory dir = _dir("convempty");
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"converter","pairs":[]}'
+            ']}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: converter has no pairs"));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    // ── parseDecimal18, tested directly (§3) ──────────────────────────────────
+
+    function test_ParseDecimal18Accepts() public {
+        Deploy d = _script();
+        assertEq(d.parseDecimal18("1"), 1e18);
+        assertEq(d.parseDecimal18("0.75"), 0.75e18);
+        assertEq(d.parseDecimal18("1.5"), 1.5e18);
+        assertEq(d.parseDecimal18("0.000000000000000001"), 1);
+        assertEq(d.parseDecimal18("2."), 2e18);
+    }
+
+    function test_ParseDecimal18RefusesEmptyIntegerPart() public {
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: rate ".5" is not a decimal'));
+        d.parseDecimal18(".5");
+    }
+
+    function test_ParseDecimal18RefusesMoreThan18Places() public {
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: rate has more than 18 decimal places"));
+        d.parseDecimal18("1.0000000000000000001");
+    }
+
+    function test_ParseDecimal18RefusesZeroAndOverMax() public {
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: rate must be > 0"));
+        d.parseDecimal18("0");
+        vm.expectRevert(bytes("Deploy: manifest: rate exceeds MAX_RATE"));
+        d.parseDecimal18("1000000000001"); // 1e12 + 1 whole units
     }
 }

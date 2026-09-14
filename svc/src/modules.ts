@@ -11,6 +11,7 @@ import { HttpError } from './errors.ts';
 export const MODULES = {
   token: 'Token',
   names: 'NameRegistry',
+  converter: 'Converter',
 } as const;
 
 export type ModuleKind = keyof typeof MODULES;
@@ -33,12 +34,19 @@ export interface NamesModule {
   tld: string;
 }
 
+export interface ConverterModule {
+  /// Address only: nothing is read from the converter at boot and nothing is
+  /// callable through chain-svc yet. Its pairs live on the contract, not here.
+  address: Address;
+}
+
 export interface Modules {
   /// In manifest order, so `tokens[0]` is the default token - the one every
   /// money endpoint, message and wallet-mcp tool operates on. Empty on a
   /// deployment with no token module.
   tokens: TokenModule[];
   names?: NamesModule;
+  converter?: ConverterModule;
 }
 
 /// The default token, or a refusal naming the reason.
@@ -83,6 +91,7 @@ export async function buildModules(
 ): Promise<Modules> {
   const tokens: TokenModule[] = [];
   let names: NamesModule | undefined;
+  let converter: ConverterModule | undefined;
 
   for (const m of deployment.modules) {
     if (m.kind === 'token') {
@@ -104,6 +113,9 @@ export async function buildModules(
       tokens.push({ key: m.key as string, address: m.address, symbol: meta.symbol, decimals: meta.decimals });
     } else if (m.kind === 'names') {
       names = { address: m.address, tld: m.tld as string };
+    } else if (m.kind === 'converter') {
+      // Address only, no chain read: nothing is callable through chain-svc yet.
+      converter = { address: m.address };
     }
     // No else: a kind this build does not know is refused by loadDeployment
     // before it reaches here. It is NOT silently folded into `names`, which is
@@ -111,7 +123,7 @@ export async function buildModules(
 
   }
 
-  return { tokens, names };
+  return { tokens, names, converter };
 }
 
 /// The boot line's module summary: `token:play(PLAY, 18 dp)@0x…, names(.play)@0x…`.
@@ -123,5 +135,6 @@ export async function buildModules(
 export function describeModules(m: Modules): string {
   const parts = m.tokens.map((t) => `token:${t.key}(${t.symbol}, ${t.decimals} dp)@${t.address}`);
   if (m.names) parts.push(`names(.${m.names.tld})@${m.names.address}`);
+  if (m.converter) parts.push(`converter@${m.converter.address}`);
   return parts.length > 0 ? parts.join(', ') : 'none';
 }

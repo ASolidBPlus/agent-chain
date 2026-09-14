@@ -145,6 +145,9 @@ export function loadDeployment(deploymentsDir: string): Deployment {
       if (typeof entry.tld !== 'string' || entry.tld.length === 0) {
         throw new Error(`chain-svc: ${path} names module has no tld`);
       }
+    } else if (kind === 'converter') {
+      // No key, no tld, and it does not count toward namesSeen: contract and
+      // address were checked above, and that is all a converter entry carries.
     } else {
       throw new Error(`chain-svc: ${path} module kind "${String(kind)}" has no validation rule`);
     }
