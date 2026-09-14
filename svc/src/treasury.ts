@@ -75,6 +75,11 @@ export interface HistoryEntry {
   memo?: string;
 }
 
+/// Deny entries already reported as unresolvable, so the line is printed once
+/// per distinct entry per process rather than once per send. Module-level
+/// because the lifetime is the PROCESS, not a Treasury instance.
+const skippedDenyEntriesLogged = new Set<string>();
+
 export class Treasury {
   /// hub-core's stage, cached briefly (spec S5). Only consulted when
   /// HUB_CORE_URL is configured; in the testbed the stage is chain-svc's own,
@@ -175,7 +180,38 @@ export class Treasury {
         throw asChainError(err);
       }
 
-      if (address && address === targetAddress.toLowerCase()) {
+      if (address === null) {
+        // UNRESOLVABLE, which means two different things and only one of them
+        // is worth saying out loud.
+        //
+        // WITH a registry: the entry names nobody YET. Ordinary - deny a
+        // counterparty before it is spawned and this is the state until it is -
+        // so it is silent, and the re-resolution above is what picks it up
+        // later.
+        //
+        // WITHOUT one: `lookup` answers only exact spawned ids, so an entry
+        // that is a NAME can never resolve and the rule can never bind. That is
+        // worth one line, because a deny list is a safety expectation and an
+        // operator should not have to infer that part of theirs is inert.
+        //
+        // Entry-keyed and once per process. Not per agent: on a names-less
+        // deployment every agent without its own policy file inherits the
+        // defaults, so an agent-keyed set would print the same fact once per
+        // wallet. Not per send: `policyFor` re-reads the file every send by
+        // design. Once per process is the signal; once ever would need a store
+        // row, and a configuration oddity does not earn one.
+        if (this.chain.modules.names === undefined && !skippedDenyEntriesLogged.has(entry)) {
+          skippedDenyEntriesLogged.add(entry);
+          console.warn(
+            `[chain-svc] deny entry ${JSON.stringify(entry)} cannot be resolved on a deployment ` +
+              `with no names module, so it is skipped. Nothing here can be addressed by name; ` +
+              `deny entries that are agent ids still bind.`,
+          );
+        }
+        continue;
+      }
+
+      if (address === targetAddress.toLowerCase()) {
         throw new HttpError('counterparty_denied', `${requested} is not an allowed counterparty`);
       }
     }

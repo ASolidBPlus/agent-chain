@@ -314,6 +314,18 @@ export async function assertPrivateChain(chain: Chain): Promise<void> {
 /// Turns a viem failure into the right wire error: a node that is unreachable
 /// is a 503 the caller can retry, a revert is a 502 they cannot (spec S4).
 export function asChainError(err: unknown): HttpError {
+  // A REFUSAL IS NOT A CHAIN ERROR. Anything that already decided what it is -
+  // module_not_deployed, unknown_name, wallet_frozen - passes through with its
+  // code intact.
+  //
+  // Without this, a guard that throws inside a call this function wraps has its
+  // answer overwritten: module_not_deployed left a token-only spawn reporting
+  // 502 chain_error, which says "the chain is broken" about a deployment that
+  // is working exactly as configured. The rule is for the whole file, not just
+  // that path: this function exists to CLASSIFY things that are not already
+  // classified.
+  if (err instanceof HttpError) return err;
+
   const message = err instanceof Error ? err.message : String(err);
   const unreachable =
     /fetch failed|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|HttpRequestError/i.test(message);

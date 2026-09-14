@@ -64,7 +64,7 @@ forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep
 cat ../deployments/local.json
 
 VEE=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='token'][0]['address'])")
-REG=$(python3 -c "import json;print(json.load(open('../deployments/local.json'))['NameRegistry'])")
+REG=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='names'][0]['address'])")
 TREASURY=$(cast wallet address --private-key "$KEY")
 
 supply_before=$(cast call "$VEE" "totalSupply()(uint256)" --rpc-url "$RPC")

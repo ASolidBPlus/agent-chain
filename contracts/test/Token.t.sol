@@ -6,8 +6,8 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 import {Token} from "../src/Token.sol";
 
 contract TokenTest is Test {
-    Token internal vee;
-    /// Cached in setUp on purpose: `vee.MINTER_ROLE()` is an external call, so
+    Token internal play;
+    /// Cached in setUp on purpose: `play.MINTER_ROLE()` is an external call, so
     /// reading it inside a pranked statement consumes the prank and the call
     /// under test runs as the test contract instead. Cost two failing tests.
     bytes32 internal minterRole;
@@ -18,18 +18,18 @@ contract TokenTest is Test {
     address internal client = makeAddr("client");
 
     function setUp() public {
-        vee = new Token("VEE Bux", "VEE", treasury);
-        minterRole = vee.MINTER_ROLE();
-        burnerRole = vee.BURNER_ROLE();
+        play = new Token("Play Token", "PLAY", treasury);
+        minterRole = play.MINTER_ROLE();
+        burnerRole = play.BURNER_ROLE();
     }
 
     /// The metadata is now WHATEVER THE CONSTRUCTOR WAS GIVEN, which is the
     /// whole point of the generic contract: this asserts the arguments came
     /// through, not that the token is called anything in particular.
     function test_MetadataIsWhateverTheConstructorWasGiven() public {
-        assertEq(vee.name(), "VEE Bux");
-        assertEq(vee.symbol(), "VEE");
-        assertEq(vee.decimals(), 18);
+        assertEq(play.name(), "Play Token");
+        assertEq(play.symbol(), "PLAY");
+        assertEq(play.decimals(), 18);
 
         Token other = new Token("Gold Pieces", "GOLD", treasury);
         assertEq(other.name(), "Gold Pieces");
@@ -44,41 +44,41 @@ contract TokenTest is Test {
     // what changes - not the deploy.
 
     function test_NobodyHoldsBurnerRoleAtDeploy() public view {
-        assertFalse(vee.hasRole(burnerRole, treasury));
-        assertFalse(vee.hasRole(burnerRole, address(this)));
-        assertFalse(vee.hasRole(burnerRole, vendor));
+        assertFalse(play.hasRole(burnerRole, treasury));
+        assertFalse(play.hasRole(burnerRole, address(this)));
+        assertFalse(play.hasRole(burnerRole, vendor));
     }
 
     function test_BurnFromRevertsForACallerWithoutTheRole() public {
         vm.prank(treasury);
-        vee.mint(vendor, 100 ether);
+        play.mint(vendor, 100 ether);
 
         vm.prank(vendor);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, vendor, burnerRole)
         );
-        vee.burnFrom(vendor, 1 ether);
+        play.burnFrom(vendor, 1 ether);
     }
 
     function test_BurnFromReducesSupplyAndBalanceOnceGranted() public {
         vm.prank(treasury);
-        vee.mint(vendor, 100 ether);
+        play.mint(vendor, 100 ether);
         vm.prank(treasury);
-        vee.grantRole(burnerRole, client);
+        play.grantRole(burnerRole, client);
 
         vm.prank(client);
-        vee.burnFrom(vendor, 40 ether);
+        play.burnFrom(vendor, 40 ether);
 
-        assertEq(vee.balanceOf(vendor), 60 ether);
-        assertEq(vee.totalSupply(), 60 ether);
+        assertEq(play.balanceOf(vendor), 60 ether);
+        assertEq(play.totalSupply(), 60 ether);
     }
 
     function test_TreasuryCanMint() public {
         vm.prank(treasury);
-        vee.mint(vendor, 250 ether);
+        play.mint(vendor, 250 ether);
 
-        assertEq(vee.balanceOf(vendor), 250 ether);
-        assertEq(vee.totalSupply(), 250 ether);
+        assertEq(play.balanceOf(vendor), 250 ether);
+        assertEq(play.totalSupply(), 250 ether);
     }
 
     /// Minting is the whole money supply of the game. If any wallet could call
@@ -90,32 +90,32 @@ contract TokenTest is Test {
                 IAccessControl.AccessControlUnauthorizedAccount.selector, vendor, minterRole
             )
         );
-        vee.mint(vendor, 1 ether);
+        play.mint(vendor, 1 ether);
 
-        assertEq(vee.totalSupply(), 0);
+        assertEq(play.totalSupply(), 0);
     }
 
     function test_TransferMovesBalance() public {
         vm.prank(treasury);
-        vee.mint(vendor, 100 ether);
+        play.mint(vendor, 100 ether);
 
         vm.prank(vendor);
-        vee.transfer(client, 40 ether);
+        play.transfer(client, 40 ether);
 
-        assertEq(vee.balanceOf(vendor), 60 ether);
-        assertEq(vee.balanceOf(client), 40 ether);
+        assertEq(play.balanceOf(vendor), 60 ether);
+        assertEq(play.balanceOf(client), 40 ether);
     }
 
     /// The admin can hand MINTER_ROLE to the facilitator API for mid-game
     /// top-ups (spec S3.1) without redeploying the token.
     function test_AdminCanGrantMinterRole() public {
         vm.prank(treasury);
-        vee.grantRole(minterRole, vendor);
+        play.grantRole(minterRole, vendor);
 
         vm.prank(vendor);
-        vee.mint(client, 5 ether);
+        play.mint(client, 5 ether);
 
-        assertEq(vee.balanceOf(client), 5 ether);
+        assertEq(play.balanceOf(client), 5 ether);
     }
 
     // ---- transferWithIntent -------------------------------------------------
@@ -125,7 +125,7 @@ contract TokenTest is Test {
 
     function _fund(address who, uint256 amount) internal {
         vm.prank(treasury);
-        vee.mint(who, amount);
+        play.mint(who, amount);
     }
 
     function test_TransferWithIntentMovesTheMoneyAndEmitsBothEvents() public {
@@ -139,10 +139,10 @@ contract TokenTest is Test {
         emit IntentTransfer(intent, vendor, client, 40e18);
 
         vm.prank(vendor);
-        vee.transferWithIntent(client, 40e18, intent);
+        play.transferWithIntent(client, 40e18, intent);
 
-        assertEq(vee.balanceOf(client), 40e18);
-        assertEq(vee.balanceOf(vendor), 60e18);
+        assertEq(play.balanceOf(client), 40e18);
+        assertEq(play.balanceOf(vendor), 60e18);
     }
 
     /// The mover is msg.sender and there is no `from` parameter, so this cannot
@@ -150,15 +150,15 @@ contract TokenTest is Test {
     function test_TransferWithIntentCannotSpendSomeoneElsesBalance() public {
         _fund(vendor, 100e18);
         vm.prank(vendor);
-        vee.approve(client, 100e18);
+        play.approve(client, 100e18);
 
         // client holds an allowance over vendor, and it buys
         // nothing here: it can only move its own (zero) balance.
         vm.prank(client);
         vm.expectRevert();
-        vee.transferWithIntent(treasury, 1e18, keccak256(bytes("theft")));
+        play.transferWithIntent(treasury, 1e18, keccak256(bytes("theft")));
 
-        assertEq(vee.balanceOf(vendor), 100e18);
+        assertEq(play.balanceOf(vendor), 100e18);
     }
 
     /// THE DESIGN, asserted so nobody "hardens" it into a uniqueness constraint
@@ -171,18 +171,18 @@ contract TokenTest is Test {
         bytes32 intent = keccak256(bytes("reused"));
 
         vm.prank(vendor);
-        vee.transferWithIntent(client, 10e18, intent);
+        play.transferWithIntent(client, 10e18, intent);
         vm.prank(vendor);
-        vee.transferWithIntent(client, 10e18, intent);
+        play.transferWithIntent(client, 10e18, intent);
 
-        assertEq(vee.balanceOf(client), 20e18);
+        assertEq(play.balanceOf(client), 20e18);
     }
 
     function test_TransferWithIntentRespectsBalance() public {
         _fund(vendor, 5e18);
         vm.prank(vendor);
         vm.expectRevert();
-        vee.transferWithIntent(client, 6e18, keccak256(bytes("too-much")));
+        play.transferWithIntent(client, 6e18, keccak256(bytes("too-much")));
     }
 
     /// The id is opaque to the contract: a zero id is a caller error, not a
@@ -193,6 +193,6 @@ contract TokenTest is Test {
         vm.expectEmit(true, true, true, true);
         emit IntentTransfer(intent, vendor, client, 1e18);
         vm.prank(vendor);
-        vee.transferWithIntent(client, 1e18, intent);
+        play.transferWithIntent(client, 1e18, intent);
     }
 }

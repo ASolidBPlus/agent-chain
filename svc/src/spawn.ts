@@ -154,7 +154,16 @@ export class Spawner {
 
     await this.endowGas(address);
     if (fundVee > 0n) await this.fundVee(address, fundVee);
-    if (kind !== 'burner') {
+    // REGISTRATION NEEDS A REGISTRY, and a burner deliberately has no name.
+    // Both conditions, not just the kind: without this the call reached
+    // `requireNames` inside the registry write, threw module_not_deployed, and
+    // came back to the caller as a 502 chain_error - a refusal about the
+    // deployment's shape, reported as the chain being broken.
+    //
+    // The wallet is still spawned: a key, a wallet token and a policy file do
+    // not need a registry. It simply has no name, which is what a deployment
+    // without a names module means.
+    if (kind !== 'burner' && this.chain.modules.names !== undefined) {
       await this.registerIfAbsent(agentId, address);
       if (alias) await this.registerIfAbsent(alias, address);
     }

@@ -193,3 +193,169 @@ describe('the gate does not run before authentication', () => {
     expect(((await res.json()) as { error: string }).error).toBe('wrong_scope');
   });
 });
+
+// §4.4 / §8.4. A SPAWN ON A DEPLOYMENT WITH NO REGISTRY still produces a
+// wallet: a key, a wallet token and a policy file need no contracts. It simply
+// has no name.
+//
+// This is the case the review caught, and it failed in a way worth recording:
+// registration ran for every non-burner kind regardless of modules, so the
+// registry write reached `requireNames`, threw module_not_deployed, and came
+// back to the caller as 502 chain_error because asChainError rewrapped it. A
+// refusal about the deployment's SHAPE, reported as the chain being broken.
+import { Spawner } from '../src/spawn.ts';
+import { Keystore } from '../src/keystore.ts';
+import { loadPolicyDefaults } from '../src/policy.ts';
+import { asChainError } from '../src/chain.ts';
+import { Resolver } from '../src/resolver.ts';
+import { Treasury } from '../src/treasury.ts';
+import { HttpError } from '../src/errors.ts';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+describe('spawning without a names module', () => {
+  const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+  function spawnerOn(modules: Record<string, unknown>) {
+    const dir = mkdtempSync(join(tmpdir(), 'spawn-nonames-'));
+    const store = new Store(':memory:');
+    const registryCalls: string[] = [];
+    const chain = {
+      modules,
+      publicClient: {
+        waitForTransactionReceipt: async () => ({}),
+        // endowGas reads the balance before topping it up; already funded, so
+        // the spawn takes the no-op branch and the gas path is not what this
+        // test is about.
+        getBalance: async () => 10n ** 18n,
+      },
+      // Any registry write would have to come through here; recording rather
+      // than throwing, so the assertion can be "it was never attempted" instead
+      // of "it threw something".
+      walletClient: {
+        writeContract: async ({ functionName }: { functionName: string }) => {
+          registryCalls.push(functionName);
+          return '0xtx';
+        },
+      },
+      viemChain: {},
+      treasury: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+    } as unknown as import('../src/chain.ts').Chain;
+
+    const s = new Spawner(
+      { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json'), rpcUrl: 'http://x' } as never,
+      chain,
+      new Keystore(join(dir, 'keys'), 'secret-secret-secret-secret'),
+      store,
+      { lookup: async () => null, require: async () => null } as never,
+      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined),
+    );
+    return { s, store, registryCalls };
+  }
+
+  it('spawns an agent and never attempts a registration', async () => {
+    const { s, store, registryCalls } = spawnerOn({
+      tokens: [{ key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 }],
+    });
+
+    const out = await s.spawn({ agentId: 'orch:a' });
+
+    expect(out.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(store.spawnedAddress('orch:a')).toBe(out.address);
+    expect(registryCalls).toEqual([]);
+    store.close();
+  });
+});
+
+// The rule the above depends on, tested on its own because it applies to every
+// call site in chain.ts rather than just that one.
+describe('asChainError', () => {
+  it('passes an HttpError through untouched, because a refusal is not a chain error', () => {
+    const refusal = new HttpError('module_not_deployed', 'this deployment has no names module');
+    expect(asChainError(refusal)).toBe(refusal);
+    expect(asChainError(refusal).code).toBe('module_not_deployed');
+  });
+
+  it('still classifies what has not already been classified', () => {
+    expect(asChainError(new Error('fetch failed')).code).toBe('chain_unreachable');
+    expect(asChainError(new Error('execution reverted')).code).toBe('chain_error');
+  });
+});
+
+// §4.4 / §8.8. WHAT A DENY LIST MEANS ON A DEPLOYMENT WITH NO REGISTRY.
+//
+// The rule is not "deny lists stop working". Entries that are AGENT IDS still
+// bind, because the store can resolve those. Entries that are NAMES cannot
+// resolve, so they are skipped - and that is harmless only because nothing can
+// be addressed by name either, which is a different reason from the one the
+// pattern-matching code gives.
+//
+// It is said out loud once per distinct entry per process, because a deny list
+// is a safety expectation and an operator should not have to infer that part of
+// theirs is inert.
+describe('deny entries without a names module', () => {
+  const PKG2 = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const ADDR_B_LOCAL = '0x2222222222222222222222222222222222222222';
+
+  function treasuryWith(deny: string[], agent: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'deny-nonames-'));
+    writeFileSync(
+      join(dir, `${encodeURIComponent(agent)}.json`),
+      JSON.stringify({ agentId: agent, max_per_tx: 1000, max_per_stage: 5000, allow: ['*'], deny, frozen: false }),
+    );
+    const store = new Store(':memory:');
+    store.markSpawned(agent, '0x9999999999999999999999999999999999999999', null);
+    store.markSpawned('orch:b', ADDR_B_LOCAL, null);
+
+    const chain = {
+      viemChain: {},
+      modules: { tokens: [{ key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 }] },
+      publicClient: { waitForTransactionReceipt: async () => ({}) },
+      walletClient: { writeContract: async () => '0xsent' },
+    } as unknown as import('../src/chain.ts').Chain;
+
+    const resolver = new Resolver(chain, store);
+    const t = new Treasury(
+      { policyDir: dir, policyDefaultsPath: join(PKG2, 'policy-defaults.json') } as never,
+      chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x9999999999999999999999999999999999999999' }) } as never,
+      store,
+      resolver,
+      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined),
+    );
+    return { t, store };
+  }
+
+  const code = async (fn: () => Promise<unknown>): Promise<string> => {
+    try {
+      await fn();
+      return 'no-error';
+    } catch (e) {
+      return (e as HttpError).code ?? 'not-an-HttpError';
+    }
+  };
+
+  // AN AGENT ID STILL BINDS. The store resolves it, so the rule has something
+  // to compare and the refusal is the same one a registry deployment gives.
+  it('still refuses a send to a denied AGENT ID', async () => {
+    const { t, store } = treasuryWith(['orch:b'], 'orch:a');
+    expect(
+      await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'd1' })),
+    ).toBe('counterparty_denied');
+    store.close();
+  });
+
+  // A NAME CANNOT RESOLVE, so the entry is skipped - and the send fails for the
+  // OTHER reason, which is that the recipient cannot be addressed either.
+  it('skips a deny entry that is a NAME, and the send fails as unknown_name', async () => {
+    const { t, store } = treasuryWith(['treasury.play'], 'orch:a');
+    expect(
+      await code(() =>
+        t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'treasury.play', vee: '1', intentId: 'd2' }),
+      ),
+    ).toBe('unknown_name');
+    store.close();
+  });
+});
