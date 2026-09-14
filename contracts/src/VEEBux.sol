@@ -4,7 +4,7 @@ pragma solidity ^0.8.30;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
-/// @title VEE Bux - the in-game currency of Operation PowerOUT.
+/// @title VEE Bux - the in-game currency.
 /// @notice ERC-20, 18 decimals, symbol VEE. Minting is the treasury's alone:
 /// the deploy script seeds INITIAL_SUPPLY and the facilitator API tops up
 /// mid-game, both through MINTER_ROLE.

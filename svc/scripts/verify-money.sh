@@ -5,9 +5,9 @@
 #   ./svc/scripts/verify-money.sh
 set -euo pipefail
 
-IMAGE=${IMAGE:-powerout-anvil:dev}
-NAME=${NAME:-powerout-anvil-money-verify}
-VOLUME=${VOLUME:-powerout-chain-state-money-verify}
+IMAGE=${IMAGE:-agent-chain-anvil:dev}
+NAME=${NAME:-agent-chain-anvil-money-verify}
+VOLUME=${VOLUME:-agent-chain-state-money-verify}
 RPC=${RPC:-http://127.0.0.1:8545}
 PORT=${PORT:-7001}
 TOKEN=${CHAIN_SVC_TOKEN:-verify-token}
@@ -84,7 +84,7 @@ step "criterion 3 - spawn a named, funded wallet"
 # as much as the service: this bound has read 277ms and 789ms on the same
 # machine minutes apart. Expected p50 under 1s on an idle host; the HARD failure
 # is at 5s, which catches a pathological regression without failing on load
-# (ruled 20:49 UTC). A warning instead of a failure was explicitly rejected -
+# (ruled). A warning instead of a failure was explicitly rejected -
 # a check that never fails measures nothing.
 TIMES=""
 for who in shadowbroker timing1 timing2; do
@@ -118,18 +118,18 @@ check "no token on repeat" "$(echo "$AGAIN" | python3 -c "import sys,json;print(
 step "criterion 9 - addressing at the service layer"
 check "two-colon id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')" "400"
 echo "    $(body -X POST "$U/wallets" -d '{"agentId":"orch:pod1:alice","kind":"agent"}')"
-check "bare local id"      "$(code -X POST "$U/wallets" -d '{"agentId":"darknetclient","kind":"agent"}')" "400"
+check "bare local id"      "$(code -X POST "$U/wallets" -d '{"agentId":"client","kind":"agent"}')" "400"
 check "uppercase id"       "$(code -X POST "$U/wallets" -d '{"agentId":"orch:ShadowBroker","kind":"agent"}')" "400"
 
 step "transfer by name, with a memo (wallet credential)"
-api -X POST "$U/wallets" -d '{"agentId":"alpha:darknetclient","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
+api -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 TX=$(wbody "$SB_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.vee","vee":50,"memo":"for the stream job","intentId":"a1"}')
 echo "  POST /sign-transfer -> $TX"
 check "sender balance"     "$(api "$U/balance/orch%3Ashadowbroker" | jget "['vee']")" "200"
 check "recipient balance"  "$(api "$U/balance/alpha.vee"           | jget "['vee']")" "60"
 HIST=$(api "$U/history/orch%3Ashadowbroker?limit=10")
 check "history memo"       "$(echo "$HIST" | jget "[0]['memo']")" "for the stream job"
-check "history counterparty" "$(echo "$HIST" | jget "[0]['to']")" "alpha:darknetclient"
+check "history counterparty" "$(echo "$HIST" | jget "[0]['to']")" "alpha:client"
 
 step "criterion 7 - lookalike names coexist"
 SC_TOKEN=$(api -X POST "$U/wallets" -d '{"agentId":"orch:scammer","fundVee":5,"kind":"agent"}' | jget "['walletToken']")

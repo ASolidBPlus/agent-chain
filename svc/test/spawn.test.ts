@@ -82,7 +82,7 @@ async function codeOf(fn: () => Promise<unknown>): Promise<string> {
 describe('POST /wallets validation', () => {
   it('refuses a bare local id, a two-colon relay string and uppercase', async () => {
     const { spawner: s } = spawner();
-    expect(await codeOf(() => s.spawn({ agentId: 'darknetclient' }))).toBe('invalid_agent_id');
+    expect(await codeOf(() => s.spawn({ agentId: 'client' }))).toBe('invalid_agent_id');
     expect(await codeOf(() => s.spawn({ agentId: 'orch:pod1:alice' }))).toBe('invalid_agent_id');
     expect(await codeOf(() => s.spawn({ agentId: 'orch:ShadowBroker' }))).toBe('invalid_agent_id');
   });
@@ -320,7 +320,7 @@ describe('POST /sign-transfer validation', () => {
 // The caps are game balance the owner tunes (ledger D8), so they live in
 // policy-defaults.json and NOT in a constant here. These tests assert the
 // wiring - that the right entry is picked and a caller can override it - and
-// deliberately do not assert the numbers, which are powerout-planner's to move
+// deliberately do not assert the numbers, which are the spec's to move
 // without breaking a build.
 describe('policy defaults', () => {
   // Iterates WALLET_KINDS rather than a literal list, so adding a kind extends
@@ -364,7 +364,7 @@ describe('policy defaults', () => {
 
   // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an
   // amount, and a caller sending 25.5 has made an amount mistake rather than a
-  // malformed-request one (ruled 07:58).
+  // malformed-request one (ruled).
   it('rejects a caller-supplied policy of the wrong shape', async () => {
     const { spawner: s } = spawner();
     expect(await codeOf(() => s.spawn({ agentId: 'orch:x', policy: { max_per_tx: 0 } }))).toBe('invalid_amount');
@@ -401,12 +401,12 @@ describe('policy defaults', () => {
     expect(code).toBe('invalid_request');
   });
 
-  // The shape the arena sends, at the endpoint rather than at the merge helper:
+  // The shape the harness sends, at the endpoint rather than at the merge helper:
   // this is the call that returned 400 against a live stack.
-  it('accepts a partial policy at spawn, the arena shape', async () => {
+  it('accepts a partial policy at spawn, the harness shape', async () => {
     const { spawner: s } = spawner();
     const code = await codeOf(() =>
-      s.spawn({ agentId: 'orch:x', policy: { allow: ['arena:*'], deny: ['treasury.vee'] } }),
+      s.spawn({ agentId: 'orch:x', policy: { allow: ['acme:*'], deny: ['treasury.vee'] } }),
     );
     // Reaches the chain rather than being refused on the policy - the exploding
     // stub is how we know it got past validation.
@@ -566,7 +566,7 @@ describe('the release rule', () => {
     });
   });
 
-  // Structural, and deliberately so: build-triage's warning was that a SECOND
+  // Structural, and deliberately so: the review warning was that a SECOND
   // catch reasoning about release is the tell. A behavioural test cannot see a
   // release path that has not been written yet, so this asserts the shape - one
   // call, in the pre-broadcast branch.
@@ -686,7 +686,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
   }
 
-  // THE RULED TEST (04:05), end to end. The unit tests pass `canonical` in by
+  // THE RULED TEST, end to end. The unit tests pass `canonical` in by
   // hand, so they prove enforcePolicy uses it - they cannot prove signTransfer
   // RESOLVES FIRST and hands it over. Measured: with the call site reverted to
   // the pre-resolution order, every unit test still passes and this one fails.
@@ -756,7 +756,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   }, 20_000);
 
   // A deny-entry resolve that FAILS is not the same as one that finds nothing,
-  // and they now get opposite answers (ruled 05:29). Splitting them is the
+  // and they now get opposite answers (ruled). Splitting them is the
   // whole point: "there is no such denied identity" is an answer, "I could not
   // find out" is not.
   function treasuryWhoseLookup(lookup: (n: string) => Promise<unknown>): CountingTreasury {
@@ -844,7 +844,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     expect(t.broadcasts).toBe(0);
   }, 20_000);
 
-  // SEAT 1'S FIXTURE, one line different from the read-failure one and the
+  // A REVIEW'S FIXTURE, one line different from the read-failure one and the
   // difference is the whole finding: a deny entry that is NOT YET REGISTERED
   // resolves to null, and "not registered" is as transient as "read failed" -
   // names get registered, that is what the game does. Deny a counterparty by
@@ -929,7 +929,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   }, 20_000);
 });
 
-// Arena spec S3. Set-balance is the one endpoint that can move money OUT of an
+// Harness spec S3. Set-balance is the one endpoint that can move money OUT of an
 // agent's wallet, so the tests are about what it CANNOT do as much as what it can.
 describe('POST /wallets/:agentId/balance', () => {
   const WALLET = '0x000000000000000000000000000000000000bEEF';
@@ -995,7 +995,7 @@ describe('POST /wallets/:agentId/balance', () => {
     return { t, store };
   }
 
-  // Seat 2 recorded this against the pre-merge trees: `setBalance` reserves an
+  // Review recorded this against the pre-merge trees: `setBalance` reserves an
   // intent, and its TOP-UP branch called `fund` without it while the SWEEP
   // branch passed it through - so a top-up was the one money movement whose
   // intent could not be joined from /history. Both sides compiled, which is why
@@ -1028,7 +1028,7 @@ describe('POST /wallets/:agentId/balance', () => {
 
   // A4. The reply used to be `formatVee(target)` at both exits - the INTENTION,
   // not the outcome, since `current` was read several awaits before the
-  // transfer landed. It is what the arena's Wallets panel shows.
+  // transfer landed. It is what the harness's Wallets panel shows.
   it('reports the MEASURED balance, not the one it intended to set', async () => {
     const { t } = treasuryAt(vee(100));
 
@@ -1116,7 +1116,7 @@ describe('POST /wallets/:agentId/balance', () => {
   }, 20_000);
 });
 
-// Arena spec S3. The only way back from frozen; DELETE /wallets keeps meaning
+// Harness spec S3. The only way back from frozen; DELETE /wallets keeps meaning
 // retirement and stays irreversible.
 describe('PATCH /wallets/:agentId/policy', () => {
   function spawnerWith(canonicalOf: Record<string, string> = {}): { s: Spawner; store: Store; dir: string } {
@@ -1203,7 +1203,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
 
   // Accepted on purpose: it names no identity today, and refusing it would make
   // a policy un-writable until the wallet it names exists - inverting the spawn
-  // order the arena needs.
+  // order the harness needs.
   it('accepts a deny entry that resolves to nothing yet', async () => {
     const { s, dir } = spawnerWith();
     await s.patchPolicy('orch:a', { deny: ['orch:notyet'] });

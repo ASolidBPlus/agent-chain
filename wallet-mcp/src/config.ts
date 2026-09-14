@@ -1,14 +1,14 @@
 // Startup configuration for one agent's wallet MCP.
 //
 // Every value is required and is validated here, loudly, because the harness
-// cannot do it: mesh-agent's ${VAR} expansion substitutes an unset variable
+// cannot do it: the harness's ${VAR} expansion substitutes an unset variable
 // with an EMPTY STRING, so a missing WALLET_TOKEN would otherwise reach
 // chain-svc as an empty bearer and come back 401 - a config error wearing an
 // auth error's clothes. wallet-mcp knows which of its variables are mandatory
 // and the runtime never will, so the hard failure belongs here.
 
 export interface WalletConfig {
-  /// The QUALIFIED id, `<org label>:<local id>` (spec S0). mesh-agent's own
+  /// The QUALIFIED id, `<org label>:<local id>` (spec S0). the harness's own
   /// agentId is the bare local id; these are two renderings of one identity and
   /// this process only ever sees the qualified one.
   agentId: string;

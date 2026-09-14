@@ -46,7 +46,7 @@ export interface SendResult {
 /// unmapped code becomes a generic error rather than a plausible-looking
 /// refusal: telling a persona "counterparty_denied" when the real problem was
 /// a 502 would teach it something false about the game.
-/// Ten seconds, ruled 01:15 UTC. Long enough for a receipt on an instant-mining
+/// Ten seconds, ruled. Long enough for a receipt on an instant-mining
 /// chain, short enough that a tool call still returns.
 const RECONCILE_BUDGET_MS = 10_000;
 
@@ -178,14 +178,14 @@ export class Wallet {
   /// Nothing here should ever contain it - the token only goes into a request
   /// header - so this is the last line, not the first.
   ///
-  /// This comment used to say, flatly, that mesh-agent's transcript redactor
+  /// This comment used to say, flatly, that the harness's transcript redactor
   /// does not cover WALLET_TOKEN. True when written (S5 described a hardcoded
   /// list of two) and FALSE since their #18. Keeping the control was right; the
   /// reason had rotted.
   ///
-  /// The mechanism, measured by mesh-agent-builder rather than reasoned about,
+  /// The mechanism, MEASURED rather than reasoned about,
   /// after two wrong accounts of it - one of which was in this comment:
-  /// mesh-agent redacts the values of ALLOWLISTED ENV VAR NAMES, whatever route
+  /// the harness redacts the values of ALLOWLISTED ENV VAR NAMES, whatever route
   /// the credential took to get here. Not the `${VAR}` references (those only
   /// throw on a name that is not allowlisted; they seed nothing), and not the
   /// literal-versus-reference syntax. So `WALLET_TOKEN` is unredacted only if
@@ -197,10 +197,10 @@ export class Wallet {
   /// next asks "do we still need this?" would have checked the stale claim,
   /// found it false, and deleted a control that two real cases still need.
   ///
-  /// The two that are true (ruled 00:09 UTC):
+  /// The two that are true (ruled):
   ///
   ///   1. `org-core` imports this package AS A LIBRARY, not over stdio (S5).
-  ///      There is no mesh-agent in that process at all, so there is no
+  ///      There is no harness in that process at all, so there is no
   ///      transcript redactor to inherit - this is the only redaction there is.
   ///
   ///   2. The allowlist grant is a DEPLOYMENT property this process cannot
@@ -219,14 +219,14 @@ export class Wallet {
   /// value rewrites every occurrence of those letters anywhere in a response.
   ///
   /// LENGTH IS A PROXY, NOT THE PROPERTY. The property is "does this value
-  /// occur in ordinary text", and a long token can still have it - mesh-agent
+  /// occur in ordinary text", and a long token can still have it - the harness
   /// measured `password`, eight characters and past their floor, rewriting
   /// both occurrences in "a weak password ... password reuse". So do not read
   /// the threshold below as a safety line: it catches the obvious case, and a
   /// dictionary-word token of any length would still over-match. The real
   /// guarantee is upstream, in chain-svc issuing 32 random bytes.
   /// chain-svc issues 32-byte tokens, so anything short is a misconfiguration
-  /// rather than a small secret - and mesh-agent's own transcript redactor
+  /// rather than a small secret - and the harness's own transcript redactor
   /// silently declines to redact under 8 characters, so a short token is
   /// unprotected at that layer too. Warned rather than refused: this process
   /// does not get to decide that someone's deployment is invalid, only to say
@@ -236,7 +236,7 @@ export class Wallet {
       warn(
         `wallet-mcp: WALLET_TOKEN is ${token.length} characters. chain-svc issues 32-byte tokens, ` +
           `so this is probably a misconfiguration; short values also make redaction over-match and ` +
-          `are not redacted at all by mesh-agent's transcript layer below 8.`,
+          `are not redacted at all by the harness's transcript layer below 8.`,
       );
     }
   }
@@ -329,7 +329,7 @@ export class Wallet {
     }
     return (res.body as Array<Record<string, unknown>>).map((entry) => ({
       // S5 asks for `when`; S4's /history carries a block number and no
-      // timestamp, so this is a block height. Flagged to powerout-planner -
+      // timestamp, so this is a block height. Flagged for the spec -
       // chain-svc would have to read block timestamps to do better.
       when: entry.blockNumber,
       direction: entry.from === this.config.agentId ? 'out' : 'in',
@@ -342,7 +342,7 @@ export class Wallet {
   async send(args: { to: unknown; vee: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
     const to = typeof args.to === 'string' ? args.to.trim() : '';
     const intentId = typeof args.intent_id === 'string' ? args.intent_id.trim() : '';
-    // `vee` IS A DECIMAL STRING on every money wire (ruled 03:55). A number is
+    // `vee` IS A DECIMAL STRING on every money wire (ruled). A number is
     // tolerated only when it is an INTEGER, which is exactly representable and
     // has nothing to round; a non-integer number is REFUSED rather than
     // rounded, because silent rounding on an amount is the one outcome worth
@@ -367,7 +367,7 @@ export class Wallet {
     // `duplicate_intent` exists to name.
     const previous = this.store.recall(intentId);
     if (previous) {
-      // The dedupe KEY is the intent id alone (ruled 03:55). These are not
+      // The dedupe KEY is the intent id alone (ruled). These are not
       // key components - they are what makes "same id, different send" a
       // REFUSAL rather than a silent replay of the wrong transfer.
       if (previous.to === to && previous.vee === vee) {
@@ -405,7 +405,7 @@ export class Wallet {
       // THE DETAIL COMES FROM chain-svc, NOT FROM HERE. Since §5 a bare `to`
       // has TWO readings - the name as typed and the peer in this wallet's own
       // namespace - and the refusal has to name both, or a persona reads "no
-      // wallet is registered as toby" while `arena:toby` exists and concludes
+      // wallet is registered as toby" while `acme:toby` exists and concludes
       // the registry is broken.
       //
       // Reconstructing that sentence locally would be a second authority for
@@ -426,7 +426,7 @@ export class Wallet {
       const mapped = refusalFor(resolved.error, this.log);
       // The detail is chain-svc's own prose - since §5 a bare `to` has TWO
       // readings, and the refusal has to name both or a persona reads "no
-      // wallet is registered as toby" while `arena:toby` exists and concludes
+      // wallet is registered as toby" while `acme:toby` exists and concludes
       // the registry is broken. Reconstructing that sentence here would be a
       // second authority for one fact. It is passed through, never invented,
       // and NEVER replaced by the code itself.

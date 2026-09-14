@@ -11,7 +11,7 @@ contract NameRegistryTest is Test {
 
     address internal treasury = makeAddr("treasury");
     address internal shadowbroker = makeAddr("shadowbroker");
-    address internal darknetclient = makeAddr("darknetclient");
+    address internal client = makeAddr("client");
     address internal scammer = makeAddr("scammer");
 
     string internal constant CANONICAL = "orch:shadowbroker";
@@ -32,7 +32,7 @@ contract NameRegistryTest is Test {
 
     // --- registration and lookup -------------------------------------------
 
-    /// The permissionless path is FORWARD-ONLY (ruled 22:12 UTC): it makes a
+    /// The permissionless path is FORWARD-ONLY (ruled): it makes a
     /// name resolve and never writes a primary name, even when the caller
     /// registers for itself. A primary name is the registrar's canonical id or
     /// nothing - which is what stops a stranger claiming the primary of an
@@ -85,14 +85,14 @@ contract NameRegistryTest is Test {
         assertEq(registry.resolve(CANONICAL), shadowbroker);
     }
 
-    /// Views return a miss as a VALUE, never a revert (ruled 19:15 UTC):
+    /// Views return a miss as a VALUE, never a revert (ruled):
     /// chain-svc turns address(0) into its 404 and cannot decode a revert.
     function test_ResolveUnknownNameReturnsZeroAddress() public view {
         assertEq(registry.resolve("nobody.vee"), address(0));
     }
 
     function test_ReverseOfUnknownAddressReturnsEmptyString() public view {
-        assertEq(registry.reverseOf(darknetclient), "");
+        assertEq(registry.reverseOf(client), "");
     }
 
     // --- the reverse record ------------------------------------------------
@@ -116,10 +116,10 @@ contract NameRegistryTest is Test {
         assertEq(registry.reverseOf(shadowbroker), CANONICAL);
 
         vm.prank(shadowbroker);
-        registry.transfer(CANONICAL, darknetclient);
+        registry.transfer(CANONICAL, client);
 
         (address owner,) = registry.records(keccak256(bytes(CANONICAL)));
-        assertEq(owner, darknetclient);
+        assertEq(owner, client);
         // The name no longer speaks for the address it still targets.
         assertEq(registry.reverseOf(shadowbroker), "");
     }
@@ -139,15 +139,15 @@ contract NameRegistryTest is Test {
         _spawn(CANONICAL, shadowbroker);
 
         vm.prank(shadowbroker);
-        registry.setTarget(CANONICAL, darknetclient);
+        registry.setTarget(CANONICAL, client);
 
-        assertEq(registry.resolve(CANONICAL), darknetclient);
+        assertEq(registry.resolve(CANONICAL), client);
         // Cleared for the address it left.
         assertEq(registry.reverseOf(shadowbroker), "");
         // NOT adopted by the address it moved to: the reverse is written on
         // register only, so repointing a name cannot promote it to be
         // somebody's primary name behind their back.
-        assertEq(registry.reverseOf(darknetclient), "");
+        assertEq(registry.reverseOf(client), "");
     }
 
     function test_NonOwnerCannotSetTarget() public {
@@ -163,7 +163,7 @@ contract NameRegistryTest is Test {
     // --- retirement (the DELETE /wallets path) -----------------------------
 
     /// Retiring an agent clears its ALIAS targets with the registrar key, and
-    /// must not need the agent's own key (spec S4, ruled 19:15 UTC).
+    /// must not need the agent's own key (spec S4, ruled).
     function test_RegistrarCanClearAliasTargetWithoutOwnerKey() public {
         _spawn(CANONICAL, shadowbroker);
         vm.prank(treasury);
@@ -216,15 +216,15 @@ contract NameRegistryTest is Test {
     /// the registry must not normalise them together. If this test ever fails
     /// because the charset rejected the capital, the mechanic is gone.
     function test_LookalikeNamesCoexist() public {
-        _spawn("alpha:darknetclient", darknetclient);
+        _spawn("alpha:client", client);
         vm.prank(treasury);
-        registry.registerFor("alpha.vee", darknetclient, darknetclient);
+        registry.registerFor("alpha.vee", client, client);
 
         _spawn("orch:scammer", scammer);
         vm.prank(treasury);
         registry.registerFor("aIpha.vee", scammer, scammer);
 
-        assertEq(registry.resolve("alpha.vee"), darknetclient);
+        assertEq(registry.resolve("alpha.vee"), client);
         assertEq(registry.resolve("aIpha.vee"), scammer);
         assertTrue(registry.resolve("alpha.vee") != registry.resolve("aIpha.vee"));
     }

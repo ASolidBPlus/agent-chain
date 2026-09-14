@@ -141,7 +141,7 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
   if (intentId === '') throw new HttpError('invalid_request', 'intent id is required');
 
   // "Self" is the principal behind the token, never anything the caller sent -
-  // the same invariant /sign-transfer holds (ruled 02:03 UTC).
+  // the same invariant /sign-transfer holds (ruled).
   //
   // ONE refusal for both "no such intent" and "not yours", with an IDENTICAL
   // body. Splitting them - a 404 here and a 403 for somebody else's - would
@@ -193,7 +193,7 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
 /// `kind` is recorded at spawn, `frozen` is set by retirement and cleared only
 /// by `PATCH /policy {frozen:false}`, and `bareIdCount` is incremented by the
 /// §5 detector - and until this endpoint the only way to see any of them was to
-/// open the sqlite file. The arena's Wallets panel synthesises this row today
+/// open the sqlite file. The harness's Wallets panel synthesises this row today
 /// from several calls and cannot get the last two at all.
 ///
 /// `kind` MAY BE NULL and is never inferred. Null means the wallet was spawned
@@ -254,7 +254,7 @@ async function postWallets({ services, body, principal }: RouteContext): Promise
   return services.spawner.spawn(body);
 }
 
-/// Set a wallet's balance to exactly `vee` (arena spec S3). Platform scope: it
+/// Set a wallet's balance to exactly `vee` (harness spec S3). Platform scope: it
 /// can move money OUT of an agent's wallet, which no other endpoint can, and
 /// the containment is that its destination is the treasury and is not a
 /// parameter. See Treasury.sweepToTreasury.

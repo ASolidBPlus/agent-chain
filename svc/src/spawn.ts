@@ -86,7 +86,7 @@ export class Spawner {
     // hub-core may set per-agent caps; otherwise they come by kind from the
     // game-balance file, never from a constant in this module.
     // A supplied policy is a PATCH over the kind defaults, not a complete
-    // document: `{allow, deny}` with the caps left alone is the arena's whole
+    // document: `{allow, deny}` with the caps left alone is the harness's whole
     // use, and demanding all four made that the one shape that failed while
     // sending nothing succeeded.
     const policy = mergePolicy(body.policy, this.policyDefaults[kind]);
@@ -155,8 +155,8 @@ export class Spawner {
     return { txHash: await this.registerFor(alias, wallet as Address) };
   }
 
-  /// Retirement: the WALLET HALF ONLY, standalone and idempotent (mesh-planner,
-  /// 19:33 UTC). hub-core sequences the composite - mesh admin DELETE /agents
+  /// Retirement: the WALLET HALF ONLY, standalone and idempotent.
+  /// hub-core sequences the composite - mesh admin DELETE /agents
   /// then this - and chain-svc deliberately does not tail the `agent.deleted`
   /// admin log line: it is a log record, not a subscribable event, and coupling
   /// to it would duplicate what hub-core will own.
@@ -289,7 +289,7 @@ export class Spawner {
     return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
   }
 
-  /// Partial update of a wallet's policy (arena spec S3). Platform scope.
+  /// Partial update of a wallet's policy (harness spec S3). Platform scope.
   ///
   /// `frozen: false` is the ONLY way back from frozen. `DELETE /wallets` keeps
   /// meaning retirement and stays irreversible: it also clears the wallet's

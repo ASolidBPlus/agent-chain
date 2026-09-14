@@ -43,7 +43,7 @@ export interface Config {
   acknowledgeChainReset: boolean;
   /// Per-`kind` policy caps applied when POST /wallets carries no explicit
   /// policy. Provisional game balance, tuned by the game owner - deliberately a
-  /// file rather than a constant in the code (ruled 20:49 UTC).
+  /// file rather than a constant in the code (ruled).
   policyDefaultsPath: string;
   deploymentsDir: string;
   /// hub-core's outcome feed. Unset is legitimate until C5 exists - events are

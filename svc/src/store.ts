@@ -81,7 +81,7 @@ export class Store {
         kind       TEXT,
         -- §5's bare-id detector. Counts, never accumulates: a log of every bare
         -- send would be keyed on caller behaviour and grow forever, and the
-        -- 09:41 rule forbids exactly that. A counter bounded by this table has
+        -- retention rule forbids exactly that. A counter bounded by this table has
         -- no retention window to get wrong.
         bare_id_count INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
@@ -482,7 +482,7 @@ export class Store {
     stage: string;
     amount: bigint;
     /// The stage cap to test against, or NULL for no cap hold at all - which
-    /// is what a PLATFORM-scope transfer takes (arena spec S3). The intent is
+    /// is what a PLATFORM-scope transfer takes (harness spec S3). The intent is
     /// still recorded, so idempotency and the IntentTransfer story are
     /// unchanged; only the budget half is skipped, because the treasury has no
     /// stage cap and an operator reset refused as over_stage_cap mid-game would
@@ -590,7 +590,7 @@ export class Store {
   /// IntentTransfer: the sweep can then resolve each reserved intent by event
   /// scan - landed means confirm and KEEP the hold, provably not landed means
   /// fail and release - so hold release and intent resolution become one
-  /// decision, because "did the transfer land?" is one question. Ruled 02:44
+  /// decision, because "did the transfer land?" is one question. ruled
   /// UTC; the contract change rides the post-#14 PR.
 
   /// The whole reservation row, for reconciliation (spec S4 "Intents").
@@ -620,7 +620,7 @@ export class Store {
   /// Records one IntentTransfer against the intent that authorised it, and
   /// answers whether THIS emission makes the intent anomalous.
   ///
-  /// Only emissions matching an intent WE RESERVED are counted (ruled 09:41).
+  /// Only emissions matching an intent WE RESERVED are counted (ruled).
   /// An id nobody here reserved is another party's traffic on a shared chain,
   /// or a direct caller moving their own funds under a self-chosen id - neither
   /// is the game's double-spend, which is reusing a RESERVED allotment to land

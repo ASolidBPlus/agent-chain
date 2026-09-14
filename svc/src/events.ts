@@ -113,7 +113,7 @@ export class EventTail {
     // emissions inside a single pollOnce against a stub whose head never moved,
     // so the boundary was not a variable in any of them.
     //
-    // Never reconciled silently (ruled 03:12): the money moved, so the intent
+    // Never reconciled silently (ruled): the money moved, so the intent
     // is confirmed and the hold KEPT, and a facilitator is told.
     for (const log of intents) {
       const args = log.args as { intentId?: string; from?: string };
@@ -192,7 +192,7 @@ export class EventTail {
 
   /// Resolves reservations the chain has already answered (spec S4).
   ///
-  /// RESOLVE AND DETECT, NEVER RELEASE (ruled 10:40). There is one branch and
+  /// RESOLVE AND DETECT, NEVER RELEASE (ruled). There is one branch and
   /// it only ever moves an intent from unresolved to CONFIRMED:
   ///
   ///   an IntentTransfer for this intent FROM THE RESERVING WALLET means it

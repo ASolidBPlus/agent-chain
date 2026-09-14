@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation gate for the PowerOUT contracts.
+"""Mutation gate for the contracts.
 
 Breaks each guard deliberately and requires the test that protects it to FAIL.
 A guard that survives its mutant is inert: it describes the behaviour rather
@@ -71,7 +71,7 @@ MUTANTS = [
      "        _register(name, msg.sender, target, false);",
      "        _register(name, msg.sender, target, true);",
      "test_EvenTheRegistrarsRegisterDoesNotSetAPrimaryName"),
-    ("M11", "src/NameRegistry.sol", "register makes the TARGET the owner (seat 2's mutant)",
+    ("M11", "src/NameRegistry.sol", "register makes the TARGET the owner",
      "        _register(name, msg.sender, target, false);",
      "        _register(name, target, target, false);",
      "test_RegisterMakesTheCallerTheOwnerEvenForAForeignTarget"),

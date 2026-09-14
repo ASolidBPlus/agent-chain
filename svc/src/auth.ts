@@ -1,4 +1,4 @@
-// Who is calling, and what that entitles them to (spec S4, ruled 20:57 UTC).
+// Who is calling, and what that entitles them to (spec S4, ruled).
 //
 // The model this replaces had ONE token shared by hub-core, the facilitator
 // API, the setup script and wallet-mcp - and S6 put that token inside the

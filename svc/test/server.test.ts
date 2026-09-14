@@ -16,7 +16,7 @@ const WALLET = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 // A real store, so the credential lookup under test is the real one rather
 // than a stub that agrees with whatever the code does.
 const store = new Store(':memory:');
-store.setWalletTokenHash('alpha:darknetclient', hashToken(WALLET_TOKEN));
+store.setWalletTokenHash('alpha:client', hashToken(WALLET_TOKEN));
 
 let server: Server;
 let base: string;
@@ -28,12 +28,12 @@ const services = {
   config: { token: TOKEN },
   store,
   resolver: {
-    lookup: async (name: string) => (name === 'alpha.vee' ? { address: WALLET, canonical: 'alpha:darknetclient' } : null),
+    lookup: async (name: string) => (name === 'alpha.vee' ? { address: WALLET, canonical: 'alpha:client' } : null),
     require: async (name: string) => {
       if (name !== 'alpha.vee') throw new HttpError('unknown_name', `no registry entry for ${name}`);
-      return { address: WALLET, canonical: 'alpha:darknetclient' };
+      return { address: WALLET, canonical: 'alpha:client' };
     },
-    reverseOf: async () => 'alpha:darknetclient',
+    reverseOf: async () => 'alpha:client',
     aliasesOf: async () => ['alpha.vee'],
   },
 } as unknown as Services;
@@ -88,7 +88,7 @@ describe('authentication', () => {
   it('recognises a wallet credential as its own principal', () => {
     expect(authenticate(`Bearer ${WALLET_TOKEN}`, TOKEN, store)).toEqual({
       scope: 'wallet',
-      agentId: 'alpha:darknetclient',
+      agentId: 'alpha:client',
     });
   });
 });
@@ -155,7 +155,7 @@ describe('GET /wallets/:agentId', () => {
     expect(await res.json()).toEqual({
       agentId: 'orch:rowtest',
       address: WALLET,
-      canonical: 'alpha:darknetclient',
+      canonical: 'alpha:client',
       kind: 'burner',
       frozen: false,
       bareIdCount: 0,
@@ -185,14 +185,14 @@ describe('routing', () => {
     // there rather than absent: a caller should not have to know which scope it
     // used to know whether the field means anything.
     expect(await res.json()).toEqual({
-      address: WALLET, canonical: 'alpha:darknetclient', resolvedVia: 'exact',
+      address: WALLET, canonical: 'alpha:client', resolvedVia: 'exact',
     });
   });
 
   // Criterion 9's shape: a bare local id is syntactically fine, so it reaches
   // the registry and comes back unknown_name rather than being rejected early.
   it('reports a bare local id as unknown_name', async () => {
-    const res = await fetch(`${base}/resolve/darknetclient`, { headers: auth });
+    const res = await fetch(`${base}/resolve/client`, { headers: auth });
     expect(res.status).toBe(404);
     expect((await body(res)).error).toBe('unknown_name');
   });
@@ -212,7 +212,7 @@ describe('routing', () => {
   it('returns the canonical name and aliases for an address', async () => {
     const res = await fetch(`${base}/reverse/${WALLET}`, { headers: auth });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ canonical: 'alpha:darknetclient', aliases: ['alpha.vee'] });
+    expect(await res.json()).toEqual({ canonical: 'alpha:client', aliases: ['alpha.vee'] });
   });
 
   it('404s an unknown route as invalid_request, not as a crash', async () => {
@@ -248,7 +248,7 @@ describe('routing', () => {
   });
 });
 
-// Ruled 22:12 UTC, after the registry finding: `register` is permissionless
+// ruled, after the registry finding: `register` is permissionless
 // with an arbitrary target, so anyone can make a name resolve to someone else's
 // wallet. The contract refuses to make such a name anyone's PRIMARY, but it
 // still resolves - so /reverse must not report it as that wallet's alias either.
@@ -285,7 +285,7 @@ describe('the alias index', () => {
   });
 });
 
-// Ruled 02:03 UTC. GET /intents/:id must not become an existence oracle: if
+// ruled. GET /intents/:id must not become an existence oracle: if
 // somebody else's real intent answered differently from a made-up one, guessing
 // ids would confirm another wallet's activity.
 describe('an intent is not an existence oracle', () => {
@@ -320,7 +320,7 @@ describe('an intent is not an existence oracle', () => {
   it('lets the owning wallet read its own', async () => {
     store.reserve({
       intentId: 'mine-alpha',
-      agentId: 'alpha:darknetclient',
+      agentId: 'alpha:client',
       stage: store.currentStage(),
       amount: 1n,
       capWei: 10n ** 21n,

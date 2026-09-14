@@ -56,11 +56,11 @@ in the service cannot merge.
 
 ## Consuming it
 
-Another repository takes this one as a git submodule pinned to a tag (the
-mesh-agent arena mounts it at `chain/`, and every path on that side — the
-Dockerfile `COPY`, `compose -f chain/compose.chain.yml`, the workspace members
-— works unchanged). Tags are the interface: `v0.1.1` is the first tag a
-consumer at a different directory depth can build (see `.dockerignore` for why).
+A harness takes this repo as a git submodule pinned to a tag, mounted at
+`chain/`; every path on that side — the Dockerfile `COPY`, `compose -f
+chain/compose.chain.yml`, the workspace members — works unchanged. Tags are the
+interface: `v0.1.1` is the first tag a consumer at a different directory depth
+can build (see `.dockerignore` for why).
 
 ## Trust model, in one paragraph
 
@@ -74,5 +74,5 @@ refusing to start against anything that is not a private chain.
 ## Status
 
 Pre-release. Design notes and the decision record live in the maintainers'
-vault; the sequence of increments is: repo split (done) → modules and manifest →
+own notes; the sequence of increments is: repo split (done) → modules and manifest →
 generic call op → second currency and converter.

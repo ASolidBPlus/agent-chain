@@ -1,4 +1,4 @@
-// The "play money is structural, not configured" guards (spec S4, ruled 20:12
+// The "play money is structural, not configured" guards (spec S4, ruled
 // UTC). These are the tests that stop the property from quietly becoming false
 // the day someone repoints RPC_URL, so they assert on PROCESS EXIT, not on a
 // function return: the guarantee is "chain-svc cannot run", not "a helper

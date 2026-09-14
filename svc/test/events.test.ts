@@ -115,7 +115,7 @@ describe('event delivery', () => {
   });
 });
 
-// The `via` marker on agent.spend (ruled 21:27 UTC).
+// The `via` marker on agent.spend (ruled).
 describe('how a spend says it arrived', () => {
   it('reads the wallet-mcp marker, and treats everything else as direct', () => {
     expect(spendVia('wallet-mcp/0.1.0')).toBe('mcp');
@@ -365,8 +365,8 @@ describe('the intent anomaly', () => {
     store.close();
   });
 
-  // THE PREMISE OF THE NARROWING, verified rather than asserted (mesh-planner,
-  // 09:41). The whole scope decision rests on the split-brain double-spend
+  // THE PREMISE OF THE NARROWING, verified rather than asserted.
+  // The whole scope decision rests on the split-brain double-spend
   // reserving the SAME intent id in BOTH stores - the retry carries the
   // idempotency key, and `reserve` dedupes on it - so each store sees an id it
   // reserved and its own count reaches two.
@@ -609,7 +609,7 @@ describe('the intent anomaly', () => {
     store.close();
   });
 
-  // THE NARROWING, ruled 09:41. An id NOBODY here reserved is another party's
+  // THE NARROWING, ruled. An id NOBODY here reserved is another party's
   // traffic on a shared chain, or a direct caller moving their own funds under
   // a self-chosen id - neither is the game's double-spend, which is reusing a
   // RESERVED allotment to land the same authorised spend twice. Previously this
@@ -741,7 +741,7 @@ describe('sweepOnce', () => {
   });
 
   // EMISSION ROWS ARE IMMORTAL, which is a SEPARATE property from the counter
-  // being stage-blind - build-triage's point, and they were right that one
+  // being stage-blind - a review finding, and it was right that one
   // guard does not pin both.
   //
   // The query mutant only covers a stage term in the WHERE. The same hazard
@@ -844,7 +844,7 @@ describe('sweepOnce', () => {
     store.close();
   });
 
-  // RIDER 2 (10:41): a terminal intent answers with its status, and the SAME id
+  // RIDER 2: a terminal intent answers with its status, and the SAME id
   // is refused rather than re-reserved. This is the measured double-charge -
   // "re-reserving the same intent id -> reserved NOT duplicate" - turned into a
   // standing assertion instead of a fixed bug.

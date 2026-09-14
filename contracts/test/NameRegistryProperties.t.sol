@@ -44,7 +44,7 @@ contract NameRegistryPropertiesTest is Test {
     /// Every byte value, checked against an independent statement of the rule.
     /// Uppercase is in the allowed set deliberately: `aIpha.vee` against
     /// `alpha.vee` is a game mechanic, and a charset that rejected the capital
-    /// would make it unregistrable (spec S3.2, ruled 19:45 UTC).
+    /// would make it unregistrable (spec S3.2, ruled).
     function testFuzz_CharsetAcceptsExactlyTheAllowedBytes(uint8 raw) public {
         NameRegistry registry = new NameRegistry(treasury);
         bytes1 c = bytes1(raw);
@@ -106,7 +106,7 @@ contract NameRegistryPropertiesTest is Test {
         assertEq(registry.resolve(string(upper)), other);
     }
 
-    /// The regression guard for canonical-name squatting (ruled 22:20 UTC),
+    /// The regression guard for canonical-name squatting (ruled),
     /// and the reason it is caller-varying rather than a single example: the
     /// attack is that ANY address can take a name, and a name is a unique
     /// resource. A canonical id is derivable from an org label and a local id

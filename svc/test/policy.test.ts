@@ -19,7 +19,7 @@ function codeOf(fn: () => unknown): string {
 }
 
 
-// The trailing-star form, and the agreement between the two copies. `arena:*`
+// The trailing-star form, and the agreement between the two copies. `acme:*`
 // matched NOTHING before this: it fell through to the literal comparison and
 // was compared as the seven-character string. In an allow list that refuses
 // everything, which is loud; in a DENY list it denies nothing, which is not.
@@ -28,10 +28,10 @@ describe('the pattern dialect', () => {
     ['*', 'anything', true],
     ['*.vee', 'runner1.vee', true],
     ['*.vee', 'orch:runner1', false],
-    ['arena:*', 'arena:runner1', true],
-    ['arena:*', 'arena:', true],
-    ['arena:*', 'orch:runner1', false],
-    ['arena:*', 'xarena:runner1', false],
+    ['acme:*', 'acme:runner1', true],
+    ['acme:*', 'acme:', true],
+    ['acme:*', 'orch:runner1', false],
+    ['acme:*', 'xacme:runner1', false],
     ['orch:mark', 'orch:mark', true],
     ['orch:mark', 'orch:marker', false],
   ];
@@ -51,16 +51,16 @@ describe('the pattern dialect', () => {
   // Asserted through the LISTS, not just the matcher, because deny and allow
   // consume it differently and the deny direction is the one that fails quietly.
   it('a trailing-star deny entry actually denies', () => {
-    const p = { ...POLICY, allow: ['*'], deny: ['arena:*'] };
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'arena:runner1', amount: 1n }))).toBe(
+    const p = { ...POLICY, allow: ['*'], deny: ['acme:*'] };
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n }))).toBe(
       'counterparty_denied',
     );
     expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n }))).toBe('no-error');
   });
 
   it('a trailing-star allow entry actually allows', () => {
-    const p = { ...POLICY, allow: ['arena:*'], deny: [] };
-    expect(codeOf(() => enforcePolicy({ policy: p, to: 'arena:runner1', amount: 1n }))).toBe('no-error');
+    const p = { ...POLICY, allow: ['acme:*'], deny: [] };
+    expect(codeOf(() => enforcePolicy({ policy: p, to: 'acme:runner1', amount: 1n }))).toBe('no-error');
     expect(codeOf(() => enforcePolicy({ policy: p, to: 'orch:mark', amount: 1n }))).toBe(
       'counterparty_denied',
     );
@@ -76,20 +76,20 @@ describe('the pattern dialect', () => {
   });
 
   it('accepts every form the dialect does implement', () => {
-    expect(() => assertPatternsUsable(['*', '*.vee', 'arena:*', 'orch:mark'], 'allow')).not.toThrow();
+    expect(() => assertPatternsUsable(['*', '*.vee', 'acme:*', 'orch:mark'], 'allow')).not.toThrow();
   });
 });
 
-// The four shapes mesh-agent-builder measured against a live stack, and the
+// The four shapes MEASURED against a live stack, and the
 // asymmetry that made this a ship-blocker: sending NO policy succeeded and fell
 // to defaults, while sending a strictly MORE SPECIFIC one - allow/deny with the
-// caps left to the defaults, the arena's whole use - was refused outright.
+// caps left to the defaults, the harness's whole use - was refused outright.
 describe('a caller-supplied policy is a patch over the kind defaults', () => {
   const DEF: AgentPolicy = { max_per_tx: 100, max_per_stage: 500, allow: ['*.vee'], deny: ['treasury.vee'] };
 
-  it('accepts the shape the arena sends: allow and deny, no caps', () => {
-    const p = mergePolicy({ allow: ['arena:*'], deny: ['treasury.vee'] }, DEF);
-    expect(p.allow).toEqual(['arena:*']);
+  it('accepts the shape the harness sends: allow and deny, no caps', () => {
+    const p = mergePolicy({ allow: ['acme:*'], deny: ['treasury.vee'] }, DEF);
+    expect(p.allow).toEqual(['acme:*']);
     expect(p.max_per_tx).toBe(100); // fell to the default
     expect(p.max_per_stage).toBe(500);
   });
@@ -100,7 +100,7 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
   });
 
   // A cap IS an amount, and every other amount on these wires is a decimal
-  // string. The arena's schema types caps with the same VeeString as the rest.
+  // string. The harness's schema types caps with the same VeeString as the rest.
   it('accepts STRING caps, which the amount convention requires', () => {
     const p = mergePolicy({ max_per_tx: '25', max_per_stage: '100', allow: ['*'], deny: [] }, DEF);
     expect(capToWei(p.max_per_tx)).toBe(25n * 10n ** 18n);

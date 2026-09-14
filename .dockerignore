@@ -8,7 +8,7 @@
 # chain-svc died with `ENOENT reading "/app/svc/node_modules/viem"`.
 #
 # WHY THIS DID NOT BITE BEFORE THE SPLIT, because the obvious answer is wrong:
-# mesh-agent's root .dockerignore says a bare `node_modules`, which matches the
+# the harness's root .dockerignore says a bare `node_modules`, which matches the
 # CONTEXT ROOT ONLY — chain/svc/node_modules was copied into that image too.
 # It worked because /app/chain/svc/node_modules is three levels below /app, so
 # the same `../../../` landed on the root node_modules by coincidence of DEPTH.

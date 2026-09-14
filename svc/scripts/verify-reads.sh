@@ -6,9 +6,9 @@
 #   ./svc/scripts/verify-reads.sh
 set -euo pipefail
 
-IMAGE=${IMAGE:-powerout-anvil:dev}
-NAME=${NAME:-powerout-anvil-svc-verify}
-VOLUME=${VOLUME:-powerout-chain-state-svc-verify}
+IMAGE=${IMAGE:-agent-chain-anvil:dev}
+NAME=${NAME:-agent-chain-anvil-svc-verify}
+VOLUME=${VOLUME:-agent-chain-state-svc-verify}
 RPC=${RPC:-http://127.0.0.1:8545}
 PORT=${PORT:-7000}
 TOKEN=${CHAIN_SVC_TOKEN:-verify-token}
@@ -82,7 +82,7 @@ code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 body() { curl -s "$@"; }
 echo "no token           -> $(code "http://127.0.0.1:$PORT/supply")"
 echo "wrong token        -> $(code -H "Authorization: Bearer wrong" "http://127.0.0.1:$PORT/supply")"
-echo "bare local id      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/darknetclient") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/darknetclient")"
+echo "bare local id      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/client") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/client")"
 echo "two-colon origin   -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/orch%3Apod1%3Aalice") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/orch%3Apod1%3Aalice")"
 echo "unknown alias      -> $(code "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.vee") $(body "${A[@]}" "http://127.0.0.1:$PORT/resolve/nobody.vee")"
 

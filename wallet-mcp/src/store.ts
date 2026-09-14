@@ -1,6 +1,6 @@
 // The dedupe ledger and local spend record.
 //
-// A JSON file with atomic replace, NOT sqlite (ruled 20:07 UTC): this package
+// A JSON file with atomic replace, NOT sqlite (ruled): this package
 // is imported by org-core as a library, so it must carry no native dependency
 // and run under bun or node unchanged. The state is small - a map of intent ids
 // to results - and a whole-file rewrite is cheaper than a dependency.

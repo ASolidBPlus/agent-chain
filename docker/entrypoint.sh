@@ -32,7 +32,7 @@ STATE_FILE="${ANVIL_STATE_FILE:-/state/anvil.json}"
 # NOTE: spec S2 originally listed `--block-time 0` for instant mining. Anvil
 # 1.8.1 rejects it ("Duration must be greater than 0") - instant mining is what
 # anvil does by DEFAULT when --block-time is omitted, which is why it is omitted
-# here. Ruled 19:40 UTC; S2 corrected.
+# here. ruled; S2 corrected.
 # -q because anvil's startup banner prints the MNEMONIC and every derived
 # PRIVATE KEY to stdout, and account 0 is the treasury - the one key that can
 # mint. `docker logs` is not a secret store: it is readable by anyone on the

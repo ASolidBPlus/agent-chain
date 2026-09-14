@@ -21,13 +21,13 @@ function codeOf(fn: () => unknown): string {
 describe('canonical agent ids', () => {
   it('accepts a qualified lowercase id', () => {
     expect(assertCanonicalAgentId('orch:shadowbroker')).toBe('orch:shadowbroker');
-    expect(assertCanonicalAgentId('alpha:darknetclient')).toBe('alpha:darknetclient');
+    expect(assertCanonicalAgentId('alpha:client')).toBe('alpha:client');
   });
 
   // Criterion 9: a bare local id is not an identity the ledger can key on,
   // because local ids collide across meshes.
   it('rejects a bare local id', () => {
-    expect(codeOf(() => assertCanonicalAgentId('darknetclient'))).toBe('invalid_agent_id');
+    expect(codeOf(() => assertCanonicalAgentId('client'))).toBe('invalid_agent_id');
   });
 
   // Criterion 9: `orch:pod1:alice` is a relayed-topic DISPLAY artefact. If it
@@ -98,7 +98,7 @@ describe('lookup names', () => {
   // lookup that reports it unknown - not this validator. Criterion 9 expects
   // `unknown_name`, and that only happens if this lets it through.
   it('lets a bare local id through so the registry can report it unknown', () => {
-    expect(assertLookupName('darknetclient')).toBe('darknetclient');
+    expect(assertLookupName('client')).toBe('client');
   });
 
   it('rejects a two-colon origin string', () => {
@@ -144,7 +144,7 @@ describe('key file names', () => {
   });
 
   it('leaves no separator or traversal sequence in the result', () => {
-    const name = keyFileName('alpha:darknetclient');
+    const name = keyFileName('alpha:client');
     expect(name).not.toContain('/');
     expect(name).not.toContain('..');
   });

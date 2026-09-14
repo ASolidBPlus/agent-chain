@@ -9,8 +9,8 @@
 #     bun run typecheck            -> exit 0
 #     tsc --noEmit -p chain/svc    -> exit 2
 #
-# arena/ was the first instance of this class and was fixed by building EVERY
-# arena file rather than a hand-picked entry list. This is the same fix one
+# A directory with no tsconfig was the first instance of this class, fixed by
+# building EVERY file in it rather than a hand-picked entry list. Same fix one
 # level up: discover every tsconfig, so package N+1 is covered by construction
 # instead of by somebody remembering to add it to a list. An enumerated include
 # silently stops covering what comes next, which is the whole failure mode.
@@ -96,7 +96,7 @@ _diag() {
     echo "--- verbatim output of the failing run ---"
     cat "$1"
   } | tee -a "$DIAG" >&2
-  echo "arena: diagnostic written to $DIAG" >&2
+  echo "agent-chain: diagnostic written to $DIAG" >&2
 }
 
 fails=0
@@ -144,11 +144,11 @@ done
 echo
 # ── Coverage: keyed on what tsc ACTUALLY PARSES, not on what declares itself ──
 #
-# Discovering "every directory with a tsconfig" would not have found arena/, the
+# Discovering "every directory with a tsconfig" would not have found the
 # founding member of this class — it has no tsconfig and no package.json, and
 # having none is WHY it was uncovered. A discovery keyed on a declaration only
 # finds members that opted in, and the ones worth hunting are precisely those
-# that never did. Worse, it would leave arena/ sitting behind a control named
+# that never did. Worse, it would leave that directory behind a control named
 # "every package", which reads as exhaustive: a documented gap replaced by a
 # rule that appears to cover it is worse than the documented gap.
 #
@@ -225,7 +225,7 @@ if [ "${#UNCOVERED[@]}" -ne 0 ]; then
   echo "Add them to a tsconfig 'include', or give their directory its own tsconfig."
   echo "Note that being built (e.g. by 'bun build') is NOT type coverage: a build"
   echo "transpiles and STRIPS types without checking them, so a type error there"
-  echo "still reaches main. That is exactly how arena/ looked covered and wasn't."
+  echo "still reaches main. That is exactly how such a directory looked covered."
   # ON THIS PATH TOO. The diagnostic exists because the state is gone by the time
   # anyone looks, and a refusal about the SHAPE of the repo is exactly where that
   # bites — it was written only on the tsc-failure path, so the two refusals that

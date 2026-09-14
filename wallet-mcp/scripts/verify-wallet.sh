@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Runnable evidence for spec S8 criterion 4: brings up the chain and chain-svc,
 # spawns two wallets, then drives wallet-mcp OVER STDIO with a real MCP client
-# (scripts/mcp-probe.ts) - the same transport mesh-agent uses.
+# (scripts/mcp-probe.ts) - the same transport the harness uses.
 # Needs Docker and Foundry.
 set -euo pipefail
 
-IMAGE=${IMAGE:-powerout-anvil:dev}; NAME=${NAME:-powerout-anvil-wallet}; VOLUME=${VOLUME:-powerout-wallet-state}
+IMAGE=${IMAGE:-agent-chain-anvil:dev}; NAME=${NAME:-agent-chain-anvil-wallet}; VOLUME=${VOLUME:-agent-chain-wallet-state}
 RPC=${RPC:-http://127.0.0.1:8545}; PORT=${PORT:-7005}; TOKEN=${CHAIN_SVC_TOKEN:-wallet-verify-token}
 MNEMONIC="test test test test test test test test test test test junk"
 HERE="$(cd "$(dirname "$0")" && pwd)"; MCP="$HERE/.."; SVC="$MCP/../svc"
@@ -37,7 +37,7 @@ jget() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 # overdraft, which is a mistake this suite has already made once.
 SB=$(curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:shadowbroker","fundVee":1000,"kind":"agent","alias":"shadowbroker.vee"}')
 WALLET_TOKEN=$(echo "$SB" | jget "['walletToken']")
-curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:darknetclient","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
+curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"alpha:client","fundVee":10,"kind":"agent","alias":"alpha.vee"}' >/dev/null
 # A lookalike owned by someone else, for the resolve check.
 curl -fsS "${A[@]}" -X POST "$U/wallets" -d '{"agentId":"orch:scammer","fundVee":0,"kind":"agent"}' >/dev/null
 curl -fsS "${A[@]}" -X POST "$U/aliases" -d '{"agentId":"orch:scammer","alias":"aIpha.vee"}' >/dev/null

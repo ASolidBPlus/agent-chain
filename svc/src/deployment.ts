@@ -11,7 +11,7 @@
 // re-spawn never re-registers the name on the new registry. `DELETE /wallets`
 // retires rather than deletes and keeps the id, so re-creating returns the
 // retired wallet. Every wallet that had a key becomes permanently unresolvable,
-// and the arena's seat is a scenario that cannot spin up at all.
+// and the harness's seat is a scenario that cannot spin up at all.
 //
 // AND THE SYMPTOM POINTS AT THE ONE COMPONENT THAT IS FINE. The caller sees
 // `unknown_name`, which sends the reader to the registry - which is behaving

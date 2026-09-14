@@ -2,7 +2,7 @@
   "_comment": [
     "PROVISIONAL GAME BALANCE, not engineering constants. These are the caps a",
     "wallet gets when POST /wallets carries no explicit `policy` object, chosen",
-    "by powerout-planner (2026-09-08) and to be TUNED BY JOEL through the game",
+    "as a starting point, and to be TUNED BY THE FACILITATOR through the game",
     "config - Decision Ledger D8. Change them here rather than in code, and do",
     "not treat a number in this file as load-bearing for correctness.",
     "WHERE THE CAPS ARE ACTUALLY ENFORCED, because this comment used to send you",
@@ -16,7 +16,7 @@
     "these numbers and want to know what will actually stop a spend, read",
     "Store.reserve in chain-svc, not the policy layer here.",
     "Caps are DECIMAL STRINGS of whole VEE, matching every other amount on these",
-    "wires (ruled 07:58). An integer JSON number is still accepted on the wire and",
+    "wires (ruled). An integer JSON number is still accepted on the wire and",
     "normalised; a non-integer number is refused invalid_amount rather than",
     "rounded, because a cap is an amount and silent-wrong on an amount is the one",
     "failure this system is built to remove.",

@@ -1,6 +1,6 @@
 // §5: a bare id resolves within the caller's own namespace, and nowhere else.
 //
-// dana was shown `attacker` by the mesh, the registry holds `arena:attacker`,
+// dana was shown `attacker` by the mesh, the registry holds `acme:attacker`,
 // and returning an unsolicited bribe failed on the gap between the id a model
 // SEES and the id the registry HOLDS. The MCP worked and the persona worked;
 // the boundary refused a correct intent.
@@ -49,8 +49,8 @@ const codeOf = async (fn: () => Promise<unknown>) => {
 
 describe('bare ids resolve in the caller own namespace', () => {
   it('resolves a bare peer through the namespace, reporting own_namespace', async () => {
-    const r = await resolveBareName(registry({ 'arena:toby': 'arena:toby' }), 'toby', 'arena');
-    expect(r.canonical).toBe('arena:toby');
+    const r = await resolveBareName(registry({ 'acme:toby': 'acme:toby' }), 'toby', 'acme');
+    expect(r.canonical).toBe('acme:toby');
     expect(r.resolvedVia).toBe('own_namespace');
     expect(r.bare).toBe(true);
   });
@@ -58,20 +58,20 @@ describe('bare ids resolve in the caller own namespace', () => {
   // An exactly registered name always wins, so this rule can never redirect a
   // name that already resolves.
   it('prefers an exactly registered name, reporting exact', async () => {
-    const r = await resolveBareName(registry({ 'treasury.vee': 'treasury.vee' }), 'treasury.vee', 'arena');
+    const r = await resolveBareName(registry({ 'treasury.vee': 'treasury.vee' }), 'treasury.vee', 'acme');
     expect(r.canonical).toBe('treasury.vee');
     expect(r.resolvedVia).toBe('exact');
   });
 
   // THE REFUSAL THE FALLBACK IS PAID FOR. Whoever registers the vanity alias
   // `toby` would otherwise receive every in-namespace payment meant for
-  // `arena:toby` - a phishing primitive on the money path.
+  // `acme:toby` - a phishing primitive on the money path.
   it('REFUSES when both readings exist, rather than picking either', async () => {
-    const both = registry({ toby: 'alpha:squatter', 'arena:toby': 'arena:toby' });
-    expect(await codeOf(() => resolveBareName(both, 'toby', 'arena'))).toBe('ambiguous_name');
+    const both = registry({ toby: 'alpha:squatter', 'acme:toby': 'acme:toby' });
+    expect(await codeOf(() => resolveBareName(both, 'toby', 'acme'))).toBe('ambiguous_name');
   });
 
-  // A WALLET ALIASING ITSELF IS NOT AMBIGUOUS. `arena:toby` registering the
+  // A WALLET ALIASING ITSELF IS NOT AMBIGUOUS. `acme:toby` registering the
   // alias `toby` makes both readings resolve to THE SAME wallet - ordinary,
   // harmless, and exactly what a persona would do to be addressable by the id
   // its peers see.
@@ -79,22 +79,22 @@ describe('bare ids resolve in the caller own namespace', () => {
   // Refusing it produced a 409 whose advice named one id twice, raised a
   // chain.name_collision against an agent that had done nothing, and - the part
   // that matters - would have refused this rule's own motivating case: had
-  // `arena:attacker` aliased itself `attacker`, dana's return would have been
+  // `acme:attacker` aliased itself `attacker`, dana's return would have been
   // refused by the change written so it would not be.
   it('is NOT ambiguous when both readings are the same wallet', async () => {
-    const selfAliased = registry({ toby: 'arena:toby', 'arena:toby': 'arena:toby' });
-    const r = await resolveBareName(selfAliased, 'toby', 'arena');
-    expect(r.canonical).toBe('arena:toby');
+    const selfAliased = registry({ toby: 'acme:toby', 'acme:toby': 'acme:toby' });
+    const r = await resolveBareName(selfAliased, 'toby', 'acme');
+    expect(r.canonical).toBe('acme:toby');
     expect(r.resolvedVia).toBe('exact'); // the registered name wins; nothing refuses
   });
 
   // The mutant the spec asks for by name: picking EITHER candidate is the bug.
   it('names both candidates in the refusal, so neither can be guessed silently', async () => {
-    const both = registry({ toby: 'alpha:squatter', 'arena:toby': 'arena:toby' });
+    const both = registry({ toby: 'alpha:squatter', 'acme:toby': 'acme:toby' });
     let detail = '';
-    try { await resolveBareName(both, 'toby', 'arena'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
+    try { await resolveBareName(both, 'toby', 'acme'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
     expect(detail).toContain('alpha:squatter');
-    expect(detail).toContain('arena:toby');
+    expect(detail).toContain('acme:toby');
   });
 
   // ADDRESSES, NOT CANONICALS, and this is the vector that proves which.
@@ -109,14 +109,14 @@ describe('bare ids resolve in the caller own namespace', () => {
   // derives each address FROM its canonical, so the two comparisons agree on
   // every vector it can express. This is the one it cannot.
   it('refuses two DIFFERENT wallets that both have no canonical name', async () => {
-    const burners = registry({ ghost: null, 'arena:ghost': null });
-    expect(await codeOf(() => resolveBareName(burners, 'ghost', 'arena'))).toBe('ambiguous_name');
+    const burners = registry({ ghost: null, 'acme:ghost': null });
+    expect(await codeOf(() => resolveBareName(burners, 'ghost', 'acme'))).toBe('ambiguous_name');
   });
 
   // NEVER CROSS-NAMESPACE. A qualified id resolves exactly as it always did.
   it('does not reach into another namespace for a bare id', async () => {
-    const other = registry({ 'alpha:darknetclient': 'alpha:darknetclient' });
-    expect(await codeOf(() => resolveBareName(other, 'darknetclient', 'orch'))).toBe('unknown_name');
+    const other = registry({ 'alpha:client': 'alpha:client' });
+    expect(await codeOf(() => resolveBareName(other, 'client', 'orch'))).toBe('unknown_name');
   });
 
   it('leaves a qualified id resolving exactly as before', async () => {
@@ -126,7 +126,7 @@ describe('bare ids resolve in the caller own namespace', () => {
   });
 
   // THE CASE EDGE. Canonical ids are lowercase-only; aliases preserve case for
-  // the lookalike mechanic. `arena:aIpha` is not a canonical id, so path (2) is
+  // the lookalike mechanic. `acme:aIpha` is not a canonical id, so path (2) is
   // SKIPPED - never lowercased (it would key money under an id the caller did
   // not ask for) and never a 400 (that would blame the caller for a string the
   // server built).
@@ -134,19 +134,19 @@ describe('bare ids resolve in the caller own namespace', () => {
     let detail = '';
     const seen: string[] = [];
     const lookup = async (n: string) => { seen.push(n); return null; };
-    try { await resolveBareName(lookup, 'aIpha', 'arena'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
-    expect(seen).toEqual(['aIpha']);          // arena:aIpha was never constructed
+    try { await resolveBareName(lookup, 'aIpha', 'acme'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
+    expect(seen).toEqual(['aIpha']);          // acme:aIpha was never constructed
     expect(detail).toContain('not a valid local id');
   });
 
   // DO NOT FLATTEN, on the failure side: a student who reads "no wallet is
-  // registered as toby" while `arena:toby` sits in the registry goes hunting a
+  // registered as toby" while `acme:toby` sits in the registry goes hunting a
   // registration bug that does not exist.
   it('names BOTH attempts when neither resolves', async () => {
     let detail = '';
-    try { await resolveBareName(registry({}), 'toby', 'arena'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
+    try { await resolveBareName(registry({}), 'toby', 'acme'); } catch (e) { detail = (e as HttpError).detail ?? ''; }
     expect(detail).toContain('toby');
-    expect(detail).toContain('arena:toby');
+    expect(detail).toContain('acme:toby');
   });
 });
 
@@ -176,14 +176,14 @@ const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'));
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));
   writeFileSync(
-    join(dir, 'arena%3Adana.json'),
+    join(dir, 'acme%3Adana.json'),
     JSON.stringify({
-      agentId: 'arena:dana', max_per_tx: 1000, max_per_stage: 5000,
+      agentId: 'acme:dana', max_per_tx: 1000, max_per_stage: 5000,
       allow: ['*'], deny: [], frozen: false,
     }),
   );
   const store = new Store(':memory:');
-  store.markSpawned('arena:dana', addr('9'), null);
+  store.markSpawned('acme:dana', addr('9'), null);
   const lookup = registry(entries);
   const t = new Treasury(
     { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json') } as Config,
@@ -202,7 +202,7 @@ function detector(entries: Record<string, string | null>) {
 }
 
 const send = (t: Treasury, to: string, intentId: string) =>
-  t.signTransfer({ scope: 'wallet', agentId: 'arena:dana' }, { to, vee: '1', intentId });
+  t.signTransfer({ scope: 'wallet', agentId: 'acme:dana' }, { to, vee: '1', intentId });
 
 describe('the bare-id detector', () => {
   // CASE 1 of 4: a legitimate colon-less platform name. Using it is CORRECT, so
@@ -211,7 +211,7 @@ describe('the bare-id detector', () => {
   it('does not count an exactly registered colon-less name', async () => {
     const { t, store } = detector({ 'treasury.vee': 'treasury.vee' });
     await send(t, 'treasury.vee', 'i1').catch(() => undefined);
-    expect(store.bareIdCount('arena:dana')).toBe(0);
+    expect(store.bareIdCount('acme:dana')).toBe(0);
     store.close();
   });
 
@@ -221,7 +221,7 @@ describe('the bare-id detector', () => {
   it('counts a bare id whose fallback was skipped for shape', async () => {
     const { t, store } = detector({});
     await send(t, 'aIpha', 'i2').catch(() => undefined);
-    expect(store.bareIdCount('arena:dana')).toBe(1);
+    expect(store.bareIdCount('acme:dana')).toBe(1);
     store.close();
   });
 
@@ -231,7 +231,7 @@ describe('the bare-id detector', () => {
   // So this asserts the EVENT, which is the part that reaches a facilitator;
   // the column is only the durable count behind it.
   it('DELIVERS the bare-id signal through the outbox, not just the column', async () => {
-    const { t, store } = detector({ 'arena:toby': 'arena:toby' });
+    const { t, store } = detector({ 'acme:toby': 'acme:toby' });
     await send(t, 'toby', 'e1').catch(() => undefined);
 
     const events = store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id');
@@ -239,7 +239,7 @@ describe('the bare-id detector', () => {
     const payload = JSON.parse(events[0]!.payload) as {
       agentId: string; bare: string; outcome: string; count: number;
     };
-    expect(payload.agentId).toBe('arena:dana');
+    expect(payload.agentId).toBe('acme:dana');
     expect(payload.bare).toBe('toby');
     expect(payload.outcome).toBe('own_namespace');
     // The running total travels with the event, so the trend is visible without
@@ -253,7 +253,7 @@ describe('the bare-id detector', () => {
   // survived - the third fixture in this PR too uniform to express the
   // difference it was supposed to be testing.
   it('carries a RUNNING total, not a constant', async () => {
-    const { t, store } = detector({ 'arena:toby': 'arena:toby' });
+    const { t, store } = detector({ 'acme:toby': 'acme:toby' });
     await send(t, 'toby', 'e1a').catch(() => undefined);
     await send(t, 'toby', 'e1b').catch(() => undefined);
 
@@ -289,7 +289,7 @@ describe('the bare-id detector', () => {
 
   it('marks a fallback skipped for shape as shape_skipped, not unknown', async () => {
     const { t, store } = detector({});
-    // Mixed case: `arena:aIpha` is not a canonical id, so the candidate is
+    // Mixed case: `acme:aIpha` is not a canonical id, so the candidate is
     // never constructed and the fallback is never attempted.
     await send(t, 'aIpha', 'e2b').catch(() => undefined);
     const events = store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id');
@@ -301,17 +301,17 @@ describe('the bare-id detector', () => {
   // The taught form must stay silent, or the facilitator's timeline fills with
   // agents doing it right.
   it('emits NOTHING for a qualified id', async () => {
-    const { t, store } = detector({ 'arena:toby': 'arena:toby' });
-    await send(t, 'arena:toby', 'e3').catch(() => undefined);
+    const { t, store } = detector({ 'acme:toby': 'acme:toby' });
+    await send(t, 'acme:toby', 'e3').catch(() => undefined);
     expect(store.dueEvents(10).filter((e) => e.kind === 'chain.bare_id')).toHaveLength(0);
     store.close();
   });
 
   // CASE 3: the case that used to fail with unknown_name and now succeeds.
   it('counts a bare id that the namespace fallback resolved', async () => {
-    const { t, store } = detector({ 'arena:toby': 'arena:toby' });
+    const { t, store } = detector({ 'acme:toby': 'acme:toby' });
     await send(t, 'toby', 'i3').catch(() => undefined);
-    expect(store.bareIdCount('arena:dana')).toBe(1);
+    expect(store.bareIdCount('acme:dana')).toBe(1);
     store.close();
   });
 
@@ -321,10 +321,10 @@ describe('the bare-id detector', () => {
   // two meanings in one number, re-merging what §4's repeat_emission /
   // foreign_sender split keeps apart.
   it('does not count an ambiguity, and emits a collision signal naming both', async () => {
-    const { t, store } = detector({ toby: 'alpha:squatter', 'arena:toby': 'arena:toby' });
+    const { t, store } = detector({ toby: 'alpha:squatter', 'acme:toby': 'acme:toby' });
     const code = await codeOf(() => send(t, 'toby', 'i4'));
     expect(code).toBe('ambiguous_name');
-    expect(store.bareIdCount('arena:dana')).toBe(0);
+    expect(store.bareIdCount('acme:dana')).toBe(0);
 
     const events = store.dueEvents(10).filter((e) => e.kind === 'chain.name_collision');
     expect(events).toHaveLength(1);
@@ -339,16 +339,16 @@ describe('the bare-id detector', () => {
   it('counts a bare id that resolved to nothing', async () => {
     const { t, store } = detector({});
     await send(t, 'ghost', 'i5').catch(() => undefined);
-    expect(store.bareIdCount('arena:dana')).toBe(1);
+    expect(store.bareIdCount('acme:dana')).toBe(1);
     store.close();
   });
 
   // A QUALIFIED id is the taught form. It must never count, or the detector
   // reads highest for the personas that learned.
   it('never counts a qualified id', async () => {
-    const { t, store } = detector({ 'arena:toby': 'arena:toby' });
-    await send(t, 'arena:toby', 'i6').catch(() => undefined);
-    expect(store.bareIdCount('arena:dana')).toBe(0);
+    const { t, store } = detector({ 'acme:toby': 'acme:toby' });
+    await send(t, 'acme:toby', 'i6').catch(() => undefined);
+    expect(store.bareIdCount('acme:dana')).toBe(0);
     store.close();
   });
 });

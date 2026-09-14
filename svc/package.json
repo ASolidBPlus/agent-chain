@@ -1,9 +1,9 @@
 {
-  "name": "@powerout/chain-svc",
+  "name": "@agent-chain/chain-svc",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Treasury, wallet spawn, name resolution and the chain event tail for Operation PowerOUT",
+  "description": "Treasury, wallet spawn, name resolution and the chain event tail for the private chain",
   "scripts": {
     "start": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",

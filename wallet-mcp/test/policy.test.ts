@@ -81,7 +81,7 @@ describe('reading the policy file', () => {
   });
 });
 
-// Ruled 03:55: `vee` is a decimal string on every money wire. A whole NUMBER is
+// ruled: `vee` is a decimal string on every money wire. A whole NUMBER is
 // tolerated because a model writes 50 as readily as "50" and an integer is
 // exactly representable; a fractional number is REFUSED, never rounded.
 describe('normaliseVee', () => {
@@ -123,7 +123,7 @@ describe('normaliseVee', () => {
 });
 
 // chain-svc WRITES this file and wallet-mcp READS it, so the reader must accept
-// everything the writer emits. Caps became decimal strings (ruled 07:58); a
+// everything the writer emits. Caps became decimal strings (ruled); a
 // reader still demanding numbers would reject every policy chain-svc produces
 // and the model would see "no policy" - which fails OPEN to chain-svc's
 // boundary rather than closed, so nothing would visibly break until a cap
@@ -163,7 +163,7 @@ describe('reading the policy chain-svc actually writes', () => {
   });
 });
 
-// Rider 1 (10:41): the tombstone invariant is chain-svc's AND this ledger's.
+// Rider 1: the tombstone invariant is chain-svc's AND this ledger's.
 // A persona re-sending under a used id must meet the ORIGINAL outcome, and an
 // entry that can disappear is one that stops answering.
 describe('the intent ledger never forgets', () => {

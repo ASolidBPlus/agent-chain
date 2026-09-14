@@ -24,18 +24,18 @@ const dbPath = () => join(dir, 'store.sqlite');
 describe('the wallet row records the kind that was enforced', () => {
   it('round-trips each kind', () => {
     const s = new Store(dbPath());
-    s.markSpawned('arena:o', '0x' + '1'.repeat(40), 'org');
-    s.markSpawned('arena:a', '0x' + '2'.repeat(40), 'agent');
-    s.markSpawned('arena:b', '0x' + '3'.repeat(40), 'burner');
-    expect(s.walletRow('arena:o')?.kind).toBe('org');
-    expect(s.walletRow('arena:a')?.kind).toBe('agent');
-    expect(s.walletRow('arena:b')?.kind).toBe('burner');
+    s.markSpawned('acme:o', '0x' + '1'.repeat(40), 'org');
+    s.markSpawned('acme:a', '0x' + '2'.repeat(40), 'agent');
+    s.markSpawned('acme:b', '0x' + '3'.repeat(40), 'burner');
+    expect(s.walletRow('acme:o')?.kind).toBe('org');
+    expect(s.walletRow('acme:a')?.kind).toBe('agent');
+    expect(s.walletRow('acme:b')?.kind).toBe('burner');
     s.close();
   });
 
   it('answers null for a wallet that was never spawned', () => {
     const s = new Store(dbPath());
-    expect(s.walletRow('arena:ghost')).toBeNull();
+    expect(s.walletRow('acme:ghost')).toBeNull();
     s.close();
   });
 
@@ -43,8 +43,8 @@ describe('the wallet row records the kind that was enforced', () => {
   // `'agent'` are different facts and the column exists to keep them apart.
   it('reports an unrecorded kind as null rather than inferring one', () => {
     const s = new Store(dbPath());
-    s.markSpawned('arena:old', '0x' + '4'.repeat(40), null);
-    expect(s.walletRow('arena:old')?.kind).toBeNull();
+    s.markSpawned('acme:old', '0x' + '4'.repeat(40), null);
+    expect(s.walletRow('acme:old')?.kind).toBeNull();
     s.close();
   });
 });
@@ -58,7 +58,7 @@ describe('the v4 upgrade', () => {
   it('leaves pre-migration rows NULL, not backfilled', () => {
     const path = dbPath();
     const s1 = new Store(path);
-    s1.markSpawned('arena:before', '0x' + '5'.repeat(40), 'org');
+    s1.markSpawned('acme:before', '0x' + '5'.repeat(40), 'org');
     s1.close();
 
     // Make it look like a v3 store that never had the column.
@@ -68,8 +68,8 @@ describe('the v4 upgrade', () => {
     db.close();
 
     const s2 = new Store(path);
-    expect(s2.walletRow('arena:before')?.kind).toBeNull();
-    expect(s2.walletRow('arena:before')?.address).toBe('0x' + '5'.repeat(40));
+    expect(s2.walletRow('acme:before')?.kind).toBeNull();
+    expect(s2.walletRow('acme:before')?.address).toBe('0x' + '5'.repeat(40));
     s2.close();
 
     const after = new Database(path);
@@ -83,8 +83,8 @@ describe('the v4 upgrade', () => {
   it('exposes the null count as a single query', () => {
     const path = dbPath();
     const s = new Store(path);
-    s.markSpawned('arena:withkind', '0x' + '6'.repeat(40), 'agent');
-    s.markSpawned('arena:without', '0x' + '7'.repeat(40), null);
+    s.markSpawned('acme:withkind', '0x' + '6'.repeat(40), 'agent');
+    s.markSpawned('acme:without', '0x' + '7'.repeat(40), null);
     s.close();
 
     const db = new Database(path);
