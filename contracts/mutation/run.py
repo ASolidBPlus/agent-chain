@@ -29,6 +29,7 @@ The checks below exist to make the silent direction impossible.
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -244,6 +245,15 @@ def main():
         results.append(died)
 
     print("\n=== restored")
+    # CLEAR THE ARTEFACTS FIRST. Restoring the source is not enough: forge builds
+    # incrementally, so `out/` can still hold an artefact compiled from a mutant
+    # while the source on disk is the original. Any test that cross-checks an
+    # artefact against live bytecode then compares two different builds and fails
+    # on a tree that is actually clean - measured, the Converter's CREATE2 address
+    # assertion, which reads `type(Converter).creationCode` from the artefact and
+    # compares it with what the deploy just created. A restored-state check that
+    # can report a false failure is an instrument nobody can trust either way.
+    shutil.rmtree(os.path.join(ROOT, "out"), ignore_errors=True)
     _, failed_after, _ = parse(run_tests())
     print(f"    failing: {sorted(failed_after) if failed_after else 'none'}")
 
