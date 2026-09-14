@@ -19,7 +19,7 @@ import type { Keystore } from './keystore.ts';
 import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
-import { defaultToken, requireNames } from './modules.ts';
+import { defaultToken, requireNames, resolveToken, type TokenModule } from './modules.ts';
 import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
   type AgentPolicy, type PolicyDefaults, type WalletKind,
   assertPatternsUsable,
@@ -38,10 +38,59 @@ const GAS_ENDOWMENT = parseEther('1');
 /// A caller-supplied policy (hub-core setting per-agent values, spec S4).
 export interface SpawnRequest {
   agentId?: unknown;
+  /// §1. Seed funding per token: `[{ token, amount }]`, `token` a manifest key
+  /// or a symbol like every other token argument. Supersedes `fundVee`, which
+  /// can only ever name the default token - a two-token deployment could not
+  /// fund its second currency at spawn at all.
+  fund?: unknown;
   fundVee?: unknown;
   kind?: unknown;
   alias?: unknown;
   policy?: unknown;
+}
+
+/// §1. `fund?: [{ token, amount }]` — parsed and RESOLVED before any side
+/// effect, so a bad token or a bad amount refuses without leaving a key file.
+///
+/// Each amount is parsed at ITS OWN token's decimals. Parsing them all at the
+/// default token's scale is the increment-3 defect exactly: invisible while
+/// every token is 18 dp, and a 1e12x error the moment one is 6.
+///
+/// A token named TWICE is refused rather than summed or last-wins. Both
+/// readings are defensible, which is what makes guessing between them wrong:
+/// the caller wrote something ambiguous about money.
+function parseFundList(
+  value: unknown,
+  modules: Parameters<typeof resolveToken>[0],
+): Array<{ token: TokenModule; amount: bigint }> {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new HttpError('invalid_request', 'fund must be an array of {token, amount}');
+  }
+  const seen = new Set<string>();
+  return value.map((raw, i) => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new HttpError('invalid_request', `fund[${i}] must be an object {token, amount}`);
+    }
+    const entry = raw as { token?: unknown; amount?: unknown };
+    // `resolveToken` refuses an absent token here rather than defaulting: an
+    // ENTRY IN A LIST that names no token is a mistake, where an absent `token`
+    // on a single-token request is the documented default. The same argument
+    // means different things in the two shapes.
+    if (entry.token === undefined || entry.token === null || entry.token === '') {
+      throw new HttpError('invalid_request', `fund[${i}] must name a token`);
+    }
+    const token = resolveToken(modules, entry.token);
+    if (seen.has(token.key)) {
+      throw new HttpError('invalid_request', `fund names ${token.key} twice; say what it should receive once`);
+    }
+    seen.add(token.key);
+    const amount = parseVee(entry.amount, token.decimals, token.symbol, `fund[${i}].amount`);
+    if (amount <= 0n) {
+      throw new HttpError('invalid_amount', `fund[${i}].amount must be greater than zero`);
+    }
+    return { token, amount };
+  });
 }
 
 export class Spawner {
@@ -96,6 +145,21 @@ export class Spawner {
     // wrong scale.
     const tok = this.chain.modules.tokens[0];
     const fundVee = parseVee(body.fundVee ?? 0, tok?.decimals ?? 18, tok?.symbol ?? 'tokens', 'fundVee');
+
+    // TWO NAMES FOR ONE THING IS TWO THINGS, the same rule the wire alias
+    // follows: a request carrying both is refused rather than resolved by
+    // preferring either. Silently picking one is a guess about which the caller
+    // meant, and the one place a guess is expensive is where it moves money.
+    if (body.fund !== undefined && body.fundVee !== undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'a spawn carries either "fund" or the legacy "fundVee", never both',
+      );
+    }
+    // RESOLVED AND PARSED HERE, before any side effect, so a bad token or a bad
+    // amount refuses without leaving a key file behind - the same position the
+    // module checks below take, for the same reason.
+    const fund = parseFundList(body.fund, this.chain.modules);
     // hub-core may set per-agent caps; otherwise they come by kind from the
     // game-balance file, never from a constant in this module.
     // A supplied policy is a PATCH over the kind defaults, not a complete
@@ -126,6 +190,12 @@ export class Spawner {
         'fundVee requires a token module; omit it or deploy one',
       );
     }
+    // `fund` cannot reach here on a tokenless deployment with entries in it -
+    // `resolveToken` refuses first, by name - so this guards the EMPTY-array
+    // case only, where there is nothing to resolve and therefore nothing to
+    // refuse. Left explicit rather than relying on that: a caller who sent
+    // `fund: []` to a names-only deployment asked for something coherent, and
+    // gets a wallet with no balances, which is what that deployment means.
     if (alias !== undefined && this.chain.modules.names === undefined) {
       throw new HttpError(
         'module_not_deployed',
@@ -158,7 +228,12 @@ export class Spawner {
       : (await this.keystore.create(agentId)).address;
 
     await this.endowGas(address);
-    if (fundVee > 0n) await this.fundVee(address, fundVee);
+    if (fundVee > 0n) await this.fundToken(address, defaultToken(this.chain.modules), fundVee);
+    // ONE RESOLVED TokenModule PER ENTRY, carried into the balance read AND the
+    // transfer - the same discipline set-balance needed: read and write are two
+    // uses of one resolution, and sourcing them separately is what lets a seed
+    // measure one token and move another.
+    for (const entry of fund) await this.fundToken(address, entry.token, entry.amount);
     // REGISTRATION NEEDS A REGISTRY, and a burner deliberately has no name.
     // Both conditions, not just the kind: without this the call reached
     // `requireNames` inside the registry write, threw module_not_deployed, and
@@ -258,10 +333,10 @@ export class Spawner {
     }
   }
 
-  private async fundVee(address: Address, amount: bigint): Promise<void> {
+  private async fundToken(address: Address, token: TokenModule, amount: bigint): Promise<void> {
     try {
       const balance = (await this.chain.publicClient.readContract({
-        address: defaultToken(this.chain.modules).address,
+        address: token.address,
         abi: TokenAbi,
         functionName: 'balanceOf',
         args: [address],
@@ -273,7 +348,7 @@ export class Spawner {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: defaultToken(this.chain.modules).address,
+        address: token.address,
         abi: TokenAbi,
         functionName: 'transfer',
         args: [address, amount - balance],

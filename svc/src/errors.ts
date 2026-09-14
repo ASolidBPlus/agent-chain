@@ -25,6 +25,19 @@ export type ErrorCode =
   | 'over_stage_cap'
   | 'intent_unresolved'
   | 'counterparty_denied'
+  /// §1. The TREASURY holds less of this token than the request moves.
+  ///
+  /// An OPERATOR FACT, withheld from personas: how much the treasury holds is
+  /// the game's supply position, and a persona that could read it from a
+  /// refusal could probe it by funding. It is a platform-scope endpoint, so
+  /// only an operator ever sees this code - but the withholding is declared in
+  /// wallet-mcp's REFUSAL_FOR rather than left to that fact, because "no route
+  /// reaches it" is a property of today's routes.
+  ///
+  /// Never topped up implicitly: the operator mints with
+  /// `admin-call token.mint(treasury, amount)`. A service that minted to cover
+  /// a shortfall would make the supply a function of spending.
+  | 'treasury_insufficient'
   | 'wallet_not_found'
   /// The route needs a module this deployment does not have. 404 because the
   /// endpoint genuinely is not there on this deployment - not 501, which would
@@ -106,6 +119,10 @@ export const STATUS: Record<ErrorCode, number> = {
   // help - it needs reconciliation, not a backoff, so it must not read as 5xx.
   intent_unresolved: 409,
   counterparty_denied: 409,
+  // 409, with the policy refusals: the request was well formed and authorised,
+  // and the state on the far side is what stopped it. Retrying unchanged cannot
+  // help - it needs a mint, which is a different request.
+  treasury_insufficient: 409,
   chain_error: 502,
   chain_unreachable: 503,
   internal_error: 500,

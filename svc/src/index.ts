@@ -112,10 +112,10 @@ async function main(): Promise<void> {
         // writes wallets from, so the warning is about the rules that will
         // actually apply rather than about a second copy of them.
         loadPolicyDefaults(
-        config.policyDefaultsPath,
-        chain.modules.names?.tld,
-        chain.modules.tokens.map((t) => t.key),
-      ),
+          config.policyDefaultsPath,
+          chain.modules.names?.tld,
+          chain.modules.tokens.map((t) => t.key),
+        ),
       ),
     ),
   };

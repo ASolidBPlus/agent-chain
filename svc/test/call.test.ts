@@ -66,6 +66,17 @@ const CONVERTER_ABI = [
     'nonpayable',
   ),
   fn('donate', [{ type: 'address', name: 'to' }], 'nonpayable'),
+  // An ADMIN function that moves money, so §4's `hub.call.amount` has a
+  // fixture that can express it. calls.json accepts `amount` on an admin
+  // entry, so this is the shipped shape rather than an invention.
+  fn(
+    'seed',
+    [
+      { type: 'address', name: 'token' },
+      { type: 'uint256', name: 'amount' },
+    ],
+    'nonpayable',
+  ),
   fn(
     'quote',
     [
@@ -175,6 +186,25 @@ const QUOTE: CallEntry = {
   abiFunction: abiFunction('quote'),
 };
 
+/// §4. AN ADMIN ENTRY THAT DECLARES AN AMOUNT. Without one, every assertion
+/// about `hub.call.amount` would be vacuous: the field is absent when the entry
+/// declares no money, so a fixture of amount-less admin entries cannot tell
+/// "the field is correctly omitted" from "the field is never built".
+///
+/// The `{arg}` token form deliberately, matching CONVERT: the token is whichever
+/// one the caller's address argument names, so the event's `token` can disagree
+/// with the calldata if the two are sourced separately.
+const SEED: CallEntry = {
+  contract: 'converter',
+  function: 'seed',
+  kinds: [],
+  admin: true,
+  read: false,
+  amount: { arg: 1, token: { arg: 0 } },
+  addressArgs: { 0: 'token' },
+  abiFunction: abiFunction('seed'),
+};
+
 const SET_PAIR: CallEntry = {
   contract: 'converter',
   function: 'setPair',
@@ -226,11 +256,17 @@ const written: string[] = [];
 const readFrom: string[] = [];
 
 async function harness(
-  entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR],
+  entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR, SEED],
   opts: {
     reverted?: boolean;
     store?: Store;
     keystoreThrows?: boolean;
+    /// What the treasury holds OF THE DEFAULT TOKEN, in its smallest unit.
+    /// Ample by default, and deliberately per-token: gold's float stays ample
+    /// whatever this is set to, which is what lets a test show that the check
+    /// consulted the NAMED token rather than the default one. A single float
+    /// for every token could not express that at all.
+    treasuryFloat?: bigint;
     /// Makes writeContract and readContract throw the way a REAL revert
     /// arrives: `writeContract` simulates before it sends, so a contract-level
     /// refusal is an exception here rather than a reverted receipt. The message
@@ -259,13 +295,29 @@ async function harness(
     // asChainError then dresses up as a chain failure - the error reads as "the
     // node is broken" about a stub that simply lacks a field.
     deployment: { chainId: 31337, treasury: PLAY },
+    // The account that SIGNS, which is what §1's treasury-float check reads -
+    // "can the sender cover it" is a question about the sender, not about the
+    // address the manifest declares. Equal here, as the real Chain's
+    // constructor requires.
+    treasury: PLAY,
     viemChain: { id: 31337 },
     publicClient: {
       waitForTransactionReceipt: async () => ({ status: opts.reverted ? 'reverted' : 'success' }),
-      readContract: async (a: { address?: string } = {}) => {
+      readContract: async (a: { address?: string; functionName?: string; args?: readonly unknown[] } = {}) => {
         readFrom.push(String(a.address));
         if (opts.contractReverts) {
           throw new Error('The contract function "quote" reverted.\n\nError: UnknownPair()');
+        }
+        // THE TREASURY'S FLOAT IS ITS OWN FACT. A single constant for every
+        // read made the treasury's holding and a view function's result the
+        // same number, so no fixture could say "the treasury is short" and
+        // §1's guard had nothing to fail against.
+        if (a.functionName === 'balanceOf' && a.args?.[0] === PLAY) {
+          // `PLAY` is both the treasury's address and the default token's in
+          // this fixture. The FIRST is whose balance is asked for; the second
+          // is which token's ledger it is read from, and only the second
+          // selects the float.
+          return a.address === PLAY ? (opts.treasuryFloat ?? 10n ** 30n) : 10n ** 30n;
         }
         return 40n;
       },
@@ -926,6 +978,52 @@ describe('admin-call', () => {
       status: 'ok',
     });
   });
+
+  // §4. ONE SHAPE FOR BOTH ACTORS. `agent.call` has carried `amount` since
+  // v0.4.0; `hub.call` did not, so a feed reader had to know which actor it was
+  // looking at to know whether an absent `amount` meant "no money" or "this
+  // event never carries it". Informational only: the hub has no cap (§3.3), so
+  // this records the operator moving money rather than bounding it.
+  it('carries the AMOUNT and its token on hub.call', async () => {
+    const { t, store } = await harness();
+    await t.adminCall({ contract: 'converter', function: 'seed', args: [GOLD, '3'], intentId: 'a-6' });
+    const events = store.dueEvents(10).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+    expect(events.find((e) => e.kind === 'hub.call')).toMatchObject({
+      contract: 'converter',
+      function: 'seed',
+      status: 'ok',
+      // The token the ADDRESS ARGUMENT named, and the value in WHOLE UNITS -
+      // gold is 6 dp, so a value scaled at the default token's 18 reads as
+      // 0.000000000003 here rather than 3.
+      amount: { value: '3', token: 'gold' },
+    });
+  });
+
+  it('carries the amount on a REFUSED hub.call too', async () => {
+    // The refused branch is a separate emission site, so it can drift from the
+    // other one - and an operator reading a refusal most wants to know what it
+    // was trying to move.
+    const { t, store } = await harness(undefined, { contractReverts: true });
+    await t
+      .adminCall({ contract: 'converter', function: 'seed', args: [GOLD, '3'], intentId: 'a-7' })
+      .catch(() => undefined);
+    const events = store.dueEvents(10).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+    expect(events.find((e) => e.kind === 'hub.call')).toMatchObject({
+      status: 'refused',
+      txHash: null,
+      amount: { value: '3', token: 'gold' },
+    });
+  });
+
+  it('omits amount when the admin entry declares none', async () => {
+    // COMPARE TO A VALUE, not to presence: without this row a mutant that
+    // always emitted an amount would pass every assertion above.
+    const { t, store } = await harness();
+    await t.adminCall({ contract: 'converter', function: 'setPair', args: [PLAY, GOLD, '1'], intentId: 'a-8' });
+    const ev = store.dueEvents(10).map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'hub.call')!;
+    expect('amount' in ev).toBe(false);
+  });
 });
 
 describe('read', () => {
@@ -1138,6 +1236,50 @@ describe('a transfer in a second token', () => {
 
 // §1. THE PLATFORM PATHS NAME THEIR TOKEN TOO, and act on that one only.
 describe('fund and set-balance, per token', () => {
+  // §1. A SHORT TREASURY IS REFUSED BY NAME.
+  //
+  // Without this the shortfall arrived as whatever the token contract said - a
+  // raw revert, classified `revert`, reading to an operator as "mined and
+  // reverted; nothing changed". True and useless: it names no cause, and the
+  // remedy is specific and is the operator's to perform.
+  it('refuses a fund the treasury cannot cover, and says how short it is', async () => {
+    const { t } = await harness(undefined, { treasuryFloat: 2n * 10n ** 18n });
+    let err: unknown;
+    try {
+      await t.fund({ to: 'bob.play', amount: '5', intentId: 'short-1' });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as HttpError).code).toBe('treasury_insufficient');
+    // THE NUMBERS IN THE MESSAGE, in whole units, because the operator's next
+    // action is to mint the difference and a message that made them compute it
+    // from wei would be a worse message than none.
+    expect((err as HttpError).detail).toContain('holds 2 PLAY');
+    expect((err as HttpError).detail).toContain('moves 5');
+    // NOTHING WAS SENT. A refusal after the transfer would be a lie about a
+    // movement that happened.
+    expect(written).toEqual([]);
+  });
+
+  it('checks the float of the NAMED token, not the default one', async () => {
+    // The check is two uses of one resolution - read the float, then move it -
+    // and sourcing them separately is what lets a fund be refused because a
+    // DIFFERENT token's treasury is short. The fixture's float applies to PLAY
+    // only, so a gold fund must sail past it.
+    const { t } = await harness(undefined, { treasuryFloat: 0n });
+    await t.fund({ to: 'bob.play', amount: '1', token: 'gold', intentId: 'short-2' });
+    expect(written).toEqual([GOLD]);
+  });
+
+  it('passes a fund the treasury can exactly cover', async () => {
+    // COMPARE TO A VALUE at the boundary: `<` and `<=` differ only here, and a
+    // treasury refusing to spend its last unit is a bug an operator meets at
+    // the worst moment.
+    const { t } = await harness(undefined, { treasuryFloat: 5n * 10n ** 18n });
+    await t.fund({ to: 'bob.play', amount: '5', intentId: 'exact-1' });
+    expect(written).toEqual([PLAY]);
+  });
+
   it('funds the NAMED token, leaving the others alone', async () => {
     const { t } = await harness();
     await t.fund({ to: 'bob.play', amount: '2', token: 'gold', intentId: 'f-1' });

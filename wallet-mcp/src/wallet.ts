@@ -132,6 +132,12 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // persona cannot cause this and learns nothing from it.
   invalid_agent_id: null,
   invalid_request: null,
+  // THE TREASURY'S FLOAT IS THE GAME'S SUPPLY POSITION, and a persona that
+  // could read it from a refusal could probe it by asking to be funded. An
+  // operator fact, and `fund` is platform scope so no persona reaches it today
+  // - but this is declared rather than left to that, because "no route reaches
+  // it" is a property of today's routes and this map is the standing answer.
+  treasury_insufficient: null,
   // Infrastructure: tells a persona only "it did not happen", which the generic
   // reason already says.
   chain_error: null,

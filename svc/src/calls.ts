@@ -285,6 +285,14 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
       throw new Error(`${where}: amount.arg ${arg} is ${inputs[arg]!.type}, not uint256`);
     }
     if (typeof a.token === 'string') {
+      // EXACT KEY, NOT `resolveToken`, and that is the intended asymmetry. §1's
+      // key-or-symbol rule is about what a PERSONA may write on the wire, where
+      // accepting the symbol it just read back is the whole point. This is an
+      // OPERATOR CONFIG FILE, read once at load, and a file that may spell a
+      // token two ways is a file where two entries can name the same token
+      // without looking alike - so the allowlist would be harder to audit for
+      // the sake of a convenience nobody typing it needs. A wrong spelling is
+      // refused by name at load, in front of the operator who wrote it.
       const token = modules.tokens.find((t) => t.key === a.token);
       if (!token) {
         throw new Error(`${where}: amount.token "${a.token}" is not a token in this deployment`);

@@ -343,6 +343,52 @@ export class Treasury {
         ? body.intentId
         : `chain-svc:${randomUUID()}`;
 
+    // §1. A SHORT TREASURY IS REFUSED BY NAME, before the transfer.
+    //
+    // Without this the shortfall arrives as whatever the token contract says -
+    // a raw revert, classified `revert`, reading to an operator as "the call
+    // was mined and reverted; nothing changed". True, and useless: it names no
+    // cause and suggests no remedy, and the remedy is specific (mint to the
+    // treasury) and is the operator's to perform.
+    //
+    // CHECKED AGAINST THE SAME RESOLVED TOKEN the transfer uses, not looked up
+    // again: read and write are two uses of one resolution, and sourcing them
+    // separately is what lets a check measure one token's float and a transfer
+    // move another's.
+    //
+    // This is a check, not a lock. Two concurrent funds can both pass it and
+    // the second still revert on-chain - which is correct: the chain is the
+    // authority on the balance and this only turns the COMMON case into a
+    // refusal that names its cause.
+    try {
+      const float = (await this.chain.publicClient.readContract({
+        address: tok.address,
+        abi: TokenAbi,
+        functionName: 'balanceOf',
+        // `chain.treasury` (the account that SIGNS) rather than
+        // `deployment.treasury` (what the manifest declares). The constructor
+        // refuses to start unless they agree, so today they cannot differ - but
+        // the question this asks is "can the sender cover it", and the sender is
+        // the wallet client's account. Reading the declared address would be
+        // right by coincidence rather than by construction.
+        args: [this.chain.treasury],
+      })) as bigint;
+      if (float < amount) {
+        throw new HttpError(
+          'treasury_insufficient',
+          `the treasury holds ${formatVee(float, tok.decimals)} ${tok.symbol} and this moves ` +
+            `${formatVee(amount, tok.decimals)}; mint to the treasury with ` +
+            `admin-call ${tok.key}.mint`,
+        );
+      }
+    } catch (err) {
+      // The REFUSAL passes through as itself; only a chain failure is
+      // reclassified. Without the instanceof the refusal would be wrapped as a
+      // chain_error by its own read's catch - a check reporting itself broken.
+      if (err instanceof HttpError) throw err;
+      throw asChainError(err);
+    }
+
     try {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
@@ -1160,20 +1206,28 @@ export class Treasury {
     return { resolved, named };
   }
 
-  /// §3.2 step 6. Which token this call moves and how much, and every cap that
-  /// applies to it.
+  /// §3.2 step 6. WHICH TOKEN AND HOW MUCH, with no policy in it.
   ///
-  /// TWO BOUNDS CAN HOLD AT ONCE and both are checked. When the amount is in
-  /// the DEFAULT token the wallet's own `max_per_tx` applies, because that cap
-  /// is denominated in it. When the entry carries a `perTxCap` that applies
-  /// too, in the resolved token's own decimals - and for the `{arg}` form the
-  /// entry MUST carry one, because which token it names is chosen per call and
-  /// `gold -> play` would otherwise be bounded by nothing at all.
-  private callAmount(
+  /// This header described `perTxCap` as live and said "two bounds can hold at
+  /// once" - both true of v0.4.0 and neither true since this increment retired
+  /// the field. The comment survived the change because nothing compiles a
+  /// comment: the code moved, its description stayed, and a reader would have
+  /// gone looking for an entry-level bound that is now refused at load.
+  ///
+  /// ONE BOUND NOW, and it lives on the wallet: caps are per wallet per token,
+  /// so the wallet carries a limit for every currency it may spend and the
+  /// allowlist entry has nothing left to say about amounts.
+  ///
+  /// Split out of `callAmount` so the ADMIN path can reach the same answer:
+  /// §3.3 gives the hub no cap, so it needs the resolution and the scaling and
+  /// none of the enforcement. Sharing the function rather than restating the
+  /// resolution is the point - the token, its decimals and its address are
+  /// three facts about one thing, and a second implementation is where one of
+  /// them drifts.
+  private callMoney(
     entry: CallEntry,
     args: EncodableArg[],
     wireArgs: unknown[],
-    policy: AgentPolicy,
   ): { amount: bigint; token: TokenModule; index: number } | null {
     if (!entry.amount) return null;
     const { callerIndex } = Treasury.callerInputs(entry);
@@ -1222,6 +1276,18 @@ export class Treasury {
     // bigint, so there is exactly one conversion and no chance of a double one.
     const amount = parseVee(wireArgs[i], token.decimals, token.symbol, `argument ${i}`);
     if (amount <= 0n) throw new HttpError('invalid_amount', 'the amount must be greater than zero');
+    return { amount, token, index: i };
+  }
+
+  private callAmount(
+    entry: CallEntry,
+    args: EncodableArg[],
+    wireArgs: unknown[],
+    policy: AgentPolicy,
+  ): { amount: bigint; token: TokenModule; index: number } | null {
+    const money = this.callMoney(entry, args, wireArgs);
+    if (!money) return null;
+    const { amount, token } = money;
 
     // EVERY TOKEN GOES THROUGH THE SAME CHECK NOW. This used to run only for
     // the DEFAULT token, because caps were denominated in it and any other
@@ -1276,7 +1342,7 @@ export class Treasury {
       }
     }
 
-    return { amount, token, index: i };
+    return money;
   }
 
   /// The allowlist entry for this request, or the one refusal that covers every
@@ -1643,6 +1709,30 @@ export class Treasury {
     const { inputs } = Treasury.callerInputs(entry);
     const shaped = validateArgs(inputs, supplied, 'platform');
 
+    // §4. THE SAME `amount` THE AGENT EVENT CARRIES, so the feed reader sees one
+    // shape for both. Informational only here: §3.3 gives the hub no cap, so
+    // this is the operator moving money and nothing bounds it - which is the
+    // reason it is worth recording at all.
+    //
+    // Through `callMoney`, the same function the agent path uses, so the token
+    // resolution and the whole-units-to-smallest-units scaling happen once in
+    // the codebase. `calls.json` accepts an `amount` on an admin entry, so this
+    // is reachable rather than defensive.
+    const money = this.callMoney(entry, shaped, supplied);
+    // The scaled amount is what the contract is called with - the same
+    // write-back the agent path does at its call site, and for the same reason:
+    // the validator read the wire's "40" as 40n, which is right for an ordinary
+    // uint and a 1e18x error for money.
+    if (money) shaped[money.index] = money.amount;
+    const moneyField = money
+      ? {
+          amount: {
+            value: formatVee(money.amount, money.token.decimals),
+            token: money.token.key,
+          },
+        }
+      : {};
+
     const stage = await this.currentStage();
     // ONE TEST FOR BOTH, and it is the test `call` uses: a string AND
     // non-empty. Asking only `typeof body.intentId === 'string'` recorded an
@@ -1729,6 +1819,7 @@ export class Treasury {
           intent_id: intentId,
           txHash: null,
           status: 'refused',
+          ...moneyField,
         });
       }
       throw classified;
@@ -1745,6 +1836,7 @@ export class Treasury {
       intent_id: intentId,
       txHash: hash,
       status: reverted ? 'reverted' : 'ok',
+      ...moneyField,
     });
     if (reverted) {
       console.warn(

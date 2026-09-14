@@ -17,7 +17,7 @@ import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
 import type { Treasury } from './treasury.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
-import { defaultToken, type ModuleKind, type Modules } from './modules.ts';
+import { defaultToken, resolveToken, type ModuleKind, type Modules } from './modules.ts';
 
 export interface Services {
   config: Config;
@@ -89,15 +89,24 @@ export interface Route {
 // Named functions, referenced directly in the table below, so the call graph
 // stays legible rather than hiding behind string lookups.
 
-async function getSupply({ services, principal }: RouteContext): Promise<unknown> {
+async function getSupply({ services, principal, url }: RouteContext): Promise<unknown> {
   requirePlatform(principal, 'GET /supply');
   const { chain } = services;
+  // §1: THE RULE IS ABOUT THE ARGUMENT, not about where it arrives - body or
+  // query string, writes and reads alike. This was the one read endpoint that
+  // never looked, so `?token=nonsense` was silently ignored and answered with
+  // every token, which is the shape of answer a caller reads as agreement.
+  //
+  // RESOLVED BEFORE THE READS, so an unknown token costs no chain calls and
+  // answers `unknown_token` like every other surface rather than an empty map.
+  const wanted = url.searchParams.get('token');
+  const only = wanted === null ? null : resolveToken(chain.modules, wanted);
   try {
     // ONE PAIR OF READS PER TOKEN, and each formatted at the decimals of the
     // SAME TokenModule the address came from. Reading the scale separately is
     // what lets it belong to a different token than the balance it scales.
     const per = await Promise.all(
-      chain.modules.tokens.map(async (t) => {
+      (only ? [only] : chain.modules.tokens).map(async (t) => {
         const [total, treasury] = (await Promise.all([
           chain.publicClient.readContract({
             address: t.address,
@@ -125,7 +134,14 @@ async function getSupply({ services, principal }: RouteContext): Promise<unknown
         },
       ]),
     );
-    const first = per[0];
+    // THE LEGACY TRIO ALWAYS DESCRIBES THE DEFAULT TOKEN, filtered or not.
+    // It is defined as the single-token view a v0.4.0 reader sees, and such a
+    // reader never sends `?token=` - so letting the filter change which token
+    // these three describe would make one field name mean two things depending
+    // on a query parameter nobody legacy sends. When the filter excludes the
+    // default token they are omitted rather than restated from another token's
+    // numbers: absent is honest, wrong is not.
+    const first = only === null ? per[0] : per.find(([t]) => t.key === defaultToken(chain.modules).key);
     return {
       tokens,
       // The legacy top-level trio, for the DEFAULT token, for one release -
@@ -259,6 +275,32 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
   // and a name can be re-registered, so the store's copy would age.
   const canonical = await services.resolver.reverseOf(row.address as `0x${string}`);
 
+  // §1: `balances` ONLY WHEN A TOKEN MODULE EXISTS, omitted otherwise. The
+  // route's `requires` stays empty so a names-only deployment keeps the
+  // endpoint - the wallet still has an address, a kind and a canonical, and
+  // those are the facts this endpoint is for. An empty map would say "this
+  // wallet holds nothing"; absent says "this deployment has no tokens", and
+  // they are different facts about different things.
+  //
+  // Each at ITS OWN decimals, read off the same TokenModule the address came
+  // from: key, symbol and decimals are three facts about one token.
+  const { tokens } = services.chain.modules;
+  const balances = tokens.length === 0
+    ? null
+    : Object.fromEntries(
+        await Promise.all(
+          tokens.map(async (t) => {
+            const wei = (await services.chain.publicClient.readContract({
+              address: t.address,
+              abi: TokenAbi,
+              functionName: 'balanceOf',
+              args: [row.address as `0x${string}`],
+            })) as bigint;
+            return [t.symbol, formatVee(wei, t.decimals)] as const;
+          }),
+        ),
+      );
+
   return {
     agentId,
     address: row.address,
@@ -266,6 +308,7 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
     kind: row.kind,
     frozen: services.store.isFrozen(agentId),
     bareIdCount: row.bareIdCount,
+    ...(balances === null ? {} : { balances }),
   };
 }
 

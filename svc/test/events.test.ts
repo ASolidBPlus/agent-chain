@@ -1321,6 +1321,22 @@ describe('generic decoding', () => {
     };
   }
 
+  // AN EXPLICIT BUDGET, AND THE NUMBER IS ABOUT SCHEDULING, NOT ABOUT THE WORK.
+  //
+  // This test does one `pollOnce()` against a stub: no sleeps, no I/O, nothing
+  // that can legitimately take seconds. It is green in isolation and was
+  // MEASURED at 7770 ms under full-suite load, past bun's 5000 ms default - so
+  // the overrun says the process was starved, not that the code was slow, and
+  // the framework's timeout fired first and reported an opaque failure in place
+  // of whatever the test would have said.
+  //
+  // Not made "deterministic", because there is nothing non-deterministic here
+  // to fix: one pass, one stub, no clock. Raising the budget is the honest
+  // change; shrinking the work would be pretending the test was the problem.
+  // The same shape as guards.test.ts's 30s cases, and for the same reason.
+  //
+  // NOT REPRODUCED HERE - it did not fire in any of my runs. The measurement is
+  // the evaluator's and is recorded as theirs.
   it('enqueues a chain.event for a registered contract log', async () => {
     const store = new Store(':memory:');
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
@@ -1332,7 +1348,7 @@ describe('generic decoding', () => {
     expect((event.args as Record<string, unknown>).amountIn).toBe('40');
     expect((event.args as Record<string, unknown>).intentId).toBe(INTENT);
     store.close();
-  });
+  }, 20_000);
 
   it('does not double-report an event the named passes already emit', async () => {
     // A token's Transfer is carried by the named pass, with its amount

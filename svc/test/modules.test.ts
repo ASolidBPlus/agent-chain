@@ -141,6 +141,23 @@ describe('a names-only deployment', () => {
     expect(await code(h, 'GET', '/resolve/nothing', wallet)).toBe('unknown_name');
   });
 
+  // §1: `balances` on the wallet row ONLY when a token module exists. The
+  // route's `requires` stays EMPTY so the endpoint survives here - a wallet on
+  // a names-only deployment still has an address, a kind and a canonical, and
+  // those are what it is for. OMITTED rather than `{}`: an empty map says "this
+  // wallet holds nothing", absent says "this deployment has no tokens", and a
+  // consumer that branches on the field learns different things from each.
+  it('serves the wallet row WITHOUT balances', async () => {
+    const res = await fetch(`${h.base}/wallets/${encodeURIComponent(AGENT)}`, { headers: platform });
+    expect(res.status).toBe(200);
+    const row = (await res.json()) as Record<string, unknown>;
+    expect('balances' in row).toBe(false);
+    // The rest of the row is there, which is what makes the absence a
+    // statement about tokens rather than about the endpoint being broken.
+    expect(row.agentId).toBe(AGENT);
+    expect(row.kind).toBe('agent');
+  });
+
   it('lists only the deployed module on /health and /modules', async () => {
     expect(await (await fetch(`${h.base}/health`)).json()).toEqual({ ok: true, modules: ['names'] });
     const m = (await (await fetch(`${h.base}/modules`, { headers: platform })).json()) as Record<string, unknown>;

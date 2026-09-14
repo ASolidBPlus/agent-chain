@@ -63,8 +63,16 @@ const services = {
     // by the handler happening to return first. A named throw keeps a silent
     // pass against a mock impossible, which is what the absent client bought.
     publicClient: {
-      readContract: () => {
-        throw new Error('the chain must not be reached in a routing test');
+      // NARROWED, NOT REMOVED. `GET /wallets/:id` now carries `balances` (§1),
+      // so it reads `balanceOf` for every deployed token as part of its
+      // contract - a legitimate read, not an accident. Everything else still
+      // throws by name, so the property this stub exists for survives: no
+      // assertion in this file reaches the chain for a reason the endpoint
+      // does not require. Answering everything would have retired the guard to
+      // make one endpoint work.
+      readContract: ({ functionName }: { functionName?: string } = {}) => {
+        if (functionName === 'balanceOf') return 5_000000000000000000n; // 5 PLAY at 18 dp
+        throw new Error(`the chain must not be reached in a routing test (${functionName})`);
       },
       getBalance: () => {
         throw new Error('the chain must not be reached in a routing test');
@@ -394,6 +402,10 @@ describe('GET /wallets/:agentId', () => {
     store.markSpawned('orch:rowtest', WALLET, 'burner');
     const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:rowtest')}`, { headers: auth });
     expect(res.status).toBe(200);
+    // THE WHOLE OBJECT, still: this test's value is that it fails when a field
+    // appears or disappears, which is exactly what it just did when `balances`
+    // arrived. Loosening it to toMatchObject to absorb the new field would
+    // retire the only assertion in the file that notices the shape changing.
     expect(await res.json()).toEqual({
       agentId: 'orch:rowtest',
       address: WALLET,
@@ -401,6 +413,7 @@ describe('GET /wallets/:agentId', () => {
       kind: 'burner',
       frozen: false,
       bareIdCount: 0,
+      balances: { PLAY: '5' },
     });
   });
 
@@ -839,5 +852,71 @@ describe('per-token reads', () => {
     });
     // The legacy top-level trio, for the default token, for one release.
     expect(res.total).toBe('10');
+  });
+
+  // §1: THE RULE IS ABOUT THE ARGUMENT, not about where it arrives. /supply was
+  // the one read endpoint that never looked at its `token`, so `?token=` was
+  // accepted and ignored - and an ignored argument answers with EVERY token,
+  // which a caller reads as agreement rather than as the argument being
+  // dropped. "Writes and reads alike" is unenforced exactly where nothing
+  // enforces it.
+  it('reads ?token= and reports that token ALONE', async () => {
+    const { server: s, base: b } = await twoTokenServer();
+    const raw = await fetch(`${b}/supply?token=gold`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
+    s.close();
+    // COMPARE TO A VALUE, not to membership: `toEqual` on the whole map is what
+    // separates "filtered to gold" from "ignored the filter and sent both".
+    expect(res.tokens).toEqual({ GOLD: { total: '14', treasury: '7', inPlay: '7' } });
+  });
+
+  it('accepts the SYMBOL as well as the key, like every other token argument', async () => {
+    const { server: s, base: b } = await twoTokenServer();
+    const raw = await fetch(`${b}/supply?token=GOLD`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
+    s.close();
+    expect(res.tokens).toEqual({ GOLD: { total: '14', treasury: '7', inPlay: '7' } });
+  });
+
+  it('keeps the legacy trio describing the DEFAULT token when the filter is another one', async () => {
+    // One field name must not mean two things depending on a query parameter.
+    // The trio is the single-token view a v0.4.0 reader sees, and that reader
+    // never sends `?token=` - so the filter must not repoint it. Omitted rather
+    // than restated from gold's numbers when the default is filtered out:
+    // absent is honest, wrong is not.
+    const { server: s, base: b } = await twoTokenServer();
+    const raw = await fetch(`${b}/supply?token=gold`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
+    s.close();
+    expect(res.total).toBeUndefined();
+    expect(res.treasury).toBeUndefined();
+    expect(res.inPlay).toBeUndefined();
+  });
+
+  // §1: `balances` on the wallet row, ONLY when a token module exists.
+  it('carries every token balance on GET /wallets/:id', async () => {
+    store.markSpawned('orch:withbal', WALLET, 'agent');
+    const { server: s, base: b } = await twoTokenServer();
+    const raw = await fetch(`${b}/wallets/${encodeURIComponent('orch:withbal')}`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
+    s.close();
+    // Each at ITS OWN decimals: 5 PLAY at 18 dp and 7 GOLD at 6 dp are
+    // different numbers of wei and the same number of whole units, which is
+    // what makes a scale mistake visible here at all.
+    expect(res.balances).toEqual({ PLAY: '5', GOLD: '7' });
+    // The facts the endpoint already carried are untouched beside it.
+    expect(res.kind).toBe('agent');
+  });
+
+  it('refuses a ?token= this deployment does not have, rather than ignoring it', async () => {
+    const { server: s, base: b } = await twoTokenServer();
+    const raw = await fetch(`${b}/supply?token=nonsense`, { headers: auth });
+    expect(raw.status).toBe(404);
+    expect((await body(raw)).error).toBe('unknown_token');
+    s.close();
   });
 });

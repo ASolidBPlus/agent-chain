@@ -293,6 +293,142 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
   });
 });
 
+// §1. SEED FUNDING PER TOKEN.
+//
+// `fundVee` can only ever name the DEFAULT token, so a two-token deployment
+// could not fund its second currency at spawn at all - the wallet arrived
+// holding one of the two currencies its game uses.
+describe('POST /wallets fund: [{token, amount}]', () => {
+  /// A spawner whose keystore RECORDS ANY ACCESS AND THROWS, so a refusal that
+  /// arrived late shows as a touched keystore rather than as a passing test.
+  /// Local rather than reaching for the one further down the file: that one is
+  /// scoped to its own describe, and widening its scope to borrow it would make
+  /// two unrelated blocks share a fixture.
+  function on(modules: Record<string, unknown>): { s: Spawner; touched: string[] } {
+    const touched: string[] = [];
+    const s = new Spawner(
+      config,
+      { modules } as unknown as Chain,
+      new Proxy({}, {
+        get(_t, prop) {
+          touched.push(String(prop));
+          throw new Error('the keystore must not be reached: the request was refused first');
+        },
+      }) as Keystore,
+      new Store(':memory:'),
+      exploding('resolver') as Resolver,
+      DEFAULTS,
+    );
+    return { s, touched };
+  }
+
+  const TWO = {
+    tokens: [
+      { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 },
+      { key: 'au', address: '0xgold', symbol: 'GOLD', decimals: 6 },
+    ],
+    names: { address: '0xreg', tld: 'play' },
+  };
+
+  it('refuses fund AND fundVee together, rather than preferring either', async () => {
+    const { s, touched } = on(TWO);
+    expect(
+      await codeOf(() => s.spawn({ agentId: 'orch:a', fundVee: 1, fund: [{ token: 'au', amount: '1' }] })),
+    ).toBe('invalid_request');
+    // BEFORE THE FIRST SIDE EFFECT, like every other spawn refusal: a refusal
+    // that left a key file behind would make the retry take the idempotent
+    // path and report success for the request that was just refused.
+    expect(touched).toEqual([]);
+  });
+
+  it('refuses a token this deployment does not have, before any side effect', async () => {
+    const { s, touched } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ token: 'silver', amount: '1' }] }))).toBe(
+      'unknown_token',
+    );
+    expect(touched).toEqual([]);
+  });
+
+  it('refuses the same token named twice, rather than summing or last-wins', async () => {
+    // Both readings are defensible, which is exactly what makes choosing
+    // between them wrong: the caller wrote something ambiguous about money.
+    const { s } = on(TWO);
+    expect(
+      await codeOf(() =>
+        s.spawn({ agentId: 'orch:a', fund: [{ token: 'au', amount: '1' }, { token: 'GOLD', amount: '2' }] }),
+      ),
+    ).toBe('invalid_request');
+  });
+
+  it('refuses an entry that names no token', async () => {
+    // An entry in a LIST that names no token is a mistake, where an absent
+    // `token` on a single-token request is the documented default. The same
+    // argument means different things in the two shapes.
+    const { s } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ amount: '1' }] }))).toBe('invalid_request');
+  });
+
+  it('refuses a zero or negative amount', async () => {
+    const { s } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ token: 'au', amount: '0' }] }))).toBe(
+      'invalid_amount',
+    );
+  });
+
+  it('SEEDS EACH TOKEN FROM ITS OWN CONTRACT, at its own decimals', async () => {
+    // THE TEST THE OTHERS EXIST TO SUPPORT. Two tokens whose decimals differ,
+    // so an amount parsed at the default token's scale is a 1e12x error rather
+    // than an invisible one - the increment-3 defect, which was invisible while
+    // every token was 18 dp.
+    //
+    // Asserting the CONTRACT each transfer addressed as well as the amount:
+    // seeding gold from play's contract moves real money on the wrong ledger
+    // while reporting a number that looks entirely correct.
+    const store = new Store(':memory:');
+    const address = '0x2222222222222222222222222222222222222222';
+    const sent: Array<{ to: string; args: unknown[] }> = [];
+    const chain = {
+      viemChain: { id: 31337 },
+      deployment: { treasury: '0x5', chainId: 31337 },
+      modules: TWO,
+      publicClient: {
+        getBalance: async () => 10n ** 18n,
+        readContract: async () => 0n, // holds nothing yet, so both seeds move
+        waitForTransactionReceipt: async () => ({}),
+      },
+      walletClient: {
+        account: { address: '0x5' },
+        sendTransaction: async () => '0xdead',
+        writeContract: async (a: { address: string; args: unknown[] }) => {
+          sent.push({ to: a.address, args: a.args });
+          return '0xbeef';
+        },
+      },
+    } as unknown as Chain;
+
+    const s = new Spawner(
+      { ...config, policyDir: mkdtempSync(join(tmpdir(), 'policies-')) } as Config,
+      chain,
+      { has: async () => true, load: async () => ({ address, privateKey: '0x00' }) } as unknown as Keystore,
+      store,
+      { lookup: async () => null, require: async () => ({ address, canonical: 'orch:a' }) } as unknown as Resolver,
+      DEFAULTS,
+    );
+
+    await s.spawn({
+      agentId: 'orch:a',
+      kind: 'burner', // no registration, so the only writes are the two seeds
+      fund: [{ token: 'play', amount: '2' }, { token: 'GOLD', amount: '3' }],
+    });
+
+    expect(sent).toEqual([
+      { to: '0xplay', args: [address, 2n * 10n ** 18n] }, // 2 PLAY at 18 dp
+      { to: '0xgold', args: [address, 3_000000n] }, //       3 GOLD at 6 dp
+    ]);
+    store.close();
+  });
+});
+
 describe('POST /sign-transfer validation', () => {
   it('refuses a frozen wallet before loading its key', async () => {
     const store = new Store(':memory:');
@@ -1069,7 +1205,13 @@ describe('POST /wallets/:agentId/balance', () => {
     }
   }
 
-  function treasuryAt(balance: bigint, frozen = false): { t: RecordingTreasury; store: Store } {
+  function treasuryAt(
+    balance: bigint,
+    frozen = false,
+    /// What the TREASURY holds, distinct from what the wallet holds. Ample by
+    /// default so the tests that are about set-balance stay about set-balance.
+    treasuryFloat = vee(1_000_000),
+  ): { t: RecordingTreasury; store: Store } {
     const store = new Store(':memory:');
     store.markSpawned('orch:a', WALLET, null);
     if (frozen) store.freeze('orch:a');
@@ -1077,9 +1219,17 @@ describe('POST /wallets/:agentId/balance', () => {
       { ...config, policyDir: '/tmp/none' } as Config,
       {
         viemChain: {},
+        treasury: TREASURY,
         deployment: { treasury: TREASURY }, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }] },
         publicClient: {
-          readContract: async () => t.balance,
+          // KEYED ON WHOSE BALANCE IS ASKED FOR. One stub answering `t.balance`
+          // for every address meant the treasury's float and the wallet's
+          // balance were the same number - so a fixture could not express "the
+          // treasury is short" at all, and §1's guard had nothing to fail
+          // against. The same collapse the resolver table's third token exists
+          // to prevent, one layer down.
+          readContract: async ({ args }: { args?: readonly unknown[] } = {}) =>
+            args?.[0] === TREASURY ? treasuryFloat : t.balance,
           waitForTransactionReceipt: async () => ({}),
         },
         walletClient: {
