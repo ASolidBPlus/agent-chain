@@ -124,7 +124,7 @@ flowchart LR
 ```
 
 **NameRegistry** (`contracts/src/NameRegistry.sol`). Names are the addressing
-layer: an agent pays `shadowbroker`, never `0x…`.
+layer: an agent pays `vendor`, never `0x…`.
 
 - A record per name: `owner` (who may change it) and `target` (the address it
   resolves to). `resolve(name) → address`, `reverseOf(address) → name`.
