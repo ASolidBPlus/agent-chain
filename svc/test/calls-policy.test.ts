@@ -67,6 +67,14 @@ const CONVERTER_ABI = [
     'nonpayable',
   ),
   fn('tip', [{ type: 'address', name: 'to' }], 'payable'),
+  fn(
+    'approve',
+    [
+      { type: 'address', name: 'spender' },
+      { type: 'uint256', name: 'value' },
+    ],
+    'nonpayable',
+  ),
   fn('overloaded', [{ type: 'uint256', name: 'a' }], 'nonpayable'),
   fn('overloaded', [{ type: 'address', name: 'a' }], 'nonpayable'),
   fn('exotic', [{ type: 'function', name: 'f' }], 'nonpayable'),
@@ -281,6 +289,20 @@ describe('state mutability', () => {
     const p = await policy();
     expect(p.snapshot().entries).toHaveLength(0);
     expect(logged.join('\n')).toMatch(/"quote" is view; it needs "read": true/);
+  });
+
+  it('refuses a function that grants an allowance, on any contract', async () => {
+    // A NON-GOAL THAT USED TO HOLD FOR FREE AND NO LONGER DOES. Nothing in
+    // chain-svc calls `approve`, so §8.10's grep found no line outside a
+    // comment - but the registry's ABIs are generated from the whole of
+    // contracts/src, the Token is a standard ERC-20, and the standard DECLARES
+    // approve. So `{"contract":"play","function":"approve"}` is a legal-looking
+    // allowlist entry, and the rail's push-only property would be one file's
+    // typo away from gone.
+    write(only({ contract: 'converter', function: 'approve', kinds: ['agent'] }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/grants an allowance/);
   });
 
   it('refuses a payable function outright, read or not', async () => {

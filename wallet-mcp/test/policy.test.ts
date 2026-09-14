@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkLocally, normaliseVee, veeToWei, matchesPattern, readPolicy, type WalletPolicy } from '../src/policy.ts';
 import { WalletStore } from '../src/store.ts';
+import { REFUSAL_FOR } from '../src/wallet.ts';
 
 // `decimals` is now threaded from chain-svc's /modules (spec S5). These cases
 // exercise an 18-place token, so they pin decimals = 18 at the call rather than
@@ -196,5 +197,49 @@ describe('the intent ledger never forgets', () => {
     for (const name of ['delete', 'remove', 'forget', 'prune', 'expire', 'clear']) {
       expect((store as unknown as Record<string, unknown>)[name]).toBeUndefined();
     }
+  });
+});
+
+// §8.10. THE SIZE OF THE PERSONA-FACING SET, as a test rather than as a grep in
+// a PR body.
+//
+// A grep proves a string is present; it cannot prove the map still MEANS what
+// the disclosure decision decided. This compares to a VALUE - the closed set,
+// by name - so both directions are caught: a code quietly added to the
+// persona-facing side, and one quietly removed from it. The count alone would
+// catch neither if two changes cancelled.
+describe('the disclosure decision', () => {
+  it('discloses exactly these thirteen codes, and nothing else', () => {
+    const facing = Object.entries(REFUSAL_FOR)
+      .filter(([, reason]) => reason !== null)
+      .map(([code]) => code)
+      .sort();
+
+    expect(facing).toEqual(
+      [
+        // The persona's own wallet, policy or input...
+        'over_max_per_tx',
+        'over_stage_cap',
+        'counterparty_denied',
+        'wallet_frozen',
+        'invalid_name',
+        'invalid_amount',
+        'bad_args',
+        // ...the public registry...
+        'unknown_name',
+        'ambiguous_name',
+        'unknown_contract',
+        'function_not_allowed',
+        // ...and what its own action did.
+        'intent_unresolved',
+        'revert',
+      ].sort(),
+    );
+  });
+
+  it('keeps module_not_deployed generic, which is the deployment\'s shape', () => {
+    // Withheld deliberately: it describes what the operator chose to run, which
+    // is not the persona's business and is not something it can act on.
+    expect(REFUSAL_FOR.module_not_deployed).toBeNull();
   });
 });

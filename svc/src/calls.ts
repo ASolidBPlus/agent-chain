@@ -104,6 +104,19 @@ export function fixedCallPolicy(entries: CallEntry[]): CallPolicySource {
 /// digits only. `isCap` refuses a JSON number for the same reason.
 const WHOLE_UNITS = /^\d{1,30}$/;
 
+/// Function names that hand one address the right to spend another's balance.
+///
+/// The ERC-20 pair, plus the two extensions a token is likely to carry. Listed
+/// by NAME rather than detected by shape because there is no shape to detect -
+/// `approve(address,uint256)` is indistinguishable from any other two-argument
+/// setter, and what makes it different is what the CONTRACT does with it.
+const APPROVAL_FUNCTIONS = new Set([
+  'approve',
+  'increaseAllowance',
+  'decreaseAllowance',
+  'permit',
+]);
+
 function assertObject(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`${what} is not an object`);
@@ -145,6 +158,27 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
 
   if (abiFunction.stateMutability === 'payable') {
     throw new Error(`payable functions are not callable; the chain has no ETH economy (${where})`);
+  }
+
+  // NO APPROVALS, AND THE GENERIC OP IS WHERE THAT STOPS BEING AUTOMATIC.
+  //
+  // "Allowances/approvals of any kind" is a NON-GOAL of this increment, and it
+  // used to hold for free: nothing in chain-svc called `approve`, so the §8.10
+  // grep gate found no line outside a comment. It does not hold for free any
+  // more. The registry's ABIs are generated from the whole of contracts/src,
+  // the Token is a standard ERC-20, and the standard declares `approve` - so
+  // `{"contract": "play", "function": "approve"}` is now a manifest away from
+  // being a legal allowlist entry, and the money rail's push-only property
+  // would be a file's typo away from gone.
+  //
+  // Refused BY NAME at load, on every contract rather than on tokens: a custom
+  // contract is free to name a function `approve`, and if it does, the same
+  // question applies to it.
+  if (APPROVAL_FUNCTIONS.has(name)) {
+    throw new Error(
+      `"${name}" grants an allowance, and this chain has none: money is push-only and a call ` +
+        `never spends what it was not given (${where})`,
+    );
   }
 
   // Every parameter must be one the validator can check. AT LOAD, so the
