@@ -361,24 +361,24 @@ export class Wallet {
     }));
   }
 
-  async send(args: { to: unknown; vee: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
+  async send(args: { to: unknown; amount: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
     const to = typeof args.to === 'string' ? args.to.trim() : '';
     const intentId = typeof args.intent_id === 'string' ? args.intent_id.trim() : '';
-    // `vee` IS A DECIMAL STRING on every money wire (ruled). A number is
+    // `amount` IS A DECIMAL STRING on every money wire (ruled). A number is
     // tolerated only when it is an INTEGER, which is exactly representable and
     // has nothing to round; a non-integer number is REFUSED rather than
     // rounded, because silent rounding on an amount is the one outcome worth
     // more than the convenience. The tolerance exists because an LLM writes 50
     // as often as it writes "50" - it is not a second supported type.
-    const vee = normaliseVee(args.vee);
+    const amount = normaliseVee(args.amount);
     const memo = typeof args.memo === 'string' ? args.memo : undefined;
 
     if (to === '') return this.fail('error', 'to is required and must be a name');
     if (intentId === '') return this.fail('error', 'intent_id is required');
-    if (vee === null) {
+    if (amount === null) {
       return this.fail(
         'error',
-        'vee must be a positive decimal string, e.g. "50" or "12.5". A whole number is accepted; ' +
+        'amount must be a positive decimal string, e.g. "50" or "12.5". A whole number is accepted; ' +
           'a fractional number is not, because it cannot be carried exactly - send it as a string.',
       );
     }
@@ -392,7 +392,7 @@ export class Wallet {
       // The dedupe KEY is the intent id alone (ruled). These are not
       // key components - they are what makes "same id, different send" a
       // REFUSAL rather than a silent replay of the wrong transfer.
-      if (previous.to === to && previous.vee === vee) {
+      if (previous.to === to && previous.vee === amount) {
         return { ok: true, txHash: previous.txHash };
       }
       return this.fail(
@@ -455,10 +455,15 @@ export class Wallet {
       return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, vee, this.decimals);
+    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, this.decimals);
     if (local) return this.fail(local);
 
-    const res = await this.client.signTransfer({ to, vee, intentId, ...(memo ? { memo } : {}) });
+    // THE ONE PLACE THE TWO NAMES MEET. The model fills `amount`; the HTTP
+    // body carries `vee`, which is chain-svc's field name until increment 4
+    // renames the wire alongside the token argument. Mapped here rather than
+    // renamed on both sides, so the tool a persona reads stops naming one
+    // deployment's currency without a breaking change to the service contract.
+    const res = await this.client.signTransfer({ to, vee: amount, intentId, ...(memo ? { memo } : {}) });
 
     // THE DISTINCTION THIS WHOLE TYPE EXISTS FOR. A transport failure used to
     // arrive as a raw exception, which carries no answer to the only question
@@ -486,7 +491,7 @@ export class Wallet {
     const body = res.body as { txHash?: string; error?: string; detail?: string } | null;
 
     if (res.status === 200 && body?.txHash) {
-      this.store.remember(intentId, { txHash: body.txHash, vee, to, at: Date.now() });
+      this.store.remember(intentId, { txHash: body.txHash, vee: amount, to, at: Date.now() });
       return { ok: true, txHash: body.txHash };
     }
 
@@ -495,7 +500,7 @@ export class Wallet {
     // way to act on - and whose only obvious action, re-sending, is the double
     // charge this whole mechanism exists to prevent.
     if (res.status === 409 && body?.error === 'intent_unresolved') {
-      return await this.reconcile(intentId, to, vee);
+      return await this.reconcile(intentId, to, amount);
     }
 
     // The DETAIL travels with a persona-facing reason and NEVER with a generic

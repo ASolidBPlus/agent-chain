@@ -77,9 +77,9 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
           // accepted because a model writes 50 as readily as "50", and an integer
           // is exactly representable so nothing rounds. A fractional number is
           // refused rather than rounded - see normaliseVee.
-          vee: z
+          amount: z
             .union([z.string(), z.number()])
-            .describe(`amount in ${symbol} as a decimal string, e.g. "50" or "12.5". A whole number is also accepted.`),
+            .describe(`how much ${symbol} to send, as a decimal string, e.g. "50" or "12.5". A whole number is also accepted.`),
           intent_id: z.string().describe('a stable id for this payment; retrying with it will not double-spend'),
           memo: z.string().optional().describe('what the payment is for'),
         },

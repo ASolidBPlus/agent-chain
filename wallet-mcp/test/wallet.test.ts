@@ -162,7 +162,7 @@ afterEach(() => fake.server.close());
 describe('send', () => {
   it('sends to a name and returns the txHash', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'a1', memo: 'stream job' })).toEqual({
+    expect(await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'a1', memo: 'stream job' })).toEqual({
       ok: true,
       txHash: '0xtx1',
     });
@@ -175,8 +175,8 @@ describe('send', () => {
   // so the fake's record of what it received is the real assertion.
   it('replays an identical intent without sending again', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    const first = await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'a1' });
-    const second = await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'a1' });
+    const first = await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'a1' });
+    const second = await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'a1' });
 
     expect(second).toEqual(first);
     expect(fake.transfers).toHaveLength(1);
@@ -186,8 +186,8 @@ describe('send', () => {
   // exists to name - and it must not silently send.
   it('refuses an intent id reused for a different payment', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'a1' });
-    const result = await wallet.send({ to: 'alpha.play', vee: '75', intent_id: 'a1' });
+    await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'a1' });
+    const result = await wallet.send({ to: 'alpha.play', amount: '75', intent_id: 'a1' });
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('duplicate_intent');
@@ -196,16 +196,16 @@ describe('send', () => {
 
   it('survives a restart without forgetting an intent', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'a1' });
+    await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'a1' });
 
     const { wallet: reborn } = walletWith(AGENT_POLICY); // fresh process, same state file
-    expect(await reborn.send({ to: 'alpha.play', vee: '50', intent_id: 'a1' })).toEqual({ ok: true, txHash: '0xtx1' });
+    expect(await reborn.send({ to: 'alpha.play', amount: '50', intent_id: 'a1' })).toEqual({ ok: true, txHash: '0xtx1' });
     expect(fake.transfers).toHaveLength(1);
   });
 
   it('refuses over max_per_tx locally, without troubling chain-svc', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    const result = await wallet.send({ to: 'alpha.play', vee: '150', intent_id: 'b1' });
+    const result = await wallet.send({ to: 'alpha.play', amount: '150', intent_id: 'b1' });
 
     expect(result).toMatchObject({ ok: false, reason: 'over_max_per_tx' });
     expect(fake.transfers).toHaveLength(0);
@@ -213,7 +213,7 @@ describe('send', () => {
 
   it('refuses a denied counterparty', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.send({ to: 'treasury.play', vee: '1', intent_id: 'c1' })).toMatchObject({
+    expect(await wallet.send({ to: 'treasury.play', amount: '1', intent_id: 'c1' })).toMatchObject({
       ok: false,
       reason: 'counterparty_denied',
     });
@@ -223,11 +223,11 @@ describe('send', () => {
   // Criterion 9's shape at the tool: a bare local id is not a registered name.
   it('refuses an unknown name and a bare local id', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.send({ to: 'nobody.play', vee: '1', intent_id: 'd1' })).toMatchObject({
+    expect(await wallet.send({ to: 'nobody.play', amount: '1', intent_id: 'd1' })).toMatchObject({
       ok: false,
       reason: 'unknown_name',
     });
-    expect(await wallet.send({ to: 'client', vee: '1', intent_id: 'd2' })).toMatchObject({
+    expect(await wallet.send({ to: 'client', amount: '1', intent_id: 'd2' })).toMatchObject({
       ok: false,
       reason: 'unknown_name',
     });
@@ -244,7 +244,7 @@ describe('send', () => {
   // "no wallet is registered as <to>" survived every other test in this file.
   it("passes chain-svc's own detail through, rather than inventing one", async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    const result = await wallet.send({ to: 'ghost', vee: '1', intent_id: 'd3' });
+    const result = await wallet.send({ to: 'ghost', amount: '1', intent_id: 'd3' });
     expect(result).toMatchObject({ ok: false, reason: 'unknown_name' });
     // BOTH readings, which only the authority knows about.
     expect((result as { detail?: string }).detail).toContain('orch:ghost');
@@ -256,7 +256,7 @@ describe('send', () => {
   it('surfaces ambiguous_name as its own reason', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.ambiguous.push('toby');
-    const result = await wallet.send({ to: 'toby', vee: '1', intent_id: 'd4' });
+    const result = await wallet.send({ to: 'toby', amount: '1', intent_id: 'd4' });
     expect(result).toMatchObject({ ok: false, reason: 'ambiguous_name' });
     expect((result as { detail?: string }).detail).toContain('both');
   });
@@ -271,7 +271,7 @@ describe('send', () => {
   it('passes a persona-facing code through WITH its detail', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 409, body: { error: 'over_max_per_tx', detail: 'max_per_tx is 100 VEE' } };
-    expect(await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'r1' })).toMatchObject({
+    expect(await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'r1' })).toMatchObject({
       ok: false,
       reason: 'over_max_per_tx',
       detail: 'max_per_tx is 100 VEE',
@@ -283,7 +283,7 @@ describe('send', () => {
   it('gives a generic code NO detail, not even the code', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 403, body: { error: 'not_your_wallet', detail: 'orch:someone-else' } };
-    const result = await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'r2' });
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'r2' });
     expect(result).toEqual({ ok: false, reason: 'error' });
     expect(JSON.stringify(result)).not.toContain('not_your_wallet');
     expect(JSON.stringify(result)).not.toContain('orch:someone-else');
@@ -330,7 +330,7 @@ describe('send', () => {
     const stolen: unknown[] = [];
     console.error = (...args: unknown[]) => { stolen.push(args); };
     try {
-      await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'log-1' });
+      await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'log-1' });
     } finally {
       console.error = original;
     }
@@ -351,7 +351,7 @@ describe('send', () => {
     const stolen: unknown[] = [];
     console.error = (...args: unknown[]) => { stolen.push(args); };
     try {
-      await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'log-2' });
+      await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'log-2' });
     } finally {
       console.error = original;
     }
@@ -362,7 +362,7 @@ describe('send', () => {
 
   it('refuses when the policy file says frozen', async () => {
     const { wallet } = walletWith({ ...AGENT_POLICY, frozen: true });
-    expect(await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'e1' })).toMatchObject({
+    expect(await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'e1' })).toMatchObject({
       ok: false,
       reason: 'frozen',
     });
@@ -375,7 +375,7 @@ describe('send', () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 409, body: { error: 'over_stage_cap', detail: 'max_per_stage is 500 VEE' } };
 
-    expect(await wallet.send({ to: 'alpha.play', vee: '100', intent_id: 'f1' })).toMatchObject({
+    expect(await wallet.send({ to: 'alpha.play', amount: '100', intent_id: 'f1' })).toMatchObject({
       ok: false,
       reason: 'over_stage_cap',
     });
@@ -386,10 +386,10 @@ describe('send', () => {
   it('does not record a refused send', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 409, body: { error: 'over_stage_cap' } };
-    await wallet.send({ to: 'alpha.play', vee: '100', intent_id: 'g1' });
+    await wallet.send({ to: 'alpha.play', amount: '100', intent_id: 'g1' });
 
     fake.reply = { status: 200, body: { txHash: '0xlater' } };
-    expect(await wallet.send({ to: 'alpha.play', vee: '100', intent_id: 'g1' })).toEqual({ ok: true, txHash: '0xlater' });
+    expect(await wallet.send({ to: 'alpha.play', amount: '100', intent_id: 'g1' })).toEqual({ ok: true, txHash: '0xlater' });
   });
 
   // An unmapped chain-svc code must NOT become a plausible-looking refusal:
@@ -399,14 +399,14 @@ describe('send', () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 502, body: { error: 'chain_error', detail: 'reverted' } };
 
-    const result = await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'h1' });
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'h1' });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('error');
   });
 
   it('sends the wallet-mcp marker so chain-svc can tag the spend', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'i1' });
+    await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'i1' });
     expect(fake.headers[0]!['x-wallet-client']).toMatch(/^wallet-mcp\//);
   });
 });
@@ -445,11 +445,11 @@ describe('the wallet token never reaches the model', () => {
       await wallet.resolve('alpha.play'),
       await wallet.resolve('nobody.play'),
       await wallet.history(),
-      await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'z1' }),
-      await wallet.send({ to: 'alpha.play', vee: '150', intent_id: 'z2' }),
-      await wallet.send({ to: 'nobody.play', vee: '1', intent_id: 'z3' }),
-      await wallet.send({ to: 'treasury.play', vee: '1', intent_id: 'z4' }),
-      await wallet.send({ to: '', vee: '1', intent_id: 'z5' }),
+      await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'z1' }),
+      await wallet.send({ to: 'alpha.play', amount: '150', intent_id: 'z2' }),
+      await wallet.send({ to: 'nobody.play', amount: '1', intent_id: 'z3' }),
+      await wallet.send({ to: 'treasury.play', amount: '1', intent_id: 'z4' }),
+      await wallet.send({ to: '', amount: '1', intent_id: 'z5' }),
     ];
 
     for (const out of outputs) {
@@ -468,13 +468,13 @@ describe('the wallet token never reaches the model', () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.reply = { status: 500, body: { error: 'chain_error', detail: `bad bearer ${TOKEN}` } };
 
-    const result = await wallet.send({ to: 'alpha.play', vee: '1', intent_id: 'y1' });
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'y1' });
     expect(JSON.stringify(result)).not.toContain(TOKEN);
   });
 
   it('keeps it out of the state file on disk', async () => {
     const { wallet, config } = walletWith(AGENT_POLICY);
-    await wallet.send({ to: 'alpha.play', vee: '50', intent_id: 'x1' });
+    await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'x1' });
     expect(readFileSync(config.stateFile, 'utf8')).not.toContain(TOKEN);
   });
 });
@@ -482,7 +482,7 @@ describe('the wallet token never reaches the model', () => {
 // Spec S5, ruled. The model must never see the broadcast-to-record
 // window, because the obvious action on it - send again - is the double charge.
 describe('reconciling an unresolved intent', () => {
-  const send = { to: 'alpha.play', vee: '10', intent_id: 'i-recon' };
+  const send = { to: 'alpha.play', amount: '10', intent_id: 'i-recon' };
 
   it('polls until confirmed and returns ONE txHash for ONE transfer', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
@@ -537,7 +537,7 @@ describe('reconciling an unresolved intent', () => {
     fake.reply = { status: 409, body: { error: 'intent_unresolved' } };
     fake.intentReplies = [{ status: 200, body: { status: 'reserved' } }];
 
-    const res = await wallet.send({ to: 'alpha.play', vee: '10', intent_id: 'i-never' });
+    const res = await wallet.send({ to: 'alpha.play', amount: '10', intent_id: 'i-never' });
 
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('intent_unresolved');
@@ -562,7 +562,7 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
 
   it('surfaces the transport failure instead of flattening to unknown_name', async () => {
     writeFileSync(join(dir, 'policy.json'), JSON.stringify(AGENT_POLICY));
-    const res = await offlineWallet().send({ to: 'alpha.play', vee: '10', intent_id: 'off-1' });
+    const res = await offlineWallet().send({ to: 'alpha.play', amount: '10', intent_id: 'off-1' });
 
     expect(res.ok).toBe(false);
     // THE POINT: not unknown_name. A student debugging this must not be sent
@@ -573,7 +573,7 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
 
   it('still reports a genuinely unregistered name as unknown_name', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    const res = await wallet.send({ to: 'nobody.play', vee: '10', intent_id: 'off-2' });
+    const res = await wallet.send({ to: 'nobody.play', amount: '10', intent_id: 'off-2' });
 
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('unknown_name');
@@ -583,9 +583,9 @@ describe('a chain-svc outage is not reported as an unknown name', () => {
   // previously both produced byte-identical results.
   it('gives the two cases different answers', async () => {
     writeFileSync(join(dir, 'policy.json'), JSON.stringify(AGENT_POLICY));
-    const outage = await offlineWallet().send({ to: 'alpha.play', vee: '10', intent_id: 'off-3' });
+    const outage = await offlineWallet().send({ to: 'alpha.play', amount: '10', intent_id: 'off-3' });
     const { wallet } = walletWith(AGENT_POLICY);
-    const missing = await wallet.send({ to: 'nobody.play', vee: '10', intent_id: 'off-4' });
+    const missing = await wallet.send({ to: 'nobody.play', amount: '10', intent_id: 'off-4' });
 
     expect(JSON.stringify(outage)).not.toBe(JSON.stringify(missing));
   });
