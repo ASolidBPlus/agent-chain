@@ -1061,6 +1061,16 @@ export class Store {
   /// would be a second door past a guard that cannot see it.
   private releaseCallCount(agentId: string, stage: string, contract: string, fn: string): void {
     const current = this.callCount(agentId, stage, contract, fn);
+    // CLAMPED AT ZERO AND UNREACHABLE BY CONSTRUCTION, recorded as such rather
+    // than left looking like a live defence - the same statement the stage-hold
+    // clamp above carries, and for the same reason. A count row is only ever
+    // written at 1 or above, and a release requires an UNCOMPLETED intent row
+    // which the same transaction deletes, so there cannot be more releases than
+    // reservations for one entry. A mutation that weakens this to `< 0`
+    // SURVIVES the suite, and that is correct rather than a coverage gap: it
+    // describes a state no sequence of calls can produce, and the isolating
+    // test it would need would have to write that state directly, which would
+    // be a test of SQLite rather than of this.
     if (current <= 0) return;
     this.db
       .query(
