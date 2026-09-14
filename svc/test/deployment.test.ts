@@ -5,14 +5,14 @@
 // exist and has no repair path.
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
 import { assertDeploymentUnchanged, ChainSwapError, type DeploymentIdentity } from '../src/deployment.ts';
 import { Resolver } from '../src/resolver.ts';
-import type { Chain } from '../src/chain.ts';
+import { loadDeployment, type Chain } from '../src/chain.ts';
 import type { HttpError } from '../src/errors.ts';
 
 const ADDR_A = '0x1111111111111111111111111111111111111111' as const;
@@ -256,5 +256,104 @@ describe('resolution without a names module', () => {
     }
     expect(code).toBe('module_not_deployed');
     store.close();
+  });
+});
+
+// §8.2. EVERY REFUSAL IN loadDeployment, which had no coverage at all until a
+// mutation run said so: disabling the schema check and disabling the
+// duplicate-key check both left the suite green.
+//
+// This file is written by a deploy the operator may not have watched, and a
+// service that will not start is the only symptom they get - so each refusal is
+// asserted on its words, not just on throwing.
+describe('loadDeployment refuses a local.json it cannot trust', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chain-svc-load-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (body: unknown) => writeFileSync(join(dir, 'local.json'), JSON.stringify(body));
+  const load = () => loadDeployment(dir);
+
+  const TOKEN_ENTRY = { kind: 'token', key: 'vee', contract: 'Token', address: ADDR_A };
+  const NAMES_ENTRY = { kind: 'names', contract: 'NameRegistry', address: ADDR_B, tld: 'vee' };
+  const GOOD = { schema: 1, chainId: 31337, treasury: ADDR_A, modules: [TOKEN_ENTRY, NAMES_ENTRY] };
+
+  it('accepts the shape chain-deploy writes', () => {
+    write(GOOD);
+    const d = load();
+    expect(d.modules.map((m) => m.kind)).toEqual(['token', 'names']);
+    expect(d.modules[0]?.key).toBe('vee');
+    expect(d.modules[1]?.tld).toBe('vee');
+  });
+
+  // The old four-key file is RETIRED rather than supported: reading it would
+  // mean inventing a key and a TLD for contracts deployed before either
+  // existed, and inventing them is how a wallet gets looked up under a name
+  // nobody registered.
+  it('names the retired shape rather than failing on a missing field', () => {
+    write({ chainId: 31337, VEEBux: ADDR_A, NameRegistry: ADDR_B, treasury: ADDR_A });
+    expect(() => load()).toThrow(/predates the manifest .*redeploy with chain-deploy/);
+  });
+
+  it('refuses a schema it does not know', () => {
+    write({ ...GOOD, schema: 2 });
+    expect(() => load()).toThrow(/schema 2 unsupported/);
+  });
+
+  it('refuses an empty module list', () => {
+    write({ ...GOOD, modules: [] });
+    expect(() => load()).toThrow(/declares no modules/);
+  });
+
+  it('refuses a module kind it has no contract for', () => {
+    write({ ...GOOD, modules: [{ kind: 'oracle', contract: 'Oracle', address: ADDR_A }] });
+    expect(() => load()).toThrow(/unknown module kind "oracle"/);
+  });
+
+  // The contract name is the kind's, or the file and the chain disagree about
+  // what is at that address.
+  it('refuses a contract that is not the one its kind deploys', () => {
+    write({ ...GOOD, modules: [{ ...TOKEN_ENTRY, contract: 'Foo' }] });
+    expect(() => load()).toThrow(/module "vee" is "Foo", expected "Token"/);
+  });
+
+  it('refuses a token module with no key', () => {
+    write({ ...GOOD, modules: [{ kind: 'token', contract: 'Token', address: ADDR_A }] });
+    expect(() => load()).toThrow(/token module with no key/);
+  });
+
+  // Two instances under one key: every later lookup of that key would answer
+  // about whichever came first, silently.
+  it('refuses a duplicate token key', () => {
+    write({ ...GOOD, modules: [TOKEN_ENTRY, { ...TOKEN_ENTRY, address: ADDR_B }] });
+    expect(() => load()).toThrow(/duplicate token key "vee"/);
+  });
+
+  it('refuses a second names module', () => {
+    write({ ...GOOD, modules: [NAMES_ENTRY, { ...NAMES_ENTRY, address: ADDR_A }] });
+    expect(() => load()).toThrow(/more than one names module/);
+  });
+
+  it('refuses a names module with no tld', () => {
+    write({ ...GOOD, modules: [{ kind: 'names', contract: 'NameRegistry', address: ADDR_B }] });
+    expect(() => load()).toThrow(/names module has no tld/);
+  });
+
+  it('refuses a missing treasury', () => {
+    write({ schema: 1, chainId: 31337, modules: [TOKEN_ENTRY] });
+    expect(() => load()).toThrow(/missing treasury/);
+  });
+
+  // `Number(undefined)` is NaN, which used to reach assertPrivateChain and fail
+  // there as a chain-id mismatch: a true message about the wrong thing.
+  it('refuses a non-numeric chainId here, rather than as a chain mismatch later', () => {
+    write({ ...GOOD, chainId: 'thirty-one-three-three-seven' });
+    expect(() => load()).toThrow(/no numeric chainId/);
+  });
+
+  it('refuses a file that is not there at all, naming the deploy step', () => {
+    expect(() => load()).toThrow(/no deployment at .*Run Deploy\.s\.sol first/);
   });
 });

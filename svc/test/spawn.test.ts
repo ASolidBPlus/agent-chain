@@ -1345,3 +1345,78 @@ describe('spawn records the kind it enforced', () => {
     store.close();
   });
 });
+
+// §4.4 / §8.4. THE TWO OPTIONAL HALVES OF A SPAWN, refused before anything is
+// written. Both guards existed with no test until a mutation run said so:
+// disabling either left the whole suite green.
+//
+// The assertion is not only the refusal but WHEN it happens. Refusing after
+// keystore.create would leave a key file behind, and the retry after that
+// refusal would take the idempotent path and report success for the request
+// that was just refused - so each case checks the store has no spawn row and
+// the keystore was never reached.
+describe('a spawn refuses what this deployment cannot do', () => {
+  function spawnerOn(modules: Record<string, unknown>): { s: Spawner; store: Store; touched: string[] } {
+    const touched: string[] = [];
+    const store = new Store(':memory:');
+    const s = new Spawner(
+      config,
+      { modules } as unknown as Chain,
+      new Proxy(
+        {},
+        {
+          get(_t, prop) {
+            touched.push(String(prop));
+            throw new Error('the keystore must not be reached: the request was refused first');
+          },
+        },
+      ) as Keystore,
+      store,
+      exploding('resolver') as Resolver,
+      DEFAULTS,
+    );
+    return { s, store, touched };
+  }
+
+  const TOKENS = [{ key: 'vee', address: '0xvee', symbol: 'VEE', decimals: 18 }];
+  const NAMES = { address: '0xreg', tld: 'vee' };
+
+  it('refuses fundVee without a token module, before any side effect', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [], names: NAMES });
+
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fundVee: 10 }))).toBe('module_not_deployed');
+    expect(touched).toEqual([]);
+    expect(store.spawnedAddress('orch:a')).toBeNull();
+    store.close();
+  });
+
+  it('refuses an alias without a names module, before any side effect', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: TOKENS });
+
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', alias: 'a.vee' }))).toBe('module_not_deployed');
+    expect(touched).toEqual([]);
+    expect(store.spawnedAddress('orch:a')).toBeNull();
+    store.close();
+  });
+
+  // THE HALVES ARE INDEPENDENT. A spawn needs NEITHER module: a wallet is a
+  // key, a token and a policy file, and all three exist on a deployment with no
+  // contracts at all. Only the optional halves need one each - so asking for
+  // neither must get past both guards, and the proof it got past them is that
+  // it reached the keystore.
+  it('lets a spawn asking for neither reach the keystore on a bare deployment', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [] });
+
+    await s.spawn({ agentId: 'orch:a' }).catch(() => undefined);
+    expect(touched.length).toBeGreaterThan(0);
+    store.close();
+  });
+
+  it('accepts fundVee zero without a token module, because nothing moves', async () => {
+    const { s, store, touched } = spawnerOn({ tokens: [] });
+
+    await s.spawn({ agentId: 'orch:a', fundVee: 0 }).catch(() => undefined);
+    expect(touched.length).toBeGreaterThan(0);
+    store.close();
+  });
+});
