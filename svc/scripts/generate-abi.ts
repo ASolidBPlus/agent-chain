@@ -5,7 +5,7 @@
 // without Foundry installed (mesh-agent's CI has no forge). The drift risk that
 // creates is covered by the forge CI job re-running this and failing on a diff.
 //
-//   bun run scripts/generate-abi.ts        # from chain/svc, after `forge build`
+//   bun run scripts/generate-abi.ts        # from svc, after `forge build`
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -23,7 +23,7 @@ function abiOf(name: string): unknown[] {
   try {
     raw = readFileSync(path, 'utf8');
   } catch {
-    throw new Error(`No artifact at ${path}. Run \`forge build\` in chain/contracts first.`);
+    throw new Error(`No artifact at ${path}. Run \`forge build\` in contracts first.`);
   }
   const artifact = JSON.parse(raw) as { abi?: unknown[] };
   if (!Array.isArray(artifact.abi) || artifact.abi.length === 0) {
@@ -39,8 +39,8 @@ const parts = CONTRACTS.map(
 writeFileSync(
   TARGET,
   `// GENERATED FILE - do not edit by hand.\n` +
-    `// Regenerate with: cd chain/svc && bun run scripts/generate-abi.ts\n` +
-    `// Source: chain/contracts/out/<Contract>.sol/<Contract>.json (\`forge build\`).\n` +
+    `// Regenerate with: cd svc && bun run scripts/generate-abi.ts\n` +
+    `// Source: contracts/out/<Contract>.sol/<Contract>.json (\`forge build\`).\n` +
     `// The forge CI job regenerates this and fails on a diff, so an ABI change\n` +
     `// that is not reflected here cannot merge.\n\n` +
     parts.join('\n\n') +

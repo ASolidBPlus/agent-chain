@@ -1,6 +1,6 @@
 // GENERATED FILE - do not edit by hand.
-// Regenerate with: cd chain/svc && bun run scripts/generate-abi.ts
-// Source: chain/contracts/out/<Contract>.sol/<Contract>.json (`forge build`).
+// Regenerate with: cd svc && bun run scripts/generate-abi.ts
+// Source: contracts/out/<Contract>.sol/<Contract>.json (`forge build`).
 // The forge CI job regenerates this and fails on a diff, so an ABI change
 // that is not reflected here cannot merge.
 

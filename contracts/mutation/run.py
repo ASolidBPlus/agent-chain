@@ -23,7 +23,7 @@ work rather than silence. The same bug inverted - survivors reading as killed -
 produces a clean sweep and reports "all mutants killed" having killed none.
 The checks below exist to make the silent direction impossible.
 
-  python3 chain/contracts/mutation/run.py
+  python3 contracts/mutation/run.py
 """
 
 import hashlib

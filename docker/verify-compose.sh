@@ -2,10 +2,10 @@
 # Runnable evidence for spec S8 criterion 2 IN FULL (the /supply half needs
 # chain-svc, which is why C1b could only do the Anvil half) and for the
 # Otterscan acceptance check. Needs Docker; run by hand and paste the output:
-#   ./chain/docker/verify-compose.sh
+#   ./docker/verify-compose.sh
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")/.." && pwd)"       # chain/
+HERE="$(cd "$(dirname "$0")/.." && pwd)"       # the repo root
 export ANVIL_MNEMONIC=${ANVIL_MNEMONIC:-"test test test test test test test test test test test junk"}
 export CHAIN_SVC_TOKEN=${CHAIN_SVC_TOKEN:-compose-verify-token}
 export KEYSTORE_SECRET=${KEYSTORE_SECRET:-compose-verify-secret}
