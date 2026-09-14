@@ -17,7 +17,7 @@ export interface Resolved {
   address: Address;
   /// The registry's canonical name for the address: a qualified agent id for an
   /// agent (`orch:vendor`), a platform name for a platform account
-  /// (`treasury.vee`), or null if it has none - a burner registers no names
+  /// (`treasury.play`), or null if it has none - a burner registers no names
   /// (spec S4). Named `canonical` rather than `agentId` because it is not
   /// always an agent (ruled).
   canonical: string | null;

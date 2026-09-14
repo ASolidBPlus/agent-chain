@@ -242,7 +242,7 @@ export async function readPolicyFile(policyDir: string, agentId: string): Promis
 /// The pattern dialect for allow and deny lists. THREE forms and no more:
 ///
 ///   `*`        matches anything
-///   `*suffix`  matches any name ending `suffix`   (`*.vee`)
+///   `*suffix`  matches any name ending `suffix`   (`*.play`)
 ///   `prefix*`  matches any name starting `prefix` (`acme:*`)
 ///   anything else is a LITERAL, compared whole.
 ///
@@ -283,7 +283,7 @@ export function assertPatternsUsable(patterns: string[], field: 'allow' | 'deny'
       throw new HttpError(
         'invalid_request',
         `${field} pattern ${JSON.stringify(p)} is not supported: a star is allowed only as the ` +
-          `whole pattern, a leading star (*.vee), or a trailing star (acme:*)`,
+          `whole pattern, a leading star (*.play), or a trailing star (acme:*)`,
       );
     }
   }
@@ -317,7 +317,7 @@ export function stageCapWei(policy: AgentPolicy, decimals: number): bigint {
 /// `registerFor(alias, wallet, wallet)`, so a vanity alias and the canonical
 /// agent id resolve to the same address. Matching the deny list against the
 /// string the caller typed therefore denied a NAME and not a WALLET. Measured
-/// before the fix, with `deny: ["mark.vee"]` - "mark.vee" refused,
+/// before the fix, with `deny: ["mark.play"]` - "mark.play" refused,
 /// "orch:mark" ALLOWED, same wallet, no registrar write and no privilege.
 ///
 /// This function closes it by NAME: deny matches the requested name OR the
@@ -370,12 +370,12 @@ export function enforcePolicy(args: {
   //
   // DENY matches EITHER, so it is strictly harder to evade: a wallet holds more
   // than one name by design - `addAlias` registers an alias against the same
-  // address - so denying `treasury.vee` while `treasure.vee` resolved to the
+  // address - so denying `treasury.play` while `treasure.play` resolved to the
   // same wallet was a refusal and an allowance for one counterparty.
   //
   // ALLOW also matches either, and NOT the canonical alone, which is what a
   // literal reading of "evaluate against the resolved principal" would give.
-  // Measured: the default agent allow list is `["*.vee"]` and canonical ids look
+  // Measured: the default agent allow list is `["*.{tld}"]` and canonical ids look
   // like `orch:bob`, so canonical-only matching refuses EVERY send to EVERY
   // agent wallet. Widening deny is the safe direction; narrowing allow is not.
   const names = canonical && canonical !== to ? [to, canonical] : [to];

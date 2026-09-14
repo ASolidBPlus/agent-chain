@@ -363,7 +363,7 @@ export class Spawner {
     const next = mergePolicy(body, current);
 
     // Also called here now. It was on this path only, so `POST /wallets` with
-    // `deny: ["mark.vee"]` was accepted while PATCH with the identical value
+    // `deny: ["mark.play"]` was accepted while PATCH with the identical value
     // was refused - the same asymmetry in the other direction.
     await this.assertDenyEntriesAreCanonical(next.deny);
 
@@ -379,7 +379,7 @@ export class Spawner {
 
   /// A deny entry must name a CANONICAL id or a PLATFORM name, never a vanity
   /// alias (chain spec S5's durable rule). The two are indistinguishable by
-  /// shape - `treasury.vee` and `mark.vee` are the same string form - so the
+  /// shape - `treasury.play` and `mark.play` are the same string form - so the
   /// REGISTRY is the authority: an entry is canonical when it IS the primary
   /// name for the address it resolves to.
   ///

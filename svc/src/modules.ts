@@ -28,7 +28,7 @@ export interface TokenModule {
 export interface NamesModule {
   address: Address;
   /// The suffix canonical names end in, without the dot. Deployment data
-  /// rather than code: it was a literal `.vee` in the validators until the
+  /// rather than code: it was a literal suffix in the validators until the
   /// manifest carried it.
   tld: string;
 }
@@ -114,7 +114,7 @@ export async function buildModules(
   return { tokens, names };
 }
 
-/// The boot line's module summary: `token:vee(VEE, 18 dp)@0x…, names(.vee)@0x…`.
+/// The boot line's module summary: `token:play(PLAY, 18 dp)@0x…, names(.play)@0x…`.
 ///
 /// An operator reading one line at start-up should be able to answer "what is on
 /// this chain, and which token is the default?" without a second command. The

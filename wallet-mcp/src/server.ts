@@ -93,7 +93,13 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
       'resolve',
       {
         description:
-          'Look up a name - a canonical agent id like alpha:client, or a vanity alias like alpha.vee - ' +
+          // The suffix comes from the DEPLOYMENT, not from a literal: it is a
+          // manifest field now, so a hardcoded example is wrong on any
+          // deployment that chose a different one - and wrong in the worst
+          // place, since this is the text the model reads to learn what a name
+          // looks like. Inside `if (modules.names)`, so it is present here by
+          // construction.
+          `Look up a name - a canonical agent id like alpha:client, or a vanity alias like alpha.${modules.names.tld} - ` +
           'and get the address and canonical id it points at. Two names that look alike can point at different ' +
           'wallets, so resolve a name before trusting it.',
         inputSchema: { name: z.string().describe('the name to look up') },

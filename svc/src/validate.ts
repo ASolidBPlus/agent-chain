@@ -17,7 +17,7 @@ const CANONICAL_ID = /^[a-z0-9._@-]{1,48}:[a-z0-9._@-]{1,48}$/;
 
 /// A vanity alias uses the full on-chain charset MINUS the colon, because the
 /// colon is what namespaces canonical ids and an alias must never impersonate
-/// one. Case is preserved: `aIpha.vee` and `alpha.vee` are different names and
+/// one. Case is preserved: `aIpha.play` and `alpha.play` are different names and
 /// that difference is a game mechanic (spec S3.2).
 const ALIAS = /^[a-zA-Z0-9._@-]+$/;
 

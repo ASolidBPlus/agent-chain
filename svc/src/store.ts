@@ -389,7 +389,7 @@ export class Store {
   /// whether the namespace fallback then succeeded, was skipped for shape, or
   /// failed - so it keeps firing exactly as `unknown_name` did, and a
   /// mixed-case persona stays visible. It does NOT count a legitimate
-  /// colon-less alias or platform name (`treasury.vee`), because those are an
+  /// colon-less alias or platform name (`treasury.play`), because those are an
   /// exact hit and using them is correct.
   countBareId(agentId: string): void {
     this.db

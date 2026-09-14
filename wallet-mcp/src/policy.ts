@@ -65,7 +65,7 @@ export function readPolicy(path: string): WalletPolicy | null {
   return null;
 }
 
-/// `*` matches anything, `*.vee` a suffix, `acme:*` a prefix; anything else is
+/// `*` matches anything, `*.{tld}` a suffix, `acme:*` a prefix; anything else is
 /// a literal. THE SAME RESTRICTED DIALECT AS chain-svc, character for
 /// character, on purpose: two glob implementations that disagree would produce
 /// a local "allowed" and a server-side refusal, which reads to a model as the
