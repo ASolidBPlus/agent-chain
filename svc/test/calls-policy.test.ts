@@ -78,6 +78,21 @@ const CONVERTER_ABI = [
   fn('overloaded', [{ type: 'uint256', name: 'a' }], 'nonpayable'),
   fn('overloaded', [{ type: 'address', name: 'a' }], 'nonpayable'),
   fn('exotic', [{ type: 'function', name: 'f' }], 'nonpayable'),
+  fn('airdrop', [{ type: 'address[]', name: 'targets' }], 'nonpayable'),
+  fn(
+    'settle',
+    [
+      {
+        type: 'tuple',
+        name: 'leg',
+        components: [
+          { type: 'address', name: 'token' },
+          { type: 'uint256', name: 'amount' },
+        ],
+      } as never,
+    ],
+    'nonpayable',
+  ),
 ] as unknown as Abi;
 
 const SHOP_ABI = [
@@ -470,6 +485,36 @@ describe('addressArgs', () => {
     const p = await policy();
     expect(p.snapshot().entries).toHaveLength(0);
     expect(logged.join('\n')).toMatch(/addressArgs 2 is uint256, not address/);
+  });
+
+  it('refuses an address nested in an array or a tuple, for a wallet-callable entry', async () => {
+    // Every step that makes this reachable is individually right:
+    // assertSupportedType accepts `address[]`, validateOne accepts
+    // {"name":"alpha"} at any depth, and addressArgs is keyed by TOP-LEVEL
+    // index with no way to name an element inside an array. So the wire object
+    // would reach encodeFunctionData, which cannot encode an object as an
+    // address - and the failure would arrive as a 502 chain_error in front of a
+    // persona, saying the chain is broken about an entry nobody could use.
+    for (const function_ of ['airdrop', 'settle']) {
+      write(only({ contract: 'converter', function: function_, kinds: ['agent'] }));
+      const p = await policy();
+      expect(p.snapshot().entries).toHaveLength(0);
+      expect(logged.join('\n')).toMatch(/addressArgs can only name a top-level argument/);
+    }
+  });
+
+  it('allows it on an admin-only entry, which passes raw addresses', async () => {
+    // Platform scope encodes a checksummed address at any depth, so the reason
+    // for the refusal does not apply - and refusing anyway would deny the hub a
+    // shape the chain accepts.
+    write(only({ contract: 'converter', function: 'airdrop', admin: true }));
+    expect((await policy()).snapshot().entries).toHaveLength(1);
+  });
+
+  it('refuses an entry that is BOTH admin and wallet-callable', async () => {
+    // Wallet scope can reach it, so the exemption does not.
+    write(only({ contract: 'converter', function: 'airdrop', admin: true, kinds: ['agent'] }));
+    expect((await policy()).snapshot().entries).toHaveLength(0);
   });
 
   it('refuses a rule that is not one of the four', async () => {

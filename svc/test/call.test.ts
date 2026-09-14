@@ -524,7 +524,7 @@ describe('money', () => {
   it('names the allow list when a contract is not an allowed counterparty', async () => {
     // §7's trap, and the refusal a scenario author is most likely to misread.
     // A per-scenario policy override REPLACES the kind defaults rather than
-    // extending them, so a scenario setting allow: ["arena:*"] silently drops
+    // extending them, so a scenario setting allow: ["acme:*"] silently drops
     // the `converter` entry policy-defaults.json carries - and every call whose
     // amount is in the default token is refused. The CODE is right;
     // "converter is not an allowed counterparty" sends an author looking at
@@ -540,7 +540,7 @@ describe('money', () => {
         agentId: 'orch:narrow',
         max_per_tx: '1000',
         max_per_stage: '5000',
-        allow: ['arena:*'],
+        allow: ['acme:*'],
         deny: [],
       }),
     );
@@ -765,7 +765,7 @@ describe('admin-call', () => {
     // A THIRD STATUS, and not decoration. Nothing was mined, so a null hash
     // under "reverted" would lie about what happened - and silence would hide
     // the hub trying something the chain would not accept, which is exactly
-    // what a facilitator wants to see.
+    // what an operator wants to see.
     const { t, store } = await harness(undefined, { contractReverts: true });
     await t
       .adminCall({
@@ -783,6 +783,24 @@ describe('admin-call', () => {
       status: 'refused',
       txHash: null,
     });
+  });
+
+  it('records a generated id as server-generated, even when intentId was empty', async () => {
+    // `typeof body.intentId === 'string'` is true of "", so an empty string
+    // recorded the id as CALLER-supplied while GENERATING a server one - the
+    // column then said the caller chose an id it never sent. That column is not
+    // bookkeeping: the anomaly detector reads it to tell a guessable id being
+    // guessed from a chain-svc uuid being quoted, which are different stories
+    // about how somebody learned it.
+    const { t, store } = await harness();
+    const out = await t.adminCall({
+      contract: 'converter',
+      function: 'setPair',
+      args: [PLAY, GOLD, '1'],
+      intentId: '',
+    });
+    expect(out.intentId).toMatch(/^chain-svc:/);
+    expect(store.intentIdSource(out.intentId)).toBe('server');
   });
 
   it('emits hub.call', async () => {
@@ -919,5 +937,43 @@ describe('serialiseResult', () => {
         ]),
       ),
     ).toEqual({ token: '0x5FbDB2315678afecb367f032d93F642f64180aa3', amount: '5' });
+  });
+});
+
+// §3.4's bound, in the unit the spec names it in.
+describe('the read size bound', () => {
+  it('counts BYTES, not UTF-16 units', async () => {
+    // The same reasoning callargs.ts's string cap carries, and it was
+    // inconsistent with it: `JSON.stringify(x).length` counts UTF-16 units, so
+    // a result of astral characters passed a 64 KiB bound at up to four times
+    // that many bytes. The bound exists to bound what crosses the wire.
+    const { t } = await harness([
+      {
+        contract: 'converter',
+        function: 'quote',
+        kinds: ['agent'],
+        admin: false,
+        read: true,
+        addressArgs: { 0: 'token', 1: 'token' },
+        abiFunction: {
+          type: 'function',
+          name: 'quote',
+          inputs: [],
+          outputs: [{ type: 'string', name: 's' }],
+          stateMutability: 'view',
+        } as never,
+      },
+    ]);
+    // One emoji is 2 UTF-16 units and 4 bytes, so 20k of them are 40k units -
+    // under the bound by a character count - and 80k bytes, over it.
+    (t as unknown as { chain: { publicClient: { readContract: () => Promise<string> } } }).chain =
+      {
+        ...(t as unknown as { chain: object }).chain,
+        publicClient: { readContract: async () => '😀'.repeat(20_000) },
+      } as never;
+
+    expect(
+      await codeOf(() => t.read(asWallet('orch:a'), { contract: 'converter', function: 'quote', args: [] })),
+    ).toBe('bad_args');
   });
 });

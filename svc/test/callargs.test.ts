@@ -158,9 +158,9 @@ describe('address', () => {
   });
 
   it('refuses a raw address from wallet scope', () => {
-    // Joel's rule: a persona sees names, never addresses. A persona that can
-    // pass a raw address can pay an address nobody registered, which is the
-    // one counterparty the deny list cannot name.
+    // A persona sees names, never addresses. A persona that can pass a raw
+    // address can pay an address nobody registered, which is the one
+    // counterparty the deny list cannot name.
     const r = refusal([p('address', 'to')], [CHECKSUMMED]);
     expect(r?.code).toBe('bad_args');
     expect(r?.detail).toBe('argument 0 (to): expected address');

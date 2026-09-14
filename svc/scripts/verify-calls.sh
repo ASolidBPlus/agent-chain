@@ -200,7 +200,7 @@ step "the event feed carries the call, with the names the caller used"
 #
 # chain-svc has no /events endpoint: events go to the OUTBOX and are delivered
 # to hub-core, which does not exist yet. So the outbox is read where it lives,
-# which is also the honest thing to assert - the feed is what a facilitator
+# which is also the honest thing to assert - the feed is what an operator
 # will receive, not what a log line says.
 sleep 2
 check "agent.call carries the caller's words, not addresses" \
@@ -228,11 +228,9 @@ PYEOF
   "True"
 
 step "hub.call is emitted for the operator's action too"
-# THE SUCCESSFUL one. Whether a SIMULATION-REFUSED admin-call should also emit
-# an event is an open question - nothing was mined, so `status: "reverted"` with
-# a txHash would be a lie about what happened - and it is powerout-planner's to
-# rule. What is not in question is that the operator's REAL action reaches the
-# feed, which is what this asserts.
+# THE SUCCESSFUL one. What is not in question is that the operator's REAL
+# action reaches the feed, which is what this asserts; the refused case is
+# below, once the spec settled what a call that was never mined should say.
 check "hub.call recorded" \
   "$(python3 - <<PYEOF
 import json, sqlite3

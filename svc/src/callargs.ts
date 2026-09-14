@@ -235,8 +235,8 @@ function validateOne(param: AbiParameter, value: unknown, path: string, scope: C
       }
       return value;
     }
-    // Wallet scope: a persona sees names, never addresses (ruled). The shape,
-    // not the rule - §3.2 step 5 owns which of the three this index may take.
+    // Wallet scope: a persona sees names, never addresses. The shape, not the
+    // rule - §3.2 step 5 owns which of the three this index may take.
     if (typeof value !== 'object' || value === null || Array.isArray(value)) refuse(path, type);
     const keys = Object.keys(value as Record<string, unknown>);
     if (keys.length !== 1) refuse(path, type);

@@ -117,6 +117,24 @@ const APPROVAL_FUNCTIONS = new Set([
   'permit',
 ]);
 
+/// Where an `address` hides inside a parameter, or null if there is none below
+/// the top level. The top level itself is fine - that is what `addressArgs`
+/// names - so the walk starts one level in.
+function nestedAddressIn(param: AbiParameter): string | null {
+  const arr = /^(.*)\[\d*\]$/.exec(param.type);
+  if (arr) {
+    const element = { ...param, type: arr[1]! } as AbiParameter;
+    return element.type === 'address' || nestedAddressIn(element) ? 'an array' : null;
+  }
+  if (param.type === 'tuple') {
+    const components = (param as { components?: readonly AbiParameter[] }).components ?? [];
+    for (const c of components) {
+      if (c.type === 'address' || nestedAddressIn(c)) return 'a tuple';
+    }
+  }
+  return null;
+}
+
 function assertObject(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`${what} is not an object`);
@@ -220,6 +238,35 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     // permission - it is a line that does nothing, written by an author who
     // believed it did something.
     throw new Error(`${where}: no "kinds" and not "admin"; nothing could call it`);
+  }
+
+  // AN ADDRESS NESTED IN AN ARRAY OR A TUPLE IS NOT CALLABLE BY A WALLET, and
+  // refusing it here is the only place it can fail safely.
+  //
+  // The chain of steps that makes it reachable is each individually right:
+  // `assertSupportedType` accepts `address[]` because the validator can check
+  // one; `validateOne` accepts `{"name":"alpha"}` at every depth, because the
+  // wire form is the wire form; and §3.2 step 5 resolves `addressArgs`, which
+  // is keyed by TOP-LEVEL argument index and has no way to name an element
+  // inside an array. So the wire object would travel all the way to
+  // `encodeFunctionData`, which cannot encode an object as an address - and the
+  // failure would reach a persona as a 502 chain_error, which says the chain is
+  // broken about an allowlist entry nobody could have used.
+  //
+  // ADMIN-ONLY ENTRIES ARE EXEMPT because platform scope passes raw checksummed
+  // addresses, which encode at any depth. An entry with BOTH `admin` and
+  // `kinds` is refused: wallet scope can reach it.
+  if (kinds.length > 0) {
+    for (let i = 0; i < inputs.length; i++) {
+      const nested = nestedAddressIn(inputs[i]!);
+      if (nested) {
+        throw new Error(
+          `${where}: argument ${i} (${inputs[i]!.name ?? ''}) has an address nested in ${nested}, ` +
+            `and addressArgs can only name a top-level argument - so a wallet-scope caller has no ` +
+            `way to pass it. Admin-only entries may use it; wallet-callable ones may not`,
+        );
+      }
+    }
   }
 
   const inRange = (i: unknown, what: string): number => {

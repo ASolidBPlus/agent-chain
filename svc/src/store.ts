@@ -963,6 +963,20 @@ export class Store {
     return row?.agent_id ?? null;
   }
 
+  /// Whether the intent id was CALLER-supplied or SERVER-generated.
+  ///
+  /// Exposed because the distinction is READ, not merely recorded: the anomaly
+  /// payload carries it so an operator can tell a guessable id being guessed
+  /// from a chain-svc uuid being quoted, which are different stories about how
+  /// somebody learned it. A test that can see the column is what keeps the two
+  /// from silently becoming one.
+  intentIdSource(intentId: string): string | null {
+    const row = this.db.query(`SELECT id_source FROM intents WHERE intent_id = ?`).get(intentId) as
+      | { id_source: string | null }
+      | null;
+    return row?.id_source ?? null;
+  }
+
   intentTxHash(intentId: string): string | null {
     const row = this.db.query(`SELECT tx_hash FROM intents WHERE intent_id = ?`).get(intentId) as
       | { tx_hash: string | null }

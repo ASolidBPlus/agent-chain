@@ -114,9 +114,15 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
   // that asks what it may call and is told "nothing" has learned something
   // true. A persona whose tool is simply absent has learned nothing, and the
   // absence is indistinguishable from a deployment where the op does not exist.
+  // EVERY refusal a call can actually produce. over_max_per_tx and
+  // counterparty_denied were missing, and both are reachable: a call whose
+  // amount is in the default token goes through the same enforcePolicy as a
+  // send, with the CONTRACT KEY as the counterparty. A description that omits a
+  // refusal the persona will meet is a description that teaches it to treat
+  // that refusal as an unknown error.
   const REFUSALS =
     'Refusals you may see: unknown_contract, function_not_allowed, bad_args, revert, ' +
-    'over_stage_cap, frozen.';
+    'over_max_per_tx, over_stage_cap, counterparty_denied, frozen, duplicate_intent.';
 
   server.registerTool(
     'contracts',

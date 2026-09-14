@@ -1138,7 +1138,7 @@ export class Treasury {
         // list is matched against the CONTRACT KEY here, and a per-scenario
         // policy override REPLACES the kind defaults rather than extending them
         // (mergePolicy: `p.allow ?? defaults.allow`) - so a scenario that sets
-        // `allow: ["arena:*"]` silently drops the `converter` entry that
+        // `allow: ["acme:*"]` silently drops the `converter` entry that
         // policy-defaults.json carries, and every call whose amount is in the
         // default token is refused.
         //
@@ -1447,7 +1447,7 @@ export class Treasury {
       contract: args.contract.key,
       function: args.entry.function,
       // THE NAMES AND KEYS THE CALLER USED, never the addresses they resolved
-      // to. The feed is read by the facilitator and mirrors what the persona
+      // to. The feed is read by the operator and mirrors what the persona
       // believes it did.
       args: args.wireArgs,
       intent_id: args.intentId,
@@ -1529,10 +1529,14 @@ export class Treasury {
     const shaped = validateArgs(inputs, supplied, 'platform');
 
     const stage = await this.currentStage();
-    const intentId =
-      typeof body.intentId === 'string' && body.intentId !== ''
-        ? body.intentId
-        : `chain-svc:${randomUUID()}`;
+    // ONE TEST FOR BOTH, and it is the test `call` uses: a string AND
+    // non-empty. Asking only `typeof body.intentId === 'string'` recorded an
+    // empty-string id as CALLER-supplied while generating a server one - so the
+    // column said the caller chose an id it never sent, which is exactly the
+    // fact the anomaly detector reads to tell a guessable id from a generated
+    // one.
+    const suppliedId = typeof body.intentId === 'string' && body.intentId !== '';
+    const intentId = suppliedId ? (body.intentId as string) : `chain-svc:${randomUUID()}`;
     const argsHash = Treasury.argsHash(supplied);
 
     // THE SAME RESERVATION, for the idempotency half only: `capWei: null`
@@ -1541,7 +1545,7 @@ export class Treasury {
     const reservation = this.store.reserve({
       intentId,
       topic: intentTopic(intentId),
-      idSource: typeof body.intentId === 'string' ? 'caller' : 'server',
+      idSource: suppliedId ? 'caller' : 'server',
       agentId: 'platform',
       stage,
       amount: 0n,
@@ -1596,7 +1600,7 @@ export class Treasury {
       // not decoration: nothing was mined, so a null hash under "reverted"
       // would lie about what happened, while silence would hide the hub trying
       // something the chain would not accept - which is exactly what a
-      // facilitator wants to see.
+      // operator wants to see.
       if (classified.code === 'revert') {
         this.store.enqueueEvent('hub.call', {
           kind: 'hub.call',
@@ -1681,7 +1685,10 @@ export class Treasury {
     }
 
     const result = serialiseResult(raw, entry.abiFunction);
-    const size = JSON.stringify(result).length;
+    // BYTES, not UTF-16 units, for the reason callargs.ts counts its string cap
+    // in bytes: the bound exists to bound what crosses the wire, and a
+    // character count admits up to four times as much of it.
+    const size = Buffer.byteLength(JSON.stringify(result));
     if (size > MAX_READ_BYTES) {
       // REFUSED, NOT TRUNCATED. A view returning an unbounded array is a
       // contract design problem, and a truncated answer hides it behind a

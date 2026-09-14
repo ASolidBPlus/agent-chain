@@ -193,7 +193,7 @@ export class EventTail {
   /// One anomaly payload, emitted by BOTH feeders.
   ///
   /// Extracted when the generic pass became the second one: the detector's
-  /// findings are read by a facilitator, and two call sites writing the payload
+  /// findings are read by an operator, and two call sites writing the payload
   /// would drift in exactly the field somebody is looking for. `label` is the
   /// token's symbol for a transfer and the contract's key for a call - what the
   /// reader would name the emitter.
@@ -279,7 +279,7 @@ export class EventTail {
   /// declare", and only a diff can tell those apart. So every decoded log is
   /// marked by (txHash, logIndex) and whatever is left over is reported with
   /// its raw topics: a contract emitting something nobody can read is a fact a
-  /// facilitator should see, not a silence.
+  /// operator should see, not a silence.
   private async pollGenericEvents(from: bigint, latest: bigint): Promise<number> {
     const registered = this.chain.modules.contracts;
     if (registered.length === 0) return 0;
@@ -347,7 +347,7 @@ export class EventTail {
             isExpectedEmitter: this.isExpectedEmitter(intentId, contract.address),
           });
           // RAISED, not merely recorded. Discarding this return was the defect
-          // a test caught: the detector wrote its row, the facilitator heard
+          // a test caught: the detector wrote its row, the operator heard
           // nothing, and the feed said the call was ordinary.
           if (anomaly) {
             this.enqueueAnomaly(intentId, anomaly, contract.key);
