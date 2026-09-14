@@ -12,6 +12,29 @@ import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.t
 import type { ErrorCode } from '../../svc/src/errors.ts';
 import { WalletStore } from './store.ts';
 
+/// Where wallet-mcp's facilitator-facing lines go.
+///
+/// A SINK RATHER THAN A CONSOLE, and required rather than defaulted. The log
+/// line below is what makes a generic refusal SAFE rather than merely opaque -
+/// the persona is told nothing and someone is told everything - so the channel
+/// it is written to is part of the control, not a formatting detail.
+///
+/// `console.error` was that channel until #99, and it is the wrong one on the
+/// path that matters: org-core imports this package AS A LIBRARY (S5), so the
+/// global console belongs to org-core and to every package sharing that
+/// process. The code is withheld from the persona across the tool boundary and
+/// handed back on a channel it may be able to read or replace.
+///
+/// REQUIRED IS THE WHOLE POINT. A default is a silent borrow: it compiles, it
+/// runs, and nobody decides anything. Making it mandatory puts the choice of
+/// destination in front of the one caller who knows what the process is -
+/// which is why `server.ts` supplies stderr and org-core must supply its own.
+export type LogSink = (message: string) => void;
+
+export interface WalletOptions {
+  log: LogSink;
+}
+
 export interface SendResult {
   ok: boolean;
   txHash?: string;
@@ -115,10 +138,7 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
 ///
 /// The log line is what makes generic safe rather than merely opaque: the
 /// persona is told nothing, and someone is told everything.
-export function refusalFor(
-  code: string,
-  warn: (message: string) => void = console.error,
-): Refusal | null {
+export function refusalFor(code: string, warn: LogSink): Refusal | null {
   const known = Object.prototype.hasOwnProperty.call(REFUSAL_FOR, code);
   if (!known) {
     warn(
@@ -139,10 +159,18 @@ export function refusalFor(
 export class Wallet {
   private readonly client: ChainSvcClient;
   private readonly store: WalletStore;
+  private readonly log: LogSink;
 
-  constructor(private readonly config: WalletConfig) {
+  /// `options` is REQUIRED, and so is `options.log`. Every construction site
+  /// then has to name a destination, and typecheck is what makes them - see
+  /// LogSink above for why a default would have defeated the point.
+  constructor(
+    private readonly config: WalletConfig,
+    options: WalletOptions,
+  ) {
     this.client = new ChainSvcClient(config);
     this.store = new WalletStore(config.stateFile);
+    this.log = options.log;
   }
 
   /// Strips the wallet token from anything on its way to the model.
@@ -203,7 +231,7 @@ export class Wallet {
   /// unprotected at that layer too. Warned rather than refused: this process
   /// does not get to decide that someone's deployment is invalid, only to say
   /// so. The VALUE is never logged, only its length.
-  static warnIfImplausiblyShort(token: string, warn: (message: string) => void = console.error): void {
+  static warnIfImplausiblyShort(token: string, warn: LogSink): void {
     if (token.length < 16) {
       warn(
         `wallet-mcp: WALLET_TOKEN is ${token.length} characters. chain-svc issues 32-byte tokens, ` +
@@ -395,7 +423,7 @@ export class Wallet {
       // Routing both paths through `refusalFor` removes the class rather than
       // the instance: a code's disclosure is decided in one place, and a second
       // site cannot disagree with the first about which codes are safe.
-      const mapped = refusalFor(resolved.error);
+      const mapped = refusalFor(resolved.error, this.log);
       // The detail is chain-svc's own prose - since §5 a bare `to` has TWO
       // readings, and the refusal has to name both or a persona reads "no
       // wallet is registered as toby" while `arena:toby` exists and concludes
@@ -452,7 +480,7 @@ export class Wallet {
     // one: `detail` is chain-svc's own prose about what it tried, which is the
     // half a persona needs when the refusal is about its own input, and the
     // half that would leak when the refusal is about anything else.
-    const mapped = body?.error ? refusalFor(body.error) : null;
+    const mapped = body?.error ? refusalFor(body.error, this.log) : null;
     if (mapped) {
       // The DETAIL travels with a persona-facing reason: it is chain-svc's own
       // prose about what it tried, and it is the half a persona needs when the
