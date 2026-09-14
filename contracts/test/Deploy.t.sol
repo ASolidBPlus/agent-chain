@@ -6,6 +6,7 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {Token} from "../src/Token.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
 import {Converter} from "../src/Converter.sol";
+import {Fixture} from "./fixtures/Fixture.sol";
 
 /// The deploy script, driven end to end inside `forge test` - no live Anvil, no
 /// compose, no shell.
@@ -524,5 +525,155 @@ contract DeployTest is Test {
         d.parseDecimal18("0");
         vm.expectRevert(bytes("Deploy: manifest: rate exceeds MAX_RATE"));
         d.parseDecimal18("1000000000001"); // 1e12 + 1 whole units
+    }
+
+    // ── custom contracts (increment 3, §8.8) ──────────────────────────────────
+
+    string internal constant FIXTURE_TAG =
+        "0x0000000000000000000000000000000000000000000000000000000000000022";
+
+    function test_ContractDeploysWithResolvedArgs() public {
+        string memory dir = _dir("contract");
+        _write(
+            dir,
+            string.concat(
+                '{"schema":1,"modules":[',
+                '{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},',
+                '{"kind":"contract","key":"shop","contract":"Fixture","args":[',
+                '{"type":"address","value":"@play"},',
+                '{"type":"uint256","value":"500"},',
+                '{"type":"bool","value":"true"},',
+                '{"type":"bytes32","value":"',
+                FIXTURE_TAG,
+                '"}]}]}'
+            )
+        );
+
+        Deploy d = _script();
+        d.deploy(dir, "");
+
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        // local.json entry shape (§8.8): kind, key, the Solidity contract name,
+        // an address; no tld, no args (args live only in the manifest).
+        assertEq(vm.parseJsonString(out, ".modules[1].kind"), "contract");
+        assertEq(vm.parseJsonString(out, ".modules[1].key"), "shop");
+        assertEq(vm.parseJsonString(out, ".modules[1].contract"), "Fixture");
+        assertFalse(vm.keyExistsJson(out, ".modules[1].tld"));
+        assertFalse(vm.keyExistsJson(out, ".modules[1].args"));
+
+        address playAddr = vm.parseJsonAddress(out, ".modules[0].address");
+        address shopAddr = vm.parseJsonAddress(out, ".modules[1].address");
+        Fixture shop = Fixture(shopAddr);
+        // @play resolved to the token deployed earlier; the literal, bool and tag
+        // decoded into the constructor.
+        assertEq(shop.token(), playAddr, "@play did not resolve to the token address");
+        assertEq(shop.n(), 500);
+        assertTrue(shop.flag());
+        assertEq(shop.tag(), bytes32(uint256(0x22)));
+
+        // Deterministic address, like every other module: CREATE2 from the salt
+        // "contract:<key>" and the init code, through the 0x4e59 factory.
+        bytes memory initcode = abi.encodePacked(
+            vm.getCode("Fixture.sol:Fixture"), abi.encode(playAddr, uint256(500), true, bytes32(uint256(0x22)))
+        );
+        address CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+        assertEq(
+            shopAddr,
+            vm.computeCreate2Address(d.saltFor("contract", "shop"), keccak256(initcode), CREATE2_DEPLOYER),
+            "contract address is not CREATE2 from its salt and init code"
+        );
+
+        _clean(dir);
+    }
+
+    // A literal 0x address and "@treasury" both resolve; only "@<key>" needs an
+    // earlier entry.
+    function test_ContractLiteralAndTreasuryAddresses() public {
+        string memory dir = _dir("contractlit");
+        _write(
+            dir,
+            string.concat(
+                '{"schema":1,"modules":[{"kind":"contract","key":"a","contract":"Fixture","args":[',
+                '{"type":"address","value":"@treasury"},',
+                '{"type":"uint256","value":"1"},',
+                '{"type":"bool","value":"false"},',
+                '{"type":"bytes32","value":"',
+                FIXTURE_TAG,
+                '"}]}]}'
+            )
+        );
+        Deploy d = _script();
+        d.deploy(dir, "");
+
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        Fixture a = Fixture(vm.parseJsonAddress(out, ".modules[0].address"));
+        assertEq(a.token(), treasury, "@treasury did not resolve");
+        assertFalse(a.flag());
+
+        _clean(dir);
+    }
+
+    function test_ContractForwardReferenceIsARefusal() public {
+        string memory dir = _dir("contractfwd");
+        // The contract references @gold, a token declared AFTER it.
+        _write(
+            dir,
+            string.concat(
+                '{"schema":1,"modules":[',
+                '{"kind":"contract","key":"shop","contract":"Fixture","args":[',
+                '{"type":"address","value":"@gold"},',
+                '{"type":"uint256","value":"1"},',
+                '{"type":"bool","value":"true"},',
+                '{"type":"bytes32","value":"',
+                FIXTURE_TAG,
+                '"}]},',
+                '{"kind":"token","key":"gold","name":"Gold","symbol":"GOLD"}]}'
+            )
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: "@gold" is not deployed yet'));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ContractStringArgIsARefusal() public {
+        string memory dir = _dir("contractstr");
+        _write(
+            dir,
+            '{"schema":1,"modules":[{"kind":"contract","key":"shop","contract":"Fixture","args":['
+            '{"type":"string","value":"nope"}]}]}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(
+            bytes('Deploy: manifest: constructor arg type "string" is not supported; use an initialiser function')
+        );
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ContractMissingArtifactIsARefusal() public {
+        string memory dir = _dir("contractnoart");
+        _write(
+            dir,
+            '{"schema":1,"modules":[{"kind":"contract","key":"shop","contract":"NoSuchContract","args":[]}]}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: no artifact for "NoSuchContract"'));
+        d.deploy(dir, "");
+        _clean(dir);
+    }
+
+    function test_ContractKeyCollidingAcrossKindsIsARefusal() public {
+        string memory dir = _dir("contractdupkey");
+        // A contract keyed "play" collides with the token key "play".
+        _write(
+            dir,
+            '{"schema":1,"modules":[{"kind":"token","key":"play","name":"Play","symbol":"PLAY"},'
+            '{"kind":"contract","key":"play","contract":"Fixture","args":[]}]}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes('Deploy: manifest: duplicate key "play"'));
+        d.deploy(dir, "");
+        _clean(dir);
     }
 }
