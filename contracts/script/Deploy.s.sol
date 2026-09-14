@@ -153,9 +153,24 @@ contract Deploy is Script {
                 require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
                 // BURNER_ROLE is granted to NOBODY at deploy. AccessControl has
                 // no member enumeration, so "nobody" is asserted against the
-                // only two addresses that could plausibly hold it here.
+                // address that could plausibly hold it: the treasury, which is
+                // this token's DEFAULT_ADMIN and the only account this script
+                // grants anything to.
+                //
+                // THERE WAS A SECOND ASSERTION HERE, against `address(this)`,
+                // and finding it cost a compose smoke. `forge script
+                // --broadcast` REFUSES `address(this)` in a script contract -
+                // "script contracts are ephemeral and their addresses should not
+                // be relied upon" - while `forge test` allows it. So it passed
+                // 76/0 locally and reverted the deploy inside the container,
+                // which is the only place it ran for real.
+                //
+                // It was also asking the wrong question: under broadcast the
+                // deployer is the treasury EOA and the script contract holds
+                // nothing, so the check could only ever have been vacuous. The
+                // exhaustive "nobody holds it" claim lives in Token.t.sol, where
+                // there is no broadcast and the addresses are real.
                 require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
-                require(!t.hasRole(t.BURNER_ROLE(), address(this)), "Deploy: script must not hold BURNER_ROLE");
                 require(
                     t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
                 );
