@@ -3,9 +3,13 @@
 // test that they agree is what makes it safe.
 
 import { describe, it, expect } from 'bun:test';
-import { matchesPattern, assertPatternsUsable, enforcePolicy, mergePolicy, capToWei, type AgentPolicy } from '../src/policy.ts';
+import { matchesPattern, assertPatternsUsable, capsFor, enforcePolicy, mergePolicy, capToWei, type AgentPolicy } from '../src/policy.ts';
 import { matchesPattern as mcpMatchesPattern } from '../../wallet-mcp/src/policy.ts';
 import { HttpError } from '../src/errors.ts';
+import { RESOLVER_CASES, RESOLVER_DEFAULT, RESOLVER_TOKENS } from '../../wallet-mcp/test/resolver-cases.ts';
+import { capsRefusal } from '../../wallet-mcp/src/policy.ts';
+import { resolveTokenOrRefusal } from '../../wallet-mcp/src/modules.ts';
+import { resolveToken, type Modules } from '../src/modules.ts';
 
 const POLICY: AgentPolicy = { caps: { play: { max_per_tx: 1000, max_per_stage: 5000 } }, allow: ['*'], deny: [] };
 
@@ -165,5 +169,110 @@ describe('a zero-VEE transfer is refused at the boundary', () => {
   it('reports the amount, not the cap, for a zero over an exhausted policy', () => {
     const tiny: AgentPolicy = { ...P, caps: { play: { max_per_tx: 1, max_per_stage: 1 } } };
     expect(codeOf(() => enforcePolicy({ policy: tiny, to: 'a.play', amount: 0n, decimals: 18, symbol: 'PLAY', tokenKey: 'play' }))).toBe('invalid_amount');
+  });
+});
+
+// THE SECOND AND THIRD AGREEMENT TESTS, beside the pattern-dialect one at the
+// top of this file and for the same reason it exists: two implementations of
+// one rule is the arrangement, and a test that they agree is what makes it
+// safe.
+//
+// Both pairs exist because wallet-mcp keeps ZERO RUNTIME DEPENDENCY on
+// chain-svc - its import is `import type`, which is erased, so the package runs
+// with chain-svc absent, which is what org-core needs when it imports Wallet as
+// a library. Sharing a function would cost that property; sharing a TEST costs
+// nothing, because a test import is not a runtime import.
+describe('the token resolver, on both sides', () => {
+  // ONE TABLE, IMPORTED rather than copied. A copied table drifts the first
+  // time somebody adds a row to the side they happen to be editing - and a
+  // table that does not agree about what it is testing cannot catch two
+  // functions that do not agree either.
+  const modules: Modules = {
+    tokens: RESOLVER_TOKENS.map((t) => ({ ...t, address: t.address as `0x${string}` })),
+    contracts: [],
+    byKey: new Map(),
+  };
+  const reply = { schema: 1, chainId: 31337, treasury: '0x0', defaultToken: RESOLVER_DEFAULT, tokens: RESOLVER_TOKENS, names: null };
+
+  for (const row of RESOLVER_CASES) {
+    it(`agrees on ${row.what}`, () => {
+      // Each side mapped to the table's OUTCOME vocabulary, because the two
+      // refuse differently by design - chain-svc throws a wire code, wallet-mcp
+      // returns a persona-facing reason. Writing the table in either side's
+      // codes would have made the other's mapping part of the thing under test.
+      const chainSvc = (() => {
+        try {
+          return { token: resolveToken(modules, row.input).key };
+        } catch (err) {
+          const code = (err as HttpError).code;
+          return { refuse: code === 'invalid_request' ? 'invalid' : 'unknown' };
+        }
+      })();
+
+      const mcp = (() => {
+        const r = resolveTokenOrRefusal(reply as never, row.input);
+        if (r.ok) return { token: r.token.key };
+        return { refuse: r.reason === 'unknown_token' ? 'unknown' : 'invalid' };
+      })();
+
+      expect(chainSvc).toEqual(row.expect);
+      expect(mcp).toEqual(row.expect);
+    });
+  }
+
+  it('answers module_not_deployed on BOTH sides when there is no token at all', () => {
+    // The one row that cannot live in the shared table, because the two codes
+    // are not two spellings of one outcome: chain-svc says
+    // `module_not_deployed` because that is the wire code for a deployment's
+    // shape, and wallet-mcp says `error` because the shape is not a persona's
+    // business. What they agree on is that it is NOT `unknown_token`.
+    const empty: Modules = { tokens: [], contracts: [], byKey: new Map() };
+    expect(codeOf(() => resolveToken(empty, 'play'))).toBe('module_not_deployed');
+
+    const r = resolveTokenOrRefusal({ ...reply, tokens: [] } as never, 'play');
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).not.toBe('unknown_token');
+  });
+});
+
+describe('the caps refusal, on both sides', () => {
+  // THE SAME SENTENCE, not merely the same verdict. A persona meeting the fast
+  // path's refusal and the boundary's must read one rule, or the two become two
+  // rules the day either is reworded.
+  const policy = {
+    caps: { play: { max_per_tx: '100', max_per_stage: '500' } },
+    allow: ['*'],
+    deny: [],
+    frozen: false,
+  };
+
+  it('agrees that a token with no entry cannot be spent, in the same words', () => {
+    const chainSvc = (() => {
+      try {
+        capsFor(policy as never, 'au');
+        return null;
+      } catch (err) {
+        return { reason: (err as HttpError).code, detail: (err as HttpError).detail };
+      }
+    })();
+
+    expect(chainSvc).toEqual({ reason: 'over_max_per_tx', detail: 'no cap set for au' });
+    expect(capsRefusal(policy as never, 'au')).toEqual({
+      reason: 'over_max_per_tx',
+      detail: 'no cap set for au',
+    });
+  });
+
+  it('agrees that a token WITH an entry is spendable, so the test can fail either way', () => {
+    // COMPARE TO A VALUE. Without this row both sides could refuse everything
+    // and the row above would still pass - the empty-set failure, one level up.
+    expect(() => capsFor(policy as never, 'play')).not.toThrow();
+    expect(capsRefusal(policy as never, 'play')).toBeNull();
+  });
+
+  it('agrees that a HALF-WRITTEN entry is not an entry', () => {
+    const half = { ...policy, caps: { au: { max_per_tx: '1' } } };
+    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('over_max_per_tx');
+    expect(capsRefusal(half as never, 'au')).not.toBeNull();
   });
 });

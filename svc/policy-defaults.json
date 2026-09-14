@@ -2,7 +2,7 @@
   "_comment": [
     "PROVISIONAL GAME BALANCE, not engineering constants. These are the caps a",
     "wallet gets when POST /wallets carries no explicit `policy` object, chosen",
-    "as a starting point, and to be TUNED BY THE FACILITATOR through the game",
+    "as a starting point, and to be TUNED BY THE OPERATOR through the game",
     "config - Decision Ledger D8. Change them here rather than in code, and do",
     "not treat a number in this file as load-bearing for correctness.",
     "WHERE THE CAPS ARE ACTUALLY ENFORCED, because this comment used to send you",
