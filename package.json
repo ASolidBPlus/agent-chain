@@ -1,0 +1,23 @@
+{
+  "name": "cyberlab-chain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The cyberlab private chain: Anvil, the VEE Bux and name registry contracts, chain-svc and wallet-mcp",
+  "workspaces": [
+    "svc",
+    "wallet-mcp"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "typecheck:all": "bash .github/scripts/typecheck-all.sh",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.3"
+  }
+}

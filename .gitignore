@@ -1,0 +1,14 @@
+# Derived from mesh-agent's root .gitignore, trimmed to the rules that apply to
+# this tree. Foundry's build output and the local deployment record already have
+# their own .gitignore files (contracts/, deployments/) and are not repeated here.
+node_modules/
+.env
+*.log
+# The secrets file itself, wherever it is written. Keyed on the FILE rather than
+# on a directory name: the directory is a variable and has already been two
+# different values, the filename is the invariant.
+chain.env
+**/chain.env
+# The typecheck:all failure diagnostic: a local artefact of a failing run, never
+# committed.
+.typecheck-failure.log

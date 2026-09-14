@@ -1,0 +1,82 @@
+# The Solidity half of CI. A SEPARATE workflow from ci.yml on purpose, for two
+# reasons:
+#
+#   1. Its checkout needs `submodules: recursive` (Foundry vendors OpenZeppelin
+#      under contracts/lib). ci.yml's `bun test` job must NOT share that
+#      checkout: with the submodules present, bun discovers OpenZeppelin's own
+#      Hardhat suite and fails ~160 of someone else's tests. bunfig.toml ignores
+#      that path, but keeping the checkouts separate means the two jobs cannot
+#      re-break each other by accident.
+#   2. A separate file cannot conflict with edits to ci.yml, which is being
+#      changed independently.
+#
+# Deliberately NOT path-filtered to contracts: a filter that is wrong
+# fails toward "did not run", and a job that silently stops running is worse
+# than one that runs when it did not need to.
+name: Contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          # Pinned to the version the contracts were written and reviewed
+          # against; foundry.toml pins solc and the EVM version to match.
+          version: v1.8.1
+
+      - name: forge test
+        working-directory: contracts
+        run: forge test -vv
+
+      # Coverage is reported, not gated: a threshold here would be a number
+      # someone games rather than a property anyone checks. The mutation
+      # evidence in the PR body is what speaks to whether the tests can fail.
+      - name: forge coverage (reported, not enforced)
+        working-directory: contracts
+        run: forge coverage --no-match-coverage "script/" || true
+
+  abi-drift:
+    # svc ships a GENERATED src/abi.ts, committed because chain-svc's
+    # image carries no contract build output and `bun test` must run without
+    # Foundry. That trade is only safe if something notices when the ABI and the
+    # committed copy diverge - this job is that something.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.8.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: forge build
+        working-directory: contracts
+        run: forge build
+
+      - name: regenerate the committed ABI
+        working-directory: svc
+        run: bun run scripts/generate-abi.ts
+
+      - name: fail if the committed ABI no longer matches the contracts
+        run: |
+          if ! git diff --exit-code -- svc/src/abi.ts; then
+            echo "::error::svc/src/abi.ts is stale. Run 'cd svc && bun run scripts/generate-abi.ts' and commit the result."
+            exit 1
+          fi

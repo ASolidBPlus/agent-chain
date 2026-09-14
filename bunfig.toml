@@ -1,0 +1,7 @@
+# Foundry vendors its dependencies as git submodules under contracts/lib, and
+# OpenZeppelin ships its own Hardhat JS suite there. Without this, `bun test`
+# discovers ~160 of someone else`s tests and fails on a missing hardhat.
+# Ignoring the path rather than scoping the test roots keeps NEW test
+# directories discoverable by default - scoping would silently skip them.
+[test]
+pathIgnorePatterns = ["**/contracts/lib/**"]

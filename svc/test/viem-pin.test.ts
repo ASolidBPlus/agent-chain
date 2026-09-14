@@ -42,14 +42,14 @@ describe('viem is pinned, not ranged', () => {
   // reviews.
   it('is pinned in the LOCKFILE too, not only in the manifest', async () => {
     const declared = (manifest.dependencies as Record<string, string>).viem;
-    const lock = await Bun.file(new URL('../../../bun.lock', import.meta.url)).text();
+    const lock = await Bun.file(new URL('../../bun.lock', import.meta.url)).text();
     // The requested range as the lockfile records it for this workspace.
     expect(lock).toContain(`"viem": "${declared}"`);
     expect(lock).not.toMatch(/"viem": "[\^~]/);
   });
 
   // THE PATH MATTERS AND IS THE REASON THIS TEST IS TRUSTWORTHY. viem is
-  // installed under chain/svc, not at the repo root; seat 2's first version of
+  // installed under svc, not at the repo root; seat 2's first version of
   // this control read the root and BOTH ARMS FAILED IDENTICALLY on a missing
   // path - the pinned arm and the mutated arm alike. A CONTROL WHOSE HALVES
   // AGREE HAS MEASURED NOTHING. Reading the resolved module rather than a path
