@@ -33,7 +33,20 @@ async function main(): Promise<void> {
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
   console.log('\n=== the tool names the harness will prefix');
-  check('bare names', names, ['balance', 'history', 'resolve', 'send', 'whoami']);
+  // The three call-op tools are registered UNCONDITIONALLY (call increment §4),
+  // unlike the money and names tools, which appear only when their module does.
+  // A persona told "nothing is callable" has learned something true; one whose
+  // tool is simply absent has learned nothing.
+  check('bare names', names, [
+    'balance',
+    'call',
+    'contracts',
+    'history',
+    'read',
+    'resolve',
+    'send',
+    'whoami',
+  ]);
   console.log(`  the model sees: ${names.map((n) => `wallet_${n}`).join(', ')}`);
 
   const call = async (name: string, args: Record<string, unknown> = {}): Promise<any> => {
@@ -53,7 +66,13 @@ async function main(): Promise<void> {
   check('replay returns the same txHash', replay.txHash, first.txHash);
 
   const afterReplay = await call('balance');
-  check('the money moved once', afterReplay.play, String(Number(before.play) - 50));
+  // `vee`, not `play`. The balance tool answers {vee}, and it always has - so
+  // this compared `undefined` against `String(NaN)` and could never pass. It
+  // went unnoticed because the script it lives in could not RUN: its deploy
+  // died at the key scrape, so nothing downstream of that line was ever
+  // reached. An instrument that cannot start reports nothing, including its own
+  // broken assertions.
+  check('the money moved once', afterReplay.vee, String(Number(before.vee) - 50));
 
   check('150 is over max_per_tx', (await call('send', { to: 'alpha.play', amount: 150, intent_id: 'b1' })).reason, 'over_max_per_tx');
 

@@ -47,7 +47,21 @@ step "deploy"
 DEPLOYMENTS="$CONTRACTS/../deployments"
 mkdir -p "$DEPLOYMENTS"
 rm -f "$DEPLOYMENTS/local.json"
-KEY=$(docker logs "$NAME" 2>&1 | awk '/^Private Keys/{f=1;next} f&&/^\(0\)/{print $2;exit}')
+# DERIVED FROM THE MNEMONIC, not scraped from `docker logs`.
+#
+# Account 0 is the deployer AND the treasury, so this is the same derivation
+# chain-svc itself makes - which is also what makes it a check rather than a
+# lookup: it verifies that this mnemonic really does control account 0 on the
+# running chain.
+#
+# The scrape this replaces returned EMPTY and had for some time: the anvil image
+# runs with -q precisely so the banner's private keys never reach the log, and
+# `docker logs` is not a secret store - readable by anyone with docker access,
+# shipped wholesale by any log collector, and kept after the container is gone.
+# With an empty KEY the deploy died at `vm.envUint: failed parsing
+# $DEPLOYER_PRIVATE_KEY ... missing hex prefix`, which names the variable and
+# not the cause. verify-chain.sh and compose already derive it this way.
+KEY=$(cast wallet private-key --mnemonic "$MNEMONIC")
 # The manifest this script's deployment declares. chain-deploy requires one and
 # has no built-in default, so a script that deploys must say what it deploys --
 # and the TLD here is the suffix every name below is registered under. Without
