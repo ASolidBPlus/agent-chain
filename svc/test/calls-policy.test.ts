@@ -484,6 +484,71 @@ describe('maxPerStage', () => {
   });
 });
 
+// §7 / §2. THE WARNING THAT EXISTS BECAUSE OF WHERE THE ALLOW LIST IS MATCHED.
+//
+// A call that moves the default token goes through `enforcePolicy` with the
+// CONTRACT KEY as the counterparty, so a kind whose allow list is not ["*"]
+// must name every contract its callers may pay through. `agent` and `burner`
+// carry ["*.{tld}"], which no contract key matches - which is why
+// policy-defaults.json names `converter` explicitly, and why an entry naming
+// something else is worth saying out loud at load.
+//
+// A WARNING AND NOT A REFUSAL, and that is load-bearing: the defaults are one
+// of TWO sources, and the other - a per-scenario policy override, which
+// REPLACES the defaults rather than extending them - cannot be seen from here
+// at all. Refusing on a defaults miss would close the op for a deployment whose
+// per-wallet policies are perfectly correct.
+describe('the allow-list warning', () => {
+  const DEFAULTS = {
+    org: { max_per_tx: '1000', max_per_stage: '5000', allow: ['*'], deny: [] },
+    agent: { max_per_tx: '100', max_per_stage: '500', allow: ['*.play', 'converter'], deny: [] },
+    burner: { max_per_tx: '50', max_per_stage: '200', allow: ['*.play'], deny: [] },
+  } as never;
+
+  const withDefaults = async () =>
+    new CallPolicy(dir, await registry(), (line) => logged.push(line), DEFAULTS);
+
+  it('says so when a kind cannot pay through the contract it may call', async () => {
+    // `burner` has ["*.play"], which does not match `converter`.
+    write(only({ ...CONVERT, kinds: ['agent', 'burner'], amount: { arg: 2, token: 'play' } }));
+    const p = await withDefaults();
+    expect(p.snapshot().entries).toHaveLength(1);
+    expect(logged.join('\n')).toMatch(
+      /burner's default allow list does not name "converter"/,
+    );
+  });
+
+  it('says nothing when every kind\'s defaults name it', async () => {
+    write(only({ ...CONVERT, kinds: ['org', 'agent'], amount: { arg: 2, token: 'play' } }));
+    await withDefaults();
+    expect(logged.join('\n')).not.toMatch(/does not name/);
+  });
+
+  it('says nothing for an entry that moves no money', async () => {
+    // No amount, nothing to enforce a policy against: the allow list is never
+    // consulted, so naming it would be noise about a rule that does not apply.
+    const { amount: _none, perTxCap: _cap, ...noMoney } = CONVERT;
+    write(only({ ...noMoney, kinds: ['burner'] }));
+    await withDefaults();
+    expect(logged.join('\n')).not.toMatch(/does not name/);
+  });
+
+  it('says nothing for an amount in a token that is not the default', async () => {
+    // Only a default-token amount reaches enforcePolicy at all; the rest are
+    // bounded by the entry's own perTxCap.
+    write(only({ ...BUY, kinds: ['burner'] }));
+    await withDefaults();
+    expect(logged.join('\n')).not.toMatch(/does not name/);
+  });
+
+  it('warns but still LOADS the entry', async () => {
+    // The op stays open. A per-wallet policy may name the contract even when
+    // the kind defaults do not, and this side cannot see those files.
+    write(only({ ...CONVERT, kinds: ['burner'], amount: { arg: 2, token: 'play' } }));
+    expect((await withDefaults()).snapshot().entries).toHaveLength(1);
+  });
+});
+
 describe('the mtime cache', () => {
   it('re-reads the file when it changes', async () => {
     // A scenario rewrites calls.json between turns. Caching by mtime is what

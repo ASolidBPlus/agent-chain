@@ -99,7 +99,16 @@ async function main(): Promise<void> {
       // The generic call op's allowlist, constructed here so the boot line is
       // written where an operator is looking. It reads the file per request; a
       // deployment with no calls.json boots with the op closed and says so.
-      new CallPolicy(config.policyDir, chain.modules, (line) => console.warn(line)),
+      new CallPolicy(
+        config.policyDir,
+        chain.modules,
+        (line) => console.warn(line),
+        // The kind defaults, so the loader can warn about an entry whose amount
+        // no kind in its `kinds` can pay through. Same object the spawner
+        // writes wallets from, so the warning is about the rules that will
+        // actually apply rather than about a second copy of them.
+        loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld),
+      ),
     ),
   };
 

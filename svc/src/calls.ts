@@ -30,7 +30,12 @@ import { join } from 'node:path';
 import type { AbiFunction, AbiParameter } from 'viem';
 import { assertSupportedType } from './callargs.ts';
 import { defaultToken, type Modules } from './modules.ts';
-import { WALLET_KINDS, type WalletKind } from './policy.ts';
+import {
+  matchesPattern,
+  WALLET_KINDS,
+  type PolicyDefaults,
+  type WalletKind,
+} from './policy.ts';
 
 export type AddressRule = 'token' | 'contract' | 'name' | 'any';
 
@@ -320,6 +325,49 @@ function defaultTokenKey(modules: Modules): string | undefined {
   }
 }
 
+/// §2. A warning, at load, for the entry that will be refused at call time.
+///
+/// An allow list is matched against the CONTRACT KEY when a call moves money,
+/// and `agent`/`burner` carry `["*.{tld}"]`, which no contract key matches -
+/// so `policy-defaults.json` names every callable contract explicitly. This
+/// says so when it does not.
+///
+/// A WARNING, NOT A REFUSAL, and the distinction is load-bearing: the defaults
+/// are one of TWO sources, and the other - a per-scenario policy override -
+/// cannot be seen from here at all. Refusing the file on a defaults miss would
+/// close the op for a deployment whose per-wallet policies are perfectly
+/// correct; saying nothing would leave an author with a `counterparty_denied`
+/// they cannot explain. So it warns, and the call-time refusal names the fix.
+function warnAboutUnallowedContracts(
+  entries: CallEntry[],
+  defaults: PolicyDefaults | undefined,
+  modules: Modules,
+  log: (line: string) => void,
+): void {
+  if (!defaults) return;
+  const defaultKey = defaultTokenKey(modules);
+  for (const entry of entries) {
+    // Only an amount in the DEFAULT token reaches enforcePolicy at all.
+    const movesDefault =
+      entry.amount !== undefined &&
+      (typeof entry.amount.token !== 'string' || entry.amount.token === defaultKey);
+    if (!movesDefault) continue;
+
+    for (const kind of entry.kinds) {
+      const allow = defaults[kind]?.allow ?? [];
+      const allowed = allow.some((p) => matchesPattern(p, entry.contract));
+      if (!allowed) {
+        log(
+          `[chain-svc] calls.json: "${entry.function}" on ${entry.contract} is callable by ` +
+            `${kind}, and ${kind}'s default allow list does not name "${entry.contract}" - ` +
+            `a call moving the default token will be refused counterparty_denied. Add it to ` +
+            `policy-defaults.json, or to each wallet's own policy.`,
+        );
+      }
+    }
+  }
+}
+
 function parseFile(text: string, modules: Modules): Allowlist {
   const parsed = JSON.parse(text) as Record<string, unknown>;
   if (parsed.schema !== 1) {
@@ -352,7 +400,14 @@ export class CallPolicy implements CallPolicySource {
   /// So an unchanged broken file does not log once per request.
   private complainedAbout: string | null = null;
 
-  constructor(policyDir: string, modules: Modules, log: (line: string) => void) {
+  constructor(
+    policyDir: string,
+    modules: Modules,
+    log: (line: string) => void,
+    /// The kind defaults, for the load-time warning only. Optional because a
+    /// test of the LOADER has no business needing them.
+    private readonly policyDefaults?: PolicyDefaults,
+  ) {
     this.path = join(policyDir, 'calls.json');
     this.modules = modules;
     this.log = log;
@@ -385,6 +440,7 @@ export class CallPolicy implements CallPolicySource {
     try {
       this.cached = parseFile(readFileSync(this.path, 'utf8'), this.modules);
       this.complainedAbout = null;
+      warnAboutUnallowedContracts(this.cached.entries, this.policyDefaults, this.modules, this.log);
       this.log(
         `[chain-svc] calls.json: ${this.cached.entries.length} entr${
           this.cached.entries.length === 1 ? 'y' : 'ies'

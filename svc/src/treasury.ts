@@ -1124,14 +1124,37 @@ export class Treasury {
       // this works mechanically; the consequence is a standing rule, written
       // in policy-defaults.json: a kind whose allow list is not ["*"] must name
       // every contract key its callers may pay through.
-      enforcePolicy({
-        policy,
-        to: entry.contract,
-        canonical: entry.contract,
-        amount,
-        decimals: token.decimals,
-        symbol: token.symbol,
-      });
+      try {
+        enforcePolicy({
+          policy,
+          to: entry.contract,
+          canonical: entry.contract,
+          amount,
+          decimals: token.decimals,
+          symbol: token.symbol,
+        });
+      } catch (err) {
+        // THE ONE REFUSAL A SCENARIO AUTHOR WILL MEET AND MISREAD. The allow
+        // list is matched against the CONTRACT KEY here, and a per-scenario
+        // policy override REPLACES the kind defaults rather than extending them
+        // (mergePolicy: `p.allow ?? defaults.allow`) - so a scenario that sets
+        // `allow: ["arena:*"]` silently drops the `converter` entry that
+        // policy-defaults.json carries, and every call whose amount is in the
+        // default token is refused.
+        //
+        // The code stays `counterparty_denied`, because that is what it is. The
+        // DETAIL says which list to edit, because "converter is not an allowed
+        // counterparty" sends an author looking at wallets.
+        if (err instanceof HttpError && err.code === 'counterparty_denied') {
+          throw new HttpError(
+            'counterparty_denied',
+            `this wallet's policy does not allow paying through the contract "${entry.contract}". ` +
+              `Allow lists name contracts as well as wallets: add "${entry.contract}" to this ` +
+              `wallet's allow list, or to its kind's defaults.`,
+          );
+        }
+        throw err;
+      }
     }
 
     if (entry.perTxCap !== undefined) {
@@ -1567,7 +1590,25 @@ export class Treasury {
       // consumes the intent id, so a retry needs a fresh one. The hub generates
       // one per request unless it supplies its own, so in practice this is the
       // operator repeating a command rather than reconciling anything.
-      throw this.asCallError(err, `admin-call ${entry.function} on ${contract.key}`);
+      const classified = this.asCallError(err, `admin-call ${entry.function} on ${contract.key}`);
+      // THE OPERATOR'S REFUSED ACTION REACHES THE FEED TOO (ruled).
+      // `status: "refused"` is a third value beside ok and reverted, and it is
+      // not decoration: nothing was mined, so a null hash under "reverted"
+      // would lie about what happened, while silence would hide the hub trying
+      // something the chain would not accept - which is exactly what a
+      // facilitator wants to see.
+      if (classified.code === 'revert') {
+        this.store.enqueueEvent('hub.call', {
+          kind: 'hub.call',
+          contract: contract.key,
+          function: entry.function,
+          args: supplied,
+          intent_id: intentId,
+          txHash: null,
+          status: 'refused',
+        });
+      }
+      throw classified;
     }
     this.store.completeIntent(intentId, hash);
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });

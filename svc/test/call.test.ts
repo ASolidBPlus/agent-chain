@@ -16,6 +16,8 @@
 
 import { describe, it, expect } from 'bun:test';
 import { join } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { decodeFunctionData, type Abi } from 'viem';
 import { Treasury, serialiseResult, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
@@ -31,7 +33,10 @@ import type { Deployment } from '../src/chain.ts';
 
 const PKG = join(import.meta.dir, '..');
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
-const config = { token: 't', rpcUrl: 'http://chain:8545', policyDir: '/policies' } as Config;
+/// A real directory, because one test writes a per-wallet policy file into it -
+/// the shape a per-scenario override produces, which is the §7 trap.
+const POLICY_DIR = mkdtempSync(join(tmpdir(), 'call-policies-'));
+const config = { token: 't', rpcUrl: 'http://chain:8545', policyDir: POLICY_DIR } as Config;
 
 // CHECKSUMMED SPELLINGS, because that is what the registry stores (getAddress
 // in loadDeployment) and what platform scope must pass. A lowercase constant
@@ -516,6 +521,41 @@ describe('money', () => {
     expect(store.spentThisStage('orch:a', store.currentStage())).toBe(5000000000000000000n);
   });
 
+  it('names the allow list when a contract is not an allowed counterparty', async () => {
+    // §7's trap, and the refusal a scenario author is most likely to misread.
+    // A per-scenario policy override REPLACES the kind defaults rather than
+    // extending them, so a scenario setting allow: ["arena:*"] silently drops
+    // the `converter` entry policy-defaults.json carries - and every call whose
+    // amount is in the default token is refused. The CODE is right;
+    // "converter is not an allowed counterparty" sends an author looking at
+    // wallets, so the DETAIL names the list to edit.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:narrow', '0x000000000000000000000000000000000000eeee', 'agent');
+    const { t } = await harness(undefined, { store });
+    // A policy file whose allow list names wallets only, exactly as a scenario
+    // override produces.
+    writeFileSync(
+      join(POLICY_DIR, 'orch%3Anarrow.json'),
+      JSON.stringify({
+        agentId: 'orch:narrow',
+        max_per_tx: '1000',
+        max_per_stage: '5000',
+        allow: ['arena:*'],
+        deny: [],
+      }),
+    );
+
+    let err: HttpError | undefined;
+    try {
+      await t.call(asWallet('orch:narrow'), convertBody({ intentId: 'narrow-1' }));
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('counterparty_denied');
+    expect(err?.detail).toMatch(/add "converter" to this wallet's allow list/);
+    store.close();
+  });
+
   it('refuses a zero amount', async () => {
     const { t } = await harness();
     expect(
@@ -719,6 +759,30 @@ describe('admin-call', () => {
     // The REASON is the contract's internal state and stays in the log sink.
     expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
     expect(JSON.stringify(err?.detail)).not.toContain('LoopMintsValue');
+  });
+
+  it('emits hub.call with status refused and no hash when the simulation refuses', async () => {
+    // A THIRD STATUS, and not decoration. Nothing was mined, so a null hash
+    // under "reverted" would lie about what happened - and silence would hide
+    // the hub trying something the chain would not accept, which is exactly
+    // what a facilitator wants to see.
+    const { t, store } = await harness(undefined, { contractReverts: true });
+    await t
+      .adminCall({
+        contract: 'converter',
+        function: 'setPair',
+        args: [PLAY, GOLD, '1500000000000000000'],
+        intentId: 'a-refused',
+      })
+      .catch(() => undefined);
+
+    const events = store.dueEvents(10).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+    expect(events.find((e) => e.kind === 'hub.call')).toMatchObject({
+      contract: 'converter',
+      function: 'setPair',
+      status: 'refused',
+      txHash: null,
+    });
   });
 
   it('emits hub.call', async () => {

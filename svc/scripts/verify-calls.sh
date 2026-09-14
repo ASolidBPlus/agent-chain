@@ -248,6 +248,25 @@ PYEOF
 )" \
   "converter/setPair/ok"
 
+step "the hub's REFUSED action reaches the feed too"
+# Ruled: a simulation-refused admin-call emits hub.call with a null hash and
+# status "refused" - a third value beside ok and reverted. Nothing was mined, so
+# a null hash under "reverted" would lie; silence would hide the hub trying
+# something the chain would not accept.
+check "hub.call refused" \
+  "$(python3 - <<PYEOF
+import json, sqlite3
+db = sqlite3.connect("$WORK/store/db.sqlite")
+rows = [json.loads(r[0]) for r in db.execute("SELECT payload FROM outbox ORDER BY id")]
+hub = [r for r in rows if r.get("kind") == "hub.call" and r.get("status") == "refused"]
+if not hub:
+    print("no-refused-event")
+else:
+    print("%s/%s" % (hub[0].get("function"), hub[0].get("txHash")))
+PYEOF
+)" \
+  "setPair/None"
+
 printf '\n'
 if [ "$FAIL" = 0 ]; then
   echo "ALL CHECKS PASSED"
