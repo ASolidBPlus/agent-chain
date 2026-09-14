@@ -1,0 +1,28 @@
+# The build context is THIS directory (compose.chain.yml: `context: .`).
+#
+# Without this, `COPY svc svc` carries the HOST's svc/node_modules into the
+# image on top of the symlink farm `bun install` just built there. bun links a
+# workspace member's deps as `svc/node_modules/viem -> ../../../node_modules/
+# .bun/...` — three levels up, which is the repo root on the host and `/`
+# inside the image, where /app/svc/node_modules is only two below /app.
+# chain-svc died with `ENOENT reading "/app/svc/node_modules/viem"`.
+#
+# WHY THIS DID NOT BITE BEFORE THE SPLIT, because the obvious answer is wrong:
+# mesh-agent's root .dockerignore says a bare `node_modules`, which matches the
+# CONTEXT ROOT ONLY — chain/svc/node_modules was copied into that image too.
+# It worked because /app/chain/svc/node_modules is three levels below /app, so
+# the same `../../../` landed on the root node_modules by coincidence of DEPTH.
+# The move to `context: .` removed one level and the coincidence with it.
+#
+# So `**/` is the load-bearing part of the first rule, not decoration.
+**/node_modules
+**/*.log
+.env
+**/chain.env
+.git
+# Foundry build output and vendored libraries: not copied by svc/Dockerfile,
+# but they are the bulk of a context that would otherwise go to the daemon.
+contracts/out
+contracts/cache
+contracts/broadcast
+contracts/lib
