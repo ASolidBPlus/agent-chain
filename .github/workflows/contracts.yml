@@ -66,6 +66,21 @@ jobs:
 
       - run: bun install --frozen-lockfile --ignore-scripts
 
+      # THE GATE'S GUARANTEE, MADE INTO A STEP RATHER THAN LEFT AS A PROPERTY
+      # OF THE RUNNER. `out/` is gitignored, so a fresh checkout has none and
+      # the build below is already clean today - but that is an accident of
+      # nobody having cached it yet, and adding a build cache is exactly the
+      # kind of performance edit that gets reviewed as a performance edit.
+      #
+      # It matters because `forge build` ADDS to out/ and never removes from it:
+      # the artefact of a contract deleted from a source file that still exists
+      # survives, keeps its `src/` compilation target, and passes both of
+      # generate-abi's filters. The clean build is what catches a deleted
+      # CONTRACT; the filters catch a deleted FILE.
+      - name: start from an empty out/
+        working-directory: contracts
+        run: rm -rf out
+
       - name: forge build
         working-directory: contracts
         run: forge build
