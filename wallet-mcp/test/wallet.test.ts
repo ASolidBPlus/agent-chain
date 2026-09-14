@@ -638,9 +638,20 @@ describe('one wallet, two tokens', () => {
     expect(fake.historyQueries).toEqual(['play', 'au']);
   });
 
-  it('refuses history for a token this deployment does not have', async () => {
+  it('refuses history for a token this deployment does not have, BY CODE', async () => {
+    // The CODE in `error` and the sentence in `detail`, which is `send`'s shape
+    // for the identical resolution. Asserting only that the sentence appeared
+    // let the two paths drift: one rule reached a persona as `unknown_token`
+    // through `send` and as free text through `history`, and the closed set of
+    // reasons is exactly what a model is supposed to be able to switch on.
+    //
+    // Caught by the stdio smoke, not by this suite - because this assertion
+    // was satisfied by the detail whichever field carried it.
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.history(20, 'ETH')).toMatchObject({ error: expect.stringContaining('no token "ETH"') });
+    expect(await wallet.history(20, 'ETH')).toMatchObject({
+      error: 'unknown_token',
+      detail: expect.stringContaining('no token "ETH"'),
+    });
     expect(fake.historyQueries).toHaveLength(0);
   });
 });

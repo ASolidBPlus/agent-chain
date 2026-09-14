@@ -52,7 +52,22 @@ async function main(): Promise<void> {
   const call = async (name: string, args: Record<string, unknown> = {}): Promise<any> => {
     const res = await client.callTool({ name, arguments: args });
     const content = (res.content ?? []) as Array<{ type: string; text?: string }>;
-    return JSON.parse(content.find((c) => c.type === 'text')?.text ?? 'null');
+    const text = content.find((c) => c.type === 'text')?.text ?? 'null';
+    try {
+      return JSON.parse(text);
+    } catch {
+      // NOT EVERY ANSWER IS A TOOL RESULT. An argument the tool SCHEMA rejects
+      // never reaches the tool: the SDK answers with its own error text, which
+      // is not JSON - and a helper that assumed it was died on the parse with a
+      // message about an unexpected identifier, naming neither the tool nor the
+      // argument.
+      //
+      // Surfaced as a value rather than thrown, because "the schema refused
+      // this" is a legitimate outcome to assert - for some inputs it is the
+      // outcome we WANT, since the schema is where a model reads the contract
+      // before it is wrong.
+      return { schemaRefused: true, text };
+    }
   };
 
   console.log('\n=== criterion 4');
@@ -109,7 +124,21 @@ async function main(): Promise<void> {
   const named = await call('send', { to: 'alpha.play', amount: 1, token: sym, intent_id: 'tok1' });
   check('a send naming the default token is accepted', named.ok, true);
   check('a token this deployment lacks is refused', (await call('send', { to: 'alpha.play', amount: 1, token: 'NOSUCH', intent_id: 'tok2' })).reason, 'unknown_token');
-  check('a token that is not a string is bad input', (await call('send', { to: 'alpha.play', amount: 1, token: 4, intent_id: 'tok3' })).reason, 'error');
+  // REFUSED BY THE SCHEMA, NOT BY THE TOOL, and that is the better answer
+  // rather than a near miss. `token` is `z.string().optional()`, so `4` never
+  // reaches `wallet.send` at all - the model is told what a token IS, by the
+  // same schema it read to build the call, instead of being told after the
+  // fact that its value was wrong.
+  //
+  // This check asserted `reason: 'error'` and could not have passed: the tool
+  // never ran, so there was no reason to read. It was invisible because this
+  // script needs Docker and Foundry and therefore cannot run in CI - the same
+  // shape as the four verify scripts whose key scrape had rotted unnoticed.
+  check(
+    'a token that is not a string is refused by the tool schema',
+    (await call('send', { to: 'alpha.play', amount: 1, token: 4, intent_id: 'tok3' })).schemaRefused,
+    true,
+  );
 
   console.log('\n=== the other tools');
   const who = await call('whoami');
@@ -120,7 +149,15 @@ async function main(): Promise<void> {
   console.log(`  history: ${JSON.stringify(history)}`);
   // One token per call, and every row says which.
   check('every history row names its token', (history as Array<{ token?: string }>).every((e) => e.token === sym), true);
-  check('history for a token this deployment lacks is refused', typeof (await call('history', { limit: 3, token: 'NOSUCH' })).error, 'string');
+  // THE CODE, not its type. `typeof … === 'string'` passes for ANY error
+  // string - including one from a chain outage, a bad limit, or a refusal
+  // meaning something else entirely - so it asserted that history failed
+  // somehow rather than that it refused the token. Compare to a value.
+  check(
+    'history for a token this deployment lacks is refused by name',
+    (await call('history', { limit: 3, token: 'NOSUCH' })).error,
+    'unknown_token',
+  );
   const lookalike = await call('resolve', { name: 'aIpha.play' });
   const real = await call('resolve', { name: 'alpha.play' });
   console.log(`  resolve aIpha.play -> ${JSON.stringify(lookalike)}`);

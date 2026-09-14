@@ -400,9 +400,17 @@ export class Wallet {
   async history(
     limit = 20,
     token?: unknown,
-  ): Promise<Array<Record<string, unknown>> | { error: string }> {
+  ): Promise<Array<Record<string, unknown>> | { error: string; detail?: string }> {
     const resolved = resolveTokenOrRefusal(this.modules, token);
-    if (!resolved.ok) return { error: this.redact(resolved.detail) };
+    if (!resolved.ok) {
+      // THE CODE IN `error`, THE SENTENCE IN `detail` - the shape every other
+      // refusal on this side uses, and `send`'s shape for the identical
+      // resolution. This returned the DETAIL as the error, so one rule reached
+      // a persona as `unknown_token` through `send` and as a sentence through
+      // `history`: two shapes for one refusal, and the closed set of reasons is
+      // exactly what the model is supposed to be able to switch on.
+      return { error: resolved.reason, detail: this.redact(resolved.detail) };
+    }
     const res = await this.client.history(this.config.agentId, limit, resolved.token.key);
     const down = Wallet.unreachable(res);
     if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'history unavailable') };
