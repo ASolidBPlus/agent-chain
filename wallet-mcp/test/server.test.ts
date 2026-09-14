@@ -128,10 +128,31 @@ describe('startup reads /modules and fails hard when it cannot', () => {
       stderr: 'pipe',
       stdin: 'ignore',
     });
-    const exitCode = await proc.exited;
-    const stderr = await new Response(proc.stderr).text();
+    // Drain stderr CONCURRENTLY with waiting for exit, never after it: reading a
+    // pipe only once the child is gone can lose the reason, and a full pipe could
+    // stall the child. Same pattern svc/test/guards.test.ts uses for its own
+    // spawned service - which runs at the SAME TIME as this one under the root
+    // suite, so this test shares CPU and the libuv threadpool with another real
+    // `bun` process.
+    let killed = false;
+    const cap = setTimeout(() => {
+      killed = true;
+      proc.kill();
+    }, 15_000);
+    const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    clearTimeout(cap);
 
-    expect(exitCode).not.toBe(0);
+    // A starved or hung child fails BY NAME here rather than as an opaque
+    // framework timeout, so the next person reading a red CI job knows which
+    // half went wrong.
+    if (killed) {
+      throw new Error(`wallet-mcp did not exit within 15s; stderr so far: ${JSON.stringify(stderr)}`);
+    }
+    // stderr first: it names WHY the process gave up, and a failure here prints
+    // what was actually received.
     expect(stderr).toContain('cannot read /modules');
-  });
+    expect(exitCode).not.toBe(0);
+    // Generous per-test timeout: spawning a real process competes with the rest
+    // of the suite, and a slow-but-correct run must not read as a defect.
+  }, 30_000);
 });
