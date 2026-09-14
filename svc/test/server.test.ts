@@ -10,6 +10,7 @@ import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
 import { closedCallPolicy } from '../src/calls.ts';
 import { requireContract } from '../src/modules.ts';
+import { Treasury as TreasuryClass } from '../src/treasury.ts';
 
 const TOKEN = 'correct-horse-battery-staple';
 const WALLET_TOKEN = 'a-wallet-credential';
@@ -575,7 +576,9 @@ describe('per-token reads', () => {
   const PLAY = { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 };
   const AU = { key: 'au', address: '0xau', symbol: 'GOLD', decimals: 6 };
 
-  async function twoTokenServer(): Promise<{ server: Server; base: string }> {
+  async function twoTokenServer(
+    opts: { onEvents?: (address: string) => void; withTransfer?: boolean } = {},
+  ): Promise<{ server: Server; base: string }> {
     const balances: Record<string, bigint> = {
       '0xvee': 5_000000000000000000n, // 5 PLAY at 18 dp
       '0xau': 7_000000n, //              7 GOLD at 6 dp
@@ -596,13 +599,39 @@ describe('per-token reads', () => {
           readContract: async ({ address, functionName }: { address: string; functionName: string }) =>
             functionName === 'totalSupply' ? balances[address]! * 2n : balances[address]!,
           getBalance: async () => 1_000000000000000000n,
+          getContractEvents: async ({ address, args }: { address: string; args: Record<string, unknown> }) => {
+            opts.onEvents?.(address);
+            // One OUTGOING transfer of 7 GOLD - 7_000000 wei at 6 dp - so the
+            // formatting path is actually reached. Only on the `from` query, so
+            // the entry appears once rather than twice.
+            return opts.withTransfer && address === '0xau' && args.from
+              ? [
+                  {
+                    args: { from: WALLET, to: '0xother', value: 7_000000n },
+                    transactionHash: '0xh1',
+                    blockNumber: 3n,
+                  },
+                ]
+              : [];
+          },
         },
       },
       resolver: {
         require: async () => ({ address: WALLET, canonical: 'alpha:client' }),
         lookup: async () => ({ address: WALLET, canonical: 'alpha:client' }),
+        reverseOf: async () => 'alpha:client',
       },
+      treasury: null as never,
     } as unknown as Services;
+    (svc as { treasury: unknown }).treasury = new TreasuryClass(
+      svc.config as never,
+      svc.chain as never,
+      {} as never,
+      store,
+      svc.resolver as never,
+      {} as never,
+      closedCallPolicy(),
+    );
 
     const s = createChainSvcServer(svc);
     await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
@@ -623,6 +652,85 @@ describe('per-token reads', () => {
     // The legacy single-token field survives for one release, for the DEFAULT
     // token, so a v0.4.0 reader keeps working while it migrates.
     expect(res.vee).toBe('5');
+  });
+
+  it('filters /history by token, and defaults to the default one', async () => {
+    // THE ADDRESS QUERIED IS THE ASSERTION, because that is the thing a mutant
+    // ignoring the filter would change. Asserting the ENTRIES would not: with
+    // one token's logs in the fixture, a handler that queried the wrong address
+    // and a handler that queried the right one both return the same list.
+    const asked: string[] = [];
+    const svc = {
+      config: { token: TOKEN },
+      store,
+      chain: {
+        treasury: '0xtreasury',
+        deployment: { chainId: 31337, treasury: '0xtreasury' },
+        modules: {
+          tokens: [PLAY, AU],
+          names: { address: '0xreg', tld: 'play' },
+          contracts: [],
+          byKey: new Map(),
+        },
+        publicClient: {
+          getContractEvents: async ({ address }: { address: string }) => {
+            asked.push(address);
+            return [];
+          },
+        },
+      },
+      resolver: {
+        require: async () => ({ address: WALLET, canonical: 'alpha:client' }),
+        reverseOf: async () => 'alpha:client',
+      },
+    } as unknown as Services;
+    const { Treasury } = await import('../src/treasury.ts');
+    const t = new Treasury(
+      svc.config as never,
+      svc.chain as never,
+      {} as never,
+      store,
+      svc.resolver as never,
+      {} as never,
+      closedCallPolicy(),
+    );
+
+    await t.history('alpha.play', 10);
+    expect([...new Set(asked)]).toEqual(['0xvee']); // the default token
+
+    asked.length = 0;
+    await t.history('alpha.play', 10, 'au');
+    expect([...new Set(asked)]).toEqual(['0xau']); // by KEY
+
+    asked.length = 0;
+    await t.history('alpha.play', 10, 'gold');
+    expect([...new Set(asked)]).toEqual(['0xau']); // by SYMBOL, case-insensitively
+  });
+
+  it('carries the query string token THROUGH THE ROUTE, not just into the method', async () => {
+    // THE THIRD PART OF THE CONTROL: the decision, the facts, and the WIRE. A
+    // test that calls `treasury.history(...)` directly proves the filter works
+    // and says nothing about whether the route ever passes it - and a mutant
+    // dropping `url.searchParams.get('token')` survives every such test.
+    const asked: string[] = [];
+    const { server: s, base: b } = await twoTokenServer({ onEvents: (a) => asked.push(a) });
+    await fetch(`${b}/history/alpha.play?token=au`, { headers: auth });
+    s.close();
+    expect([...new Set(asked)]).toEqual(['0xau']);
+  });
+
+  it('formats a history entry at ITS OWN token\'s scale', async () => {
+    // The fixture must produce an ENTRY, or the formatting path is never
+    // reached: a mutant scaling by the default token's decimals survives a
+    // fixture whose event list is empty, however many assertions point at it.
+    // 7 GOLD at 6 dp is 7_000000 wei; scaled at PLAY's 18 it would read
+    // 0.000000000007.
+    const { server: s, base: b } = await twoTokenServer({ withTransfer: true });
+    const res = (await (await fetch(`${b}/history/alpha.play?token=GOLD`, { headers: auth })).json()) as Array<
+      Record<string, unknown>
+    >;
+    s.close();
+    expect(res[0]).toMatchObject({ amount: '7', vee: '7', token: 'GOLD' });
   });
 
   it('reports every token on /supply', async () => {

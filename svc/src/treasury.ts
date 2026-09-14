@@ -42,6 +42,7 @@ import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from '.
 import {
   defaultToken,
   requireContract,
+  resolveToken,
   type RegisteredContract,
   type TokenModule,
 } from './modules.ts';
@@ -144,7 +145,13 @@ export interface HistoryEntry {
   txHash: string;
   from: string;
   to: string;
+  /// The amount, in the named token's own whole units.
+  amount: string;
+  /// The same value under its old name, until v0.6.0.
   vee: string;
+  /// The token's SYMBOL - what a persona reads and can write back. The KEY is
+  /// what chain-svc stores; `resolveToken` is the one place they meet.
+  token: string;
   blockNumber: string;
   memo?: string;
 }
@@ -910,28 +917,43 @@ export class Treasury {
 
   /// Transfer logs touching this wallet, newest first, names resolved where
   /// known (spec S4).
-  async history(name: string, limit: number): Promise<HistoryEntry[]> {
+  /// One token's movements for one wallet, newest first.
+  ///
+  /// ONE TOKEN, and with `token` omitted it is the DEFAULT token - which is the
+  /// increment's one rule: a request that names no token behaves exactly as it
+  /// did before there were two. Not every token merged: a merged history would
+  /// interleave amounts in different scales under one `amount` field, and the
+  /// reader would have to carry the unit per row to make sense of any of it.
+  /// The row DOES carry its token, so a caller that wants two can ask twice and
+  /// merge with the units intact.
+  async history(name: string, limit: number, tokenArg?: unknown): Promise<HistoryEntry[]> {
     const who = await this.resolver.require(assertLookupName(name));
+    // THE RESOLVED TokenModule, carried as ONE value from here on. Its address,
+    // its symbol and its decimals are three facts about the same token, and
+    // reading any of them from a second lookup is what lets one drift.
+    const token = resolveToken(this.chain.modules, tokenArg);
 
     let logs;
     try {
       const [sent, received] = await Promise.all([
-        this.chain.publicClient.getContractEvents({
-          address: defaultToken(this.chain.modules).address,
-          abi: TokenAbi,
-          eventName: 'Transfer',
-          args: { from: who.address },
-          fromBlock: 0n,
-          toBlock: 'latest',
-        }),
-        this.chain.publicClient.getContractEvents({
-          address: defaultToken(this.chain.modules).address,
-          abi: TokenAbi,
-          eventName: 'Transfer',
-          args: { to: who.address },
-          fromBlock: 0n,
-          toBlock: 'latest',
-        }),
+        (async () =>
+          this.chain.publicClient.getContractEvents({
+            address: token.address,
+            abi: TokenAbi,
+            eventName: 'Transfer',
+            args: { from: who.address },
+            fromBlock: 0n,
+            toBlock: 'latest',
+          }))(),
+        (async () =>
+          this.chain.publicClient.getContractEvents({
+            address: token.address,
+            abi: TokenAbi,
+            eventName: 'Transfer',
+            args: { to: who.address },
+            fromBlock: 0n,
+            toBlock: 'latest',
+          }))(),
       ]);
       logs = [...sent, ...received];
     } catch (err) {
@@ -962,7 +984,13 @@ export class Treasury {
         txHash,
         from: await nameFor(args.from),
         to: await nameFor(args.to),
-        vee: formatVee(args.value, defaultToken(this.chain.modules).decimals),
+        // BOTH NAMES for one release: `amount` is the field from here on, and
+        // `vee` stays beside it until v0.6.0 for the consumers on their own
+        // bump cadence. A reader that takes `vee` when `amount` is absent would
+        // pass the whole deprecation window while seeing one token.
+        amount: formatVee(args.value, token.decimals),
+        vee: formatVee(args.value, token.decimals),
+        token: token.symbol,
         blockNumber: String(log.blockNumber ?? 0n),
         ...(memo ? { memo } : {}),
       });
