@@ -651,7 +651,12 @@ export class Treasury {
     body: {
       fromAgentId?: unknown;
       to?: unknown;
-      vee?: unknown;
+      /// The amount, in the named token's own whole units. `vee` is aliased to
+      /// this by `readBody` for one release, so nothing here reads `vee`.
+      amount?: unknown;
+      /// The token's KEY or its SYMBOL, case-insensitively; absent means the
+      /// default token, which is the increment's one rule.
+      token?: unknown;
       memo?: unknown;
       intentId?: unknown;
     },
@@ -673,8 +678,14 @@ export class Treasury {
     // rather than a silent override, so a caller that lies is told so.
     const fromAgentId = walletPrincipal(principal, body.fromAgentId);
     const name = assertLookupName(body.to);
-    const tok = defaultToken(this.chain.modules);
-    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, ONE VALUE, CARRIED. `tok` is the token this transfer is in
+    // from here to the broadcast: its decimals parse the amount, its symbol
+    // appears in every refusal, its key is the caps and bookkeeping coordinate,
+    // and its address is the contract the transfer is sent to. Five uses of one
+    // fact - and sourcing any of them from a second lookup is what lets one of
+    // them belong to a different token while the rest look right.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const amount = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
 
     // The store is the single truth for frozen (spec S4); the per-agent policy
     // file is only wallet-mcp's local fast-path copy, and loses any disagreement.
@@ -696,7 +707,7 @@ export class Treasury {
     // itself derived from the credential a few lines above and never from the
     // body - so the fallback cannot be steered by the request.
     const target = await this.resolveTo(name, fromAgentId);
-    const { decimals, symbol } = defaultToken(this.chain.modules);
+    const { decimals, symbol } = tok;
     enforcePolicy({
       policy,
       to: name,
@@ -704,11 +715,7 @@ export class Treasury {
       amount,
       decimals,
       symbol,
-      // The default token until §3 gives this endpoint its own `token`
-      // argument. Named explicitly rather than defaulted inside enforcePolicy,
-      // so the day a second token reaches this path the omission is a
-      // compile error rather than a spend against the wrong cap.
-      tokenKey: defaultToken(this.chain.modules).key,
+      tokenKey: tok.key,
     });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
@@ -753,18 +760,17 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
-      // The default token until §1 gives this endpoint its own `token`
-      // argument, and it is the same key the cap below is read against - so the
-      // hold and the bound it is tested against cannot be in different
+      // The SAME token the amount was parsed at and the cap is read against, so
+      // the hold and the bound it is tested against cannot be in different
       // currencies.
-      token: defaultToken(this.chain.modules).key,
-      capWei: stageCapWei(policy, defaultToken(this.chain.modules).key, decimals),
+      token: tok.key,
+      capWei: stageCapWei(policy, tok.key, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
       throw new HttpError(
         'over_stage_cap',
-        `max_per_stage is ${capsFor(policy, defaultToken(this.chain.modules).key).max_per_stage} ` +
+        `max_per_stage is ${capsFor(policy, tok.key).max_per_stage} ` +
           `${symbol} for this stage`,
       );
     }
@@ -809,7 +815,10 @@ export class Treasury {
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: defaultToken(this.chain.modules).address,
+        // THE RESOLVED TOKEN'S OWN CONTRACT. The last of the five uses of one
+        // fact, and the one that would move real money to the wrong ledger if
+        // it came from a second lookup.
+        to: tok.address,
         data,
         ...ZERO_FEES,
       });

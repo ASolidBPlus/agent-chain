@@ -204,7 +204,7 @@ function detector(entries: Record<string, string | null>) {
 }
 
 const send = (t: Treasury, to: string, intentId: string) =>
-  t.signTransfer({ scope: 'wallet', agentId: 'acme:dana' }, { to, vee: '1', intentId });
+  t.signTransfer({ scope: 'wallet', agentId: 'acme:dana' }, { to, amount: '1', intentId });
 
 describe('the bare-id detector', () => {
   // CASE 1 of 4: a legitimate colon-less platform name. Using it is CORRECT, so
