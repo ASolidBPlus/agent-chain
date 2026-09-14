@@ -172,7 +172,7 @@ import { join } from 'node:path';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = new URL('..', import.meta.url).pathname;
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
 
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));
@@ -204,7 +204,7 @@ function detector(entries: Record<string, string | null>) {
 }
 
 const send = (t: Treasury, to: string, intentId: string) =>
-  t.signTransfer({ scope: 'wallet', agentId: 'acme:dana' }, { to, vee: '1', intentId });
+  t.signTransfer({ scope: 'wallet', agentId: 'acme:dana' }, { to, amount: '1', intentId });
 
 describe('the bare-id detector', () => {
   // CASE 1 of 4: a legitimate colon-less platform name. Using it is CORRECT, so

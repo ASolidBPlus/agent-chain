@@ -197,11 +197,16 @@ export class Store {
         count    INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (agent_id, stage, contract, function)
       );
+      -- KEYED BY TOKEN AS WELL, since caps are per token: one wallet spending
+      -- two currencies in one stage is two rows, and under the old key the
+      -- second would have replaced the first - silently, and in the direction
+      -- that frees budget.
       CREATE TABLE IF NOT EXISTS stage_spend (
         agent_id TEXT NOT NULL,
         stage    TEXT NOT NULL,
+        token    TEXT NOT NULL,
         spent    TEXT NOT NULL,
-        PRIMARY KEY (agent_id, stage)
+        PRIMARY KEY (agent_id, stage, token)
       );
       -- WHICH CHAIN THIS STORE BELONGS TO (spec S4: the store and the chain
       -- state share one lifetime). Recorded on the first boot that sees a
@@ -493,8 +498,13 @@ export class Store {
       .run(stage);
   }
 
-  spentThisStage(agentId: string, stage: string): bigint {
-    const row = this.db.query(`SELECT spent FROM stage_spend WHERE agent_id = ? AND stage = ?`).get(agentId, stage) as
+  /// What this wallet has spent OF THIS TOKEN in this stage.
+  ///
+  /// The token is a required coordinate, not an optional filter. A total that
+  /// summed two currencies would be a number in no unit at all - and the one it
+  /// would be compared against is a cap denominated in one of them.
+  spentThisStage(agentId: string, stage: string, token: string): bigint {
+    const row = this.db.query(`SELECT spent FROM stage_spend WHERE agent_id = ? AND stage = ? AND token = ?`).get(agentId, stage, token) as
       | { spent: string }
       | null;
     return row ? BigInt(row.spent) : 0n;
@@ -544,6 +554,12 @@ export class Store {
     /// PARAMETER rather than a second method so that both halves stay in one
     /// transaction and the call site has to say which it wants.
     capWei: bigint | null;
+    /// WHICH TOKEN this reservation is denominated in - the manifest KEY, which
+    /// is what `stage_spend` and `intents` store. Required rather than
+    /// defaulted to the first token: a caller that has not decided which
+    /// currency is moving has not decided what its cap means, and a default
+    /// would make that omission look like a decision.
+    token: string;
     /// A GENERIC CALL rather than a transfer (§3.2.7). Present for `call` and
     /// `admin-call` intents and absent for `sign-transfer` and `fund`, which is
     /// why the three columns are nullable: null is the true value, not a gap.
@@ -564,7 +580,7 @@ export class Store {
       maxPerStage?: number;
     };
   }): Reservation {
-    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei, call } =
+    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei, call, token } =
       args;
 
     // ONE transaction covering BOTH the intent and the cap, because they are
@@ -578,7 +594,7 @@ export class Store {
 
       // Re-read INSIDE the transaction: a value read before it began is the
       // same stale figure the check-then-act acted on.
-      const current = this.spentThisStage(agentId, stage);
+      const current = this.spentThisStage(agentId, stage, token);
       if (capWei !== null && current + amount > capWei) {
         return { outcome: 'over_stage_cap', txHash: null };
       }
@@ -600,8 +616,8 @@ export class Store {
         .query(
           `INSERT INTO intents (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic,
                                 reserved_at_block, id_source, call_contract, call_function,
-                                call_args_hash, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                call_args_hash, token, created_at)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           intentId,
@@ -615,6 +631,7 @@ export class Store {
           call?.contract ?? null,
           call?.function ?? null,
           call?.argsHash ?? null,
+          token,
           Date.now(),
         );
       if (counted) {
@@ -630,10 +647,10 @@ export class Store {
       if (capWei !== null) {
         this.db
           .query(
-            `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
-             ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
+            `INSERT INTO stage_spend (agent_id, stage, token, spent) VALUES (?, ?, ?, ?)
+             ON CONFLICT(agent_id, stage, token) DO UPDATE SET spent = excluded.spent`,
           )
-          .run(agentId, stage, (current + amount).toString());
+          .run(agentId, stage, token, (current + amount).toString());
       }
       return { outcome: 'reserved', txHash: null };
     });
@@ -945,11 +962,21 @@ export class Store {
   /// goes into the calldata and comes back in the log - so a lookup by id
   /// cannot serve it. Null means "a transfer intent, or none of ours", and the
   /// caller separates those by whether it found an intent at all.
-  callContractForTopic(topic: string): string | null {
+  /// WHAT THE CHAIN'S LOG SHOULD HAVE COME FROM, by the topic it carries.
+  ///
+  /// ONE QUERY FOR BOTH COORDINATES, because they answer one question between
+  /// them: a CALL intent expects its emission from the contract it named, and a
+  /// TRANSFER intent expects it from the token it moved. Two queries would be
+  /// two chances for a caller to use one and forget the other - and the one
+  /// they would forget is the token, because it is the newer of the two.
+  ///
+  /// Null for an intent this store never reserved, which the caller separates
+  /// from "reserved with no token" by looking at whether either field came back.
+  intentRouting(topic: string): { callContract: string | null; token: string | null } | null {
     const row = this.db
-      .query(`SELECT call_contract FROM intents WHERE topic = ?`)
-      .get(topic) as { call_contract: string | null } | null;
-    return row?.call_contract ?? null;
+      .query(`SELECT call_contract, token FROM intents WHERE topic = ?`)
+      .get(topic) as { call_contract: string | null; token: string | null } | null;
+    return row ? { callContract: row.call_contract, token: row.token } : null;
   }
 
   /// Which wallet reserved the intent the chain logged under this topic, for
@@ -975,6 +1002,19 @@ export class Store {
       | { id_source: string | null }
       | null;
     return row?.id_source ?? null;
+  }
+
+  /// WHICH TOKEN an intent was reserved in.
+  ///
+  /// Read by the event tail: the expected emitter for a transfer intent is that
+  /// intent's OWN token, not the deployment's default - which is what makes a
+  /// second token's IntentTransfer an ordinary emission and a cross-token one
+  /// an anomaly.
+  intentToken(intentId: string): string | null {
+    const row = this.db.query(`SELECT token FROM intents WHERE intent_id = ?`).get(intentId) as
+      | { token: string | null }
+      | null;
+    return row?.token ?? null;
   }
 
   intentTxHash(intentId: string): string | null {
@@ -1020,13 +1060,14 @@ export class Store {
     const undo = this.db.transaction((): void => {
       const row = this.db
         .query(
-          `SELECT agent_id, stage, held_wei, call_contract, call_function
+          `SELECT agent_id, stage, held_wei, token, call_contract, call_function
            FROM intents WHERE intent_id = ? AND tx_hash IS NULL`,
         )
         .get(intentId) as {
         agent_id: string;
         stage: string;
         held_wei: string;
+        token: string | null;
         call_contract: string | null;
         call_function: string | null;
       } | null;
@@ -1041,7 +1082,17 @@ export class Store {
       this.db.query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`).run(intentId);
 
       const held = BigInt(row.held_wei);
-      if (held > 0n) this.releaseStageSpend(row.agent_id, row.stage, held);
+      // THE TOKEN COMES FROM THE ROW, like every other coordinate `release`
+      // uses. A caller supplying it could give back a hold against a currency
+      // it was never taken in - which would leave the real hold standing and
+      // credit budget in another.
+      //
+      // Null only on a row written before v7 whose backfill did not reach it,
+      // which the migration refuses to produce; the hold is then left alone
+      // rather than released against a guess.
+      if (held > 0n && row.token !== null) {
+        this.releaseStageSpend(row.agent_id, row.stage, row.token, held);
+      }
 
       // THE THIRD HALF, found the same way as the other two: from the row, not
       // from what the caller remembers. `release(intentId)` takes one
@@ -1122,9 +1173,9 @@ export class Store {
   /// cannot see `.releaseStageSpend(` - `.release(` is not a substring of it -
   /// so while this was public a second post-broadcast refund path could be
   /// added and the structural test would stay green. One door, one guard.
-  private releaseStageSpend(agentId: string, stage: string, amount: bigint): void {
+  private releaseStageSpend(agentId: string, stage: string, token: string, amount: bigint): void {
     const release = this.db.transaction((): void => {
-      const current = this.spentThisStage(agentId, stage);
+      const current = this.spentThisStage(agentId, stage, token);
       // Clamped at zero, and now UNREACHABLE BY CONSTRUCTION rather than
       // defence against a live path - recorded because the previous comment
       // implied a reachability that no longer exists.
@@ -1139,10 +1190,10 @@ export class Store {
       const next = current > amount ? current - amount : 0n;
       this.db
         .query(
-          `INSERT INTO stage_spend (agent_id, stage, spent) VALUES (?, ?, ?)
-           ON CONFLICT(agent_id, stage) DO UPDATE SET spent = excluded.spent`,
+          `INSERT INTO stage_spend (agent_id, stage, token, spent) VALUES (?, ?, ?, ?)
+           ON CONFLICT(agent_id, stage, token) DO UPDATE SET spent = excluded.spent`,
         )
-        .run(agentId, stage, next.toString());
+        .run(agentId, stage, token, next.toString());
     });
     release();
   }

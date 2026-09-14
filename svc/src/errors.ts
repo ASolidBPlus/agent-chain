@@ -25,6 +25,19 @@ export type ErrorCode =
   | 'over_stage_cap'
   | 'intent_unresolved'
   | 'counterparty_denied'
+  /// §1. The TREASURY holds less of this token than the request moves.
+  ///
+  /// An OPERATOR FACT, withheld from personas: how much the treasury holds is
+  /// the game's supply position, and a persona that could read it from a
+  /// refusal could probe it by funding. It is a platform-scope endpoint, so
+  /// only an operator ever sees this code - but the withholding is declared in
+  /// wallet-mcp's REFUSAL_FOR rather than left to that fact, because "no route
+  /// reaches it" is a property of today's routes.
+  ///
+  /// Never topped up implicitly: the operator mints with
+  /// `admin-call token.mint(treasury, amount)`. A service that minted to cover
+  /// a shortfall would make the supply a function of spending.
+  | 'treasury_insufficient'
   | 'wallet_not_found'
   /// The route needs a module this deployment does not have. 404 because the
   /// endpoint genuinely is not there on this deployment - not 501, which would
@@ -36,6 +49,17 @@ export type ErrorCode =
   /// tool lists exactly what exists, and refusing to say which keys are real
   /// would only make a persona guess.
   | 'unknown_contract'
+  /// No token by that key or symbol in this deployment. 404 and persona-facing
+  /// for the same reason `unknown_contract` is: which tokens exist is the
+  /// public registry, and a persona reads their symbols in every balance and
+  /// every history entry.
+  ///
+  /// DISTINCT FROM `module_not_deployed`, which says this deployment has NO
+  /// token module at all. Two different absences: one is a fact about the
+  /// registry's contents, the other about the deployment's shape, and only the
+  /// first is the caller's business. Collapsing them would have a names-only
+  /// deployment tell a persona that its own currency does not exist.
+  | 'unknown_token'
   /// The contract exists and this caller may not call this function on it -
   /// either the allowlist has no entry for the pair, or the entry does not
   /// include this wallet's kind. ONE CODE FOR BOTH, deliberately: telling a
@@ -78,6 +102,7 @@ export const STATUS: Record<ErrorCode, number> = {
   wallet_not_found: 404,
   module_not_deployed: 404,
   unknown_contract: 404,
+  unknown_token: 404,
   function_not_allowed: 403,
   bad_args: 400,
   wallet_frozen: 409,
@@ -94,6 +119,10 @@ export const STATUS: Record<ErrorCode, number> = {
   // help - it needs reconciliation, not a backoff, so it must not read as 5xx.
   intent_unresolved: 409,
   counterparty_denied: 409,
+  // 409, with the policy refusals: the request was well formed and authorised,
+  // and the state on the far side is what stopped it. Retrying unchanged cannot
+  // help - it needs a mint, which is a different request.
+  treasury_insufficient: 409,
   chain_error: 502,
   chain_unreachable: 503,
   internal_error: 500,

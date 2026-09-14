@@ -31,6 +31,7 @@ import type { Resolver, WalletResolution } from './resolver.ts';
 import type { Store } from './store.ts';
 import { walletPrincipal, type Principal } from './auth.ts';
 import {
+  capsFor,
   enforcePolicy,
   readPolicyFile,
   stageCapWei,
@@ -41,6 +42,7 @@ import { assertCanonicalAgentId, assertLookupName, formatVee, parseVee } from '.
 import {
   defaultToken,
   requireContract,
+  resolveToken,
   type RegisteredContract,
   type TokenModule,
 } from './modules.ts';
@@ -143,7 +145,13 @@ export interface HistoryEntry {
   txHash: string;
   from: string;
   to: string;
+  /// The amount, in the named token's own whole units.
+  amount: string;
+  /// The same value under its old name, until v0.6.0.
   vee: string;
+  /// The token's SYMBOL - what a persona reads and can write back. The KEY is
+  /// what chain-svc stores; `resolveToken` is the one place they meet.
+  token: string;
   blockNumber: string;
   memo?: string;
 }
@@ -299,7 +307,8 @@ export class Treasury {
   /// The policy chain-svc ENFORCES is the same file it wrote for wallet-mcp to
   /// read, so the boundary and the model-facing fast path cannot drift apart.
   private async policyFor(agentId: string): Promise<AgentPolicy> {
-    return (await readPolicyFile(this.config.policyDir, agentId)) ?? this.policyDefaults.agent;
+    const key = this.chain.modules.tokens[0]?.key;
+    return (await readPolicyFile(this.config.policyDir, agentId, key)) ?? this.policyDefaults.agent;
   }
 
   /// Treasury -> wallet. Facilitator top-ups and bounty payouts (spec S4).
@@ -317,24 +326,74 @@ export class Treasury {
   /// the intent record is taken, the budget is not.
   async fund(body: {
     to?: unknown;
-    vee?: unknown;
+    amount?: unknown;
+    token?: unknown;
     reason?: unknown;
     intentId?: unknown;
   }): Promise<{ txHash: string; intentId: string }> {
     const name = assertLookupName(body.to);
-    const tok = defaultToken(this.chain.modules);
-    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, CARRIED. `fund` acts on the NAMED TOKEN ONLY, leaving every
+    // other balance untouched - so its address, its decimals and its symbol all
+    // come off this one value.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const amount = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
     const target = await this.resolver.require(name);
     const intentId =
       typeof body.intentId === 'string' && body.intentId !== ''
         ? body.intentId
         : `chain-svc:${randomUUID()}`;
 
+    // §1. A SHORT TREASURY IS REFUSED BY NAME, before the transfer.
+    //
+    // Without this the shortfall arrives as whatever the token contract says -
+    // a raw revert, classified `revert`, reading to an operator as "the call
+    // was mined and reverted; nothing changed". True, and useless: it names no
+    // cause and suggests no remedy, and the remedy is specific (mint to the
+    // treasury) and is the operator's to perform.
+    //
+    // CHECKED AGAINST THE SAME RESOLVED TOKEN the transfer uses, not looked up
+    // again: read and write are two uses of one resolution, and sourcing them
+    // separately is what lets a check measure one token's float and a transfer
+    // move another's.
+    //
+    // This is a check, not a lock. Two concurrent funds can both pass it and
+    // the second still revert on-chain - which is correct: the chain is the
+    // authority on the balance and this only turns the COMMON case into a
+    // refusal that names its cause.
+    try {
+      const float = (await this.chain.publicClient.readContract({
+        address: tok.address,
+        abi: TokenAbi,
+        functionName: 'balanceOf',
+        // `chain.treasury` (the account that SIGNS) rather than
+        // `deployment.treasury` (what the manifest declares). The constructor
+        // refuses to start unless they agree, so today they cannot differ - but
+        // the question this asks is "can the sender cover it", and the sender is
+        // the wallet client's account. Reading the declared address would be
+        // right by coincidence rather than by construction.
+        args: [this.chain.treasury],
+      })) as bigint;
+      if (float < amount) {
+        throw new HttpError(
+          'treasury_insufficient',
+          `the treasury holds ${formatVee(float, tok.decimals)} ${tok.symbol} and this moves ` +
+            `${formatVee(amount, tok.decimals)}; mint to the treasury with ` +
+            `admin-call ${tok.key}.mint`,
+        );
+      }
+    } catch (err) {
+      // The REFUSAL passes through as itself; only a chain failure is
+      // reclassified. Without the instanceof the refusal would be wrapped as a
+      // chain_error by its own read's catch - a check reporting itself broken.
+      if (err instanceof HttpError) throw err;
+      throw asChainError(err);
+    }
+
     try {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: defaultToken(this.chain.modules).address,
+        address: tok.address,
         abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
@@ -364,7 +423,16 @@ export class Treasury {
   /// balance is not an agent spending. See sweepToTreasury for what that costs.
   async setBalance(
     agentId: string,
-    body: { vee?: unknown; intentId?: unknown; reason?: unknown; to?: unknown },
+    body: {
+      /// The target balance, in the named token's own whole units.
+      amount?: unknown;
+      /// Which token's balance to set. Absent means the default token; the
+      /// others are left exactly as they were.
+      token?: unknown;
+      intentId?: unknown;
+      reason?: unknown;
+      to?: unknown;
+    },
   ): Promise<{ balance: string; txHash?: string; intentId?: string }> {
     assertCanonicalAgentId(agentId);
     // `to` IS NOT A PARAMETER OF THIS ENDPOINT and never becomes one by
@@ -378,11 +446,15 @@ export class Treasury {
       );
     }
 
-    const tok = defaultToken(this.chain.modules);
-    const target = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, CARRIED into the balance read, the top-up, the sweep and the
+    // re-read below. `set-balance` acts on the NAMED TOKEN ONLY, leaving every
+    // other balance untouched - so a second lookup anywhere here would set one
+    // token's balance by measuring another's.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const target = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
     const wallet = await this.resolver.require(agentId);
     const current = (await this.chain.publicClient.readContract({
-      address: defaultToken(this.chain.modules).address,
+      address: tok.address,
       abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
@@ -413,6 +485,7 @@ export class Treasury {
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
       capWei: null,
+      token: tok.key,
       idSource: suppliedId ? 'caller' : 'server',
     });
     if (reservation.outcome === 'duplicate') {
@@ -433,8 +506,17 @@ export class Treasury {
         // top-up would be the one money movement whose intent cannot be joined
         // from /history, and BOTH SIDES WOULD COMPILE. Review recorded the
         // asymmetry against the pre-merge trees; this is where it dissolves.
-        ? await this.fund({ to: agentId, vee: formatVee(target - current, tok.decimals), reason, intentId })
-        : await this.sweepToTreasury(agentId, current - target, reason, intentId);
+        ? await this.fund({
+            to: agentId,
+            amount: formatVee(target - current, tok.decimals),
+            // THE SAME TOKEN, passed on rather than defaulted inside `fund`.
+            // Without it a set-balance of GOLD would top up in PLAY and then
+            // re-read GOLD, and the reply would report a number nobody moved.
+            token: tok.key,
+            reason,
+            intentId,
+          })
+        : await this.sweepToTreasury(agentId, current - target, reason, intentId, tok);
 
     this.store.completeIntent(intentId, result.txHash);
 
@@ -444,7 +526,7 @@ export class Treasury {
     // is what the harness's Wallets panel shows, and a panel showing a number
     // nobody observed is the observer reporting its own state as the subject's.
     const settled = (await this.chain.publicClient.readContract({
-      address: defaultToken(this.chain.modules).address,
+      address: tok.address,
       abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
@@ -481,6 +563,12 @@ export class Treasury {
     amount: bigint,
     reason: string | null,
     intentId: string,
+    /// THE RESOLVED TOKEN to sweep. Passed rather than defaulted, because
+    /// `set-balance` names its token and the sweep is the OTHER half of the
+    /// same operation: a GOLD set-balance that needs to sweep would otherwise
+    /// take PLAY out of the wallet, leaving the gold balance exactly as it was
+    /// and the reply reporting a number nobody moved.
+    token: TokenModule,
   ): Promise<{ txHash: string }> {
     const { privateKey } = await this.keystore.load(agentId);
     const account = privateKeyToAccount(privateKey);
@@ -498,7 +586,7 @@ export class Treasury {
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: defaultToken(this.chain.modules).address,
+        to: token.address,
         data,
         ...ZERO_FEES,
       });
@@ -637,7 +725,12 @@ export class Treasury {
     body: {
       fromAgentId?: unknown;
       to?: unknown;
-      vee?: unknown;
+      /// The amount, in the named token's own whole units. `vee` is aliased to
+      /// this by `readBody` for one release, so nothing here reads `vee`.
+      amount?: unknown;
+      /// The token's KEY or its SYMBOL, case-insensitively; absent means the
+      /// default token, which is the increment's one rule.
+      token?: unknown;
       memo?: unknown;
       intentId?: unknown;
     },
@@ -659,8 +752,14 @@ export class Treasury {
     // rather than a silent override, so a caller that lies is told so.
     const fromAgentId = walletPrincipal(principal, body.fromAgentId);
     const name = assertLookupName(body.to);
-    const tok = defaultToken(this.chain.modules);
-    const amount = parseVee(body.vee, tok.decimals, tok.symbol, 'vee');
+    // ONE RESOLVE, ONE VALUE, CARRIED. `tok` is the token this transfer is in
+    // from here to the broadcast: its decimals parse the amount, its symbol
+    // appears in every refusal, its key is the caps and bookkeeping coordinate,
+    // and its address is the contract the transfer is sent to. Five uses of one
+    // fact - and sourcing any of them from a second lookup is what lets one of
+    // them belong to a different token while the rest look right.
+    const tok = resolveToken(this.chain.modules, body.token);
+    const amount = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
 
     // The store is the single truth for frozen (spec S4); the per-agent policy
     // file is only wallet-mcp's local fast-path copy, and loses any disagreement.
@@ -682,8 +781,16 @@ export class Treasury {
     // itself derived from the credential a few lines above and never from the
     // body - so the fallback cannot be steered by the request.
     const target = await this.resolveTo(name, fromAgentId);
-    const { decimals, symbol } = defaultToken(this.chain.modules);
-    enforcePolicy({ policy, to: name, canonical: target.canonical ?? undefined, amount, decimals, symbol });
+    const { decimals, symbol } = tok;
+    enforcePolicy({
+      policy,
+      to: name,
+      canonical: target.canonical ?? undefined,
+      amount,
+      decimals,
+      symbol,
+      tokenKey: tok.key,
+    });
     await this.assertNotDeniedByIdentity(policy, target.address, name);
     const { privateKey } = await this.keystore.load(fromAgentId);
 
@@ -727,11 +834,19 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount,
-      capWei: stageCapWei(policy, decimals),
+      // The SAME token the amount was parsed at and the cap is read against, so
+      // the hold and the bound it is tested against cannot be in different
+      // currencies.
+      token: tok.key,
+      capWei: stageCapWei(policy, tok.key, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
-      throw new HttpError('over_stage_cap', `max_per_stage is ${policy.max_per_stage} ${symbol} for this stage`);
+      throw new HttpError(
+        'over_stage_cap',
+        `max_per_stage is ${capsFor(policy, tok.key).max_per_stage} ` +
+          `${symbol} for this stage`,
+      );
     }
     if (reservation.outcome === 'duplicate') {
       // The promise wallet-mcp makes to the model: a replay of the same send
@@ -774,7 +889,10 @@ export class Treasury {
       const request = await wallet.prepareTransactionRequest({
         account,
         chain: this.chain.viemChain,
-        to: defaultToken(this.chain.modules).address,
+        // THE RESOLVED TOKEN'S OWN CONTRACT. The last of the five uses of one
+        // fact, and the one that would move real money to the wrong ledger if
+        // it came from a second lookup.
+        to: tok.address,
         data,
         ...ZERO_FEES,
       });
@@ -798,6 +916,7 @@ export class Treasury {
       fromAgentId,
       to: name,
       amount,
+      token: tok,
       via: spendVia(clientMarker),
       memo: body.memo,
     });
@@ -832,6 +951,12 @@ export class Treasury {
     fromAgentId: string;
     to: string;
     amount: bigint;
+    /// THE RESOLVED TOKEN, not its symbol and not its decimals. Passing either
+    /// alone is the shape that put a GOLD amount through PLAY's scale here: the
+    /// event reported a second-currency spend as a near-zero number of an
+    /// unnamed currency, and every assertion about the transfer still passed
+    /// because the transfer was correct. The event was the only thing wrong.
+    token: TokenModule;
     via: string;
     memo: unknown;
   }): Promise<{ txHash: string }> {
@@ -868,7 +993,14 @@ export class Treasury {
         kind: 'agent.spend',
         name: args.fromAgentId,
         to: args.to,
-        vee: formatVee(args.amount, defaultToken(this.chain.modules).decimals),
+        // AT THE TOKEN'S OWN SCALE, AND NAMED. Both from the resolved token
+        // this transfer was made in - formatting at the default token's
+        // decimals reported 5 GOLD as 0.000000000005, and the reader had no
+        // field telling it which currency it was looking at either.
+        amount: formatVee(args.amount, args.token.decimals),
+        token: args.token.symbol,
+        // The old field beside the new one until v0.6.0, as everywhere else.
+        vee: formatVee(args.amount, args.token.decimals),
         intent_id: args.intentId,
         via: args.via,
         txHash: hash,
@@ -882,28 +1014,43 @@ export class Treasury {
 
   /// Transfer logs touching this wallet, newest first, names resolved where
   /// known (spec S4).
-  async history(name: string, limit: number): Promise<HistoryEntry[]> {
+  /// One token's movements for one wallet, newest first.
+  ///
+  /// ONE TOKEN, and with `token` omitted it is the DEFAULT token - which is the
+  /// increment's one rule: a request that names no token behaves exactly as it
+  /// did before there were two. Not every token merged: a merged history would
+  /// interleave amounts in different scales under one `amount` field, and the
+  /// reader would have to carry the unit per row to make sense of any of it.
+  /// The row DOES carry its token, so a caller that wants two can ask twice and
+  /// merge with the units intact.
+  async history(name: string, limit: number, tokenArg?: unknown): Promise<HistoryEntry[]> {
     const who = await this.resolver.require(assertLookupName(name));
+    // THE RESOLVED TokenModule, carried as ONE value from here on. Its address,
+    // its symbol and its decimals are three facts about the same token, and
+    // reading any of them from a second lookup is what lets one drift.
+    const token = resolveToken(this.chain.modules, tokenArg);
 
     let logs;
     try {
       const [sent, received] = await Promise.all([
-        this.chain.publicClient.getContractEvents({
-          address: defaultToken(this.chain.modules).address,
-          abi: TokenAbi,
-          eventName: 'Transfer',
-          args: { from: who.address },
-          fromBlock: 0n,
-          toBlock: 'latest',
-        }),
-        this.chain.publicClient.getContractEvents({
-          address: defaultToken(this.chain.modules).address,
-          abi: TokenAbi,
-          eventName: 'Transfer',
-          args: { to: who.address },
-          fromBlock: 0n,
-          toBlock: 'latest',
-        }),
+        (async () =>
+          this.chain.publicClient.getContractEvents({
+            address: token.address,
+            abi: TokenAbi,
+            eventName: 'Transfer',
+            args: { from: who.address },
+            fromBlock: 0n,
+            toBlock: 'latest',
+          }))(),
+        (async () =>
+          this.chain.publicClient.getContractEvents({
+            address: token.address,
+            abi: TokenAbi,
+            eventName: 'Transfer',
+            args: { to: who.address },
+            fromBlock: 0n,
+            toBlock: 'latest',
+          }))(),
       ]);
       logs = [...sent, ...received];
     } catch (err) {
@@ -934,7 +1081,13 @@ export class Treasury {
         txHash,
         from: await nameFor(args.from),
         to: await nameFor(args.to),
-        vee: formatVee(args.value, defaultToken(this.chain.modules).decimals),
+        // BOTH NAMES for one release: `amount` is the field from here on, and
+        // `vee` stays beside it until v0.6.0 for the consumers on their own
+        // bump cadence. A reader that takes `vee` when `amount` is absent would
+        // pass the whole deprecation window while seeing one token.
+        amount: formatVee(args.value, token.decimals),
+        vee: formatVee(args.value, token.decimals),
+        token: token.symbol,
         blockNumber: String(log.blockNumber ?? 0n),
         ...(memo ? { memo } : {}),
       });
@@ -1053,20 +1206,28 @@ export class Treasury {
     return { resolved, named };
   }
 
-  /// §3.2 step 6. Which token this call moves and how much, and every cap that
-  /// applies to it.
+  /// §3.2 step 6. WHICH TOKEN AND HOW MUCH, with no policy in it.
   ///
-  /// TWO BOUNDS CAN HOLD AT ONCE and both are checked. When the amount is in
-  /// the DEFAULT token the wallet's own `max_per_tx` applies, because that cap
-  /// is denominated in it. When the entry carries a `perTxCap` that applies
-  /// too, in the resolved token's own decimals - and for the `{arg}` form the
-  /// entry MUST carry one, because which token it names is chosen per call and
-  /// `gold -> play` would otherwise be bounded by nothing at all.
-  private callAmount(
+  /// This header described `perTxCap` as live and said "two bounds can hold at
+  /// once" - both true of v0.4.0 and neither true since this increment retired
+  /// the field. The comment survived the change because nothing compiles a
+  /// comment: the code moved, its description stayed, and a reader would have
+  /// gone looking for an entry-level bound that is now refused at load.
+  ///
+  /// ONE BOUND NOW, and it lives on the wallet: caps are per wallet per token,
+  /// so the wallet carries a limit for every currency it may spend and the
+  /// allowlist entry has nothing left to say about amounts.
+  ///
+  /// Split out of `callAmount` so the ADMIN path can reach the same answer:
+  /// §3.3 gives the hub no cap, so it needs the resolution and the scaling and
+  /// none of the enforcement. Sharing the function rather than restating the
+  /// resolution is the point - the token, its decimals and its address are
+  /// three facts about one thing, and a second implementation is where one of
+  /// them drifts.
+  private callMoney(
     entry: CallEntry,
     args: EncodableArg[],
     wireArgs: unknown[],
-    policy: AgentPolicy,
   ): { amount: bigint; token: TokenModule; index: number } | null {
     if (!entry.amount) return null;
     const { callerIndex } = Treasury.callerInputs(entry);
@@ -1115,9 +1276,30 @@ export class Treasury {
     // bigint, so there is exactly one conversion and no chance of a double one.
     const amount = parseVee(wireArgs[i], token.decimals, token.symbol, `argument ${i}`);
     if (amount <= 0n) throw new HttpError('invalid_amount', 'the amount must be greater than zero');
+    return { amount, token, index: i };
+  }
 
-    const isDefault = token.key === defaultToken(this.chain.modules).key;
-    if (isDefault) {
+  private callAmount(
+    entry: CallEntry,
+    args: EncodableArg[],
+    wireArgs: unknown[],
+    policy: AgentPolicy,
+  ): { amount: bigint; token: TokenModule; index: number } | null {
+    const money = this.callMoney(entry, args, wireArgs);
+    if (!money) return null;
+    const { amount, token } = money;
+
+    // EVERY TOKEN GOES THROUGH THE SAME CHECK NOW. This used to run only for
+    // the DEFAULT token, because caps were denominated in it and any other
+    // token had to be bounded by the allowlist entry's own `perTxCap`. Caps are
+    // per wallet per token, so the wallet carries a bound for every currency it
+    // may spend, and the entry has nothing left to say about it.
+    //
+    // The consequence is worth naming: a wallet with NO cap entry for this
+    // token now cannot spend it through a call either, because `capsFor`
+    // refuses inside `enforcePolicy` - the same fail-closed rule the transfer
+    // path follows, reached by the same function.
+    {
       // The wallet's own per-transaction cap, and the deny/allow lists - with
       // the CONTRACT KEY as the counterparty, so a policy can name contracts
       // the way it names wallets. enforcePolicy is pure string matching, so
@@ -1132,6 +1314,9 @@ export class Treasury {
           amount,
           decimals: token.decimals,
           symbol: token.symbol,
+          // THE TOKEN THAT ACTUALLY RESOLVED, not the default: a call may move
+          // any registered token, and the cap that bounds it is that token's.
+          tokenKey: token.key,
         });
       } catch (err) {
         // THE ONE REFUSAL A SCENARIO AUTHOR WILL MEET AND MISREAD. The allow
@@ -1157,27 +1342,7 @@ export class Treasury {
       }
     }
 
-    if (entry.perTxCap !== undefined) {
-      const cap = parseVee(entry.perTxCap, token.decimals, token.symbol, 'perTxCap');
-      if (amount > cap) {
-        throw new HttpError(
-          'over_max_per_tx',
-          `this call's per-transaction cap is ${entry.perTxCap} ${token.symbol}`,
-        );
-      }
-    } else if (!isDefault && entry.uncapped !== true) {
-      // UNREACHABLE UNDER THE LOAD RULE, which refuses an entry whose amount is
-      // in a non-default token - or in the per-call {arg} form - unless it
-      // carries perTxCap or uncapped. Two lines on a money bound, kept because
-      // the alternative to an unreachable check here is an unbounded spend if
-      // the load rule ever narrows.
-      throw new HttpError(
-        'function_not_allowed',
-        `this call moves ${token.symbol}, which no cap in this deployment bounds`,
-      );
-    }
-
-    return { amount, token, index: i };
+    return money;
   }
 
   /// The allowlist entry for this request, or the one refusal that covers every
@@ -1302,13 +1467,16 @@ export class Treasury {
       agentId: fromAgentId,
       stage,
       amount: money?.amount ?? 0n,
-      // A hold is taken only when the amount is in the DEFAULT token, because
-      // the stage budget is denominated in it. An amount in another token is
-      // bounded by the entry's perTxCap and by nothing else until increment 4.
-      capWei:
-        money && money.token.key === defaultToken(this.chain.modules).key
-          ? stageCapWei(policy, money.token.decimals)
-          : null,
+      // THE TOKEN THAT ACTUALLY RESOLVED. A call moving no money still needs a
+      // coordinate for its intents row, and the default is the honest one
+      // there: nothing was held in any currency.
+      token: money?.token.key ?? defaultToken(this.chain.modules).key,
+      // A HOLD FOR WHICHEVER TOKEN MOVED. `stage_spend` is keyed by token, and
+      // the wallet carries a per-stage bound for each - so a call moving gold
+      // takes a gold hold against a gold cap, and leaves the play budget alone.
+      // Before per-token caps this could only be taken for the default token,
+      // which meant every other currency had an unbounded stage.
+      capWei: money ? stageCapWei(policy, money.token.key, money.token.decimals) : null,
       call: {
         contract: contract.key,
         function: entry.function,
@@ -1322,7 +1490,7 @@ export class Treasury {
         'over_stage_cap',
         entry.maxPerStage !== undefined && !money
           ? `${entry.function} may be called ${entry.maxPerStage} times per stage`
-          : `max_per_stage is ${policy.max_per_stage} for this stage`,
+          : `max_per_stage is ${capsFor(policy, money!.token.key).max_per_stage} for this stage`,
       );
     }
     if (reservation.outcome === 'duplicate') {
@@ -1541,6 +1709,30 @@ export class Treasury {
     const { inputs } = Treasury.callerInputs(entry);
     const shaped = validateArgs(inputs, supplied, 'platform');
 
+    // §4. THE SAME `amount` THE AGENT EVENT CARRIES, so the feed reader sees one
+    // shape for both. Informational only here: §3.3 gives the hub no cap, so
+    // this is the operator moving money and nothing bounds it - which is the
+    // reason it is worth recording at all.
+    //
+    // Through `callMoney`, the same function the agent path uses, so the token
+    // resolution and the whole-units-to-smallest-units scaling happen once in
+    // the codebase. `calls.json` accepts an `amount` on an admin entry, so this
+    // is reachable rather than defensive.
+    const money = this.callMoney(entry, shaped, supplied);
+    // The scaled amount is what the contract is called with - the same
+    // write-back the agent path does at its call site, and for the same reason:
+    // the validator read the wire's "40" as 40n, which is right for an ordinary
+    // uint and a 1e18x error for money.
+    if (money) shaped[money.index] = money.amount;
+    const moneyField = money
+      ? {
+          amount: {
+            value: formatVee(money.amount, money.token.decimals),
+            token: money.token.key,
+          },
+        }
+      : {};
+
     const stage = await this.currentStage();
     // ONE TEST FOR BOTH, and it is the test `call` uses: a string AND
     // non-empty. Asking only `typeof body.intentId === 'string'` recorded an
@@ -1563,6 +1755,10 @@ export class Treasury {
       stage,
       amount: 0n,
       capWei: null,
+      // No money moves through admin-call's reservation - it is the
+      // idempotency half only - so this is a coordinate, not a claim that
+      // anything was held in that currency.
+      token: defaultToken(this.chain.modules).key,
       call: { contract: contract.key, function: entry.function, argsHash },
     });
     if (reservation.outcome === 'duplicate') {
@@ -1623,6 +1819,7 @@ export class Treasury {
           intent_id: intentId,
           txHash: null,
           status: 'refused',
+          ...moneyField,
         });
       }
       throw classified;
@@ -1639,6 +1836,7 @@ export class Treasury {
       intent_id: intentId,
       txHash: hash,
       status: reverted ? 'reverted' : 'ok',
+      ...moneyField,
     });
     if (reverted) {
       console.warn(

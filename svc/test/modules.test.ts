@@ -141,6 +141,23 @@ describe('a names-only deployment', () => {
     expect(await code(h, 'GET', '/resolve/nothing', wallet)).toBe('unknown_name');
   });
 
+  // §1: `balances` on the wallet row ONLY when a token module exists. The
+  // route's `requires` stays EMPTY so the endpoint survives here - a wallet on
+  // a names-only deployment still has an address, a kind and a canonical, and
+  // those are what it is for. OMITTED rather than `{}`: an empty map says "this
+  // wallet holds nothing", absent says "this deployment has no tokens", and a
+  // consumer that branches on the field learns different things from each.
+  it('serves the wallet row WITHOUT balances', async () => {
+    const res = await fetch(`${h.base}/wallets/${encodeURIComponent(AGENT)}`, { headers: platform });
+    expect(res.status).toBe(200);
+    const row = (await res.json()) as Record<string, unknown>;
+    expect('balances' in row).toBe(false);
+    // The rest of the row is there, which is what makes the absence a
+    // statement about tokens rather than about the endpoint being broken.
+    expect(row.agentId).toBe(AGENT);
+    expect(row.kind).toBe('agent');
+  });
+
   it('lists only the deployed module on /health and /modules', async () => {
     expect(await (await fetch(`${h.base}/health`)).json()).toEqual({ ok: true, modules: ['names'] });
     const m = (await (await fetch(`${h.base}/modules`, { headers: platform })).json()) as Record<string, unknown>;
@@ -288,7 +305,7 @@ describe('spawning without a names module', () => {
       new Keystore(join(dir, 'keys'), 'secret-secret-secret-secret'),
       store,
       { lookup: async () => null, require: async () => null } as never,
-      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined),
+      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, []),
     );
     return { s, store, registryCalls };
   }
@@ -361,7 +378,7 @@ describe('deny entries without a names module', () => {
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x9999999999999999999999999999999999999999' }) } as never,
       store,
       resolver,
-      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined),
+      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined, []),
       closedCallPolicy(),
     );
     return { t, store };
@@ -381,7 +398,7 @@ describe('deny entries without a names module', () => {
   it('still refuses a send to a denied AGENT ID', async () => {
     const { t, store } = treasuryWith(['orch:b'], 'orch:a');
     expect(
-      await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'd1' })),
+      await code(() => t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', amount: '1', intentId: 'd1' })),
     ).toBe('counterparty_denied');
     store.close();
   });
@@ -403,13 +420,13 @@ describe('deny entries without a names module', () => {
       // ENTRY that cannot resolve.
       const a = treasuryWith(['treasury.play'], 'orch:a');
       await code(() =>
-        a.t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', vee: '1', intentId: 'x1' }),
+        a.t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'orch:b', amount: '1', intentId: 'x1' }),
       );
       a.store.close();
 
       const b = treasuryWith(['treasury.play'], 'orch:c');
       await code(() =>
-        b.t.signTransfer({ scope: 'wallet', agentId: 'orch:c' }, { to: 'orch:b', vee: '1', intentId: 'x2' }),
+        b.t.signTransfer({ scope: 'wallet', agentId: 'orch:c' }, { to: 'orch:b', amount: '1', intentId: 'x2' }),
       );
       b.store.close();
     } finally {
@@ -425,7 +442,7 @@ describe('deny entries without a names module', () => {
     const { t, store } = treasuryWith(['treasury.play'], 'orch:a');
     expect(
       await code(() =>
-        t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'treasury.play', vee: '1', intentId: 'd2' }),
+        t.signTransfer({ scope: 'wallet', agentId: 'orch:a' }, { to: 'treasury.play', amount: '1', intentId: 'd2' }),
       ),
     ).toBe('unknown_name');
     store.close();

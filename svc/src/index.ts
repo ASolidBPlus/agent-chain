@@ -95,7 +95,11 @@ async function main(): Promise<void> {
       keystore,
       store,
       resolver,
-      loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld),
+      loadPolicyDefaults(
+        config.policyDefaultsPath,
+        chain.modules.names?.tld,
+        chain.modules.tokens.map((t) => t.key),
+      ),
       // The generic call op's allowlist, constructed here so the boot line is
       // written where an operator is looking. It reads the file per request; a
       // deployment with no calls.json boots with the op closed and says so.
@@ -107,7 +111,11 @@ async function main(): Promise<void> {
         // no kind in its `kinds` can pay through. Same object the spawner
         // writes wallets from, so the warning is about the rules that will
         // actually apply rather than about a second copy of them.
-        loadPolicyDefaults(config.policyDefaultsPath, chain.modules.names?.tld),
+        loadPolicyDefaults(
+          config.policyDefaultsPath,
+          chain.modules.names?.tld,
+          chain.modules.tokens.map((t) => t.key),
+        ),
       ),
     ),
   };

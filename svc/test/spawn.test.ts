@@ -23,7 +23,7 @@ import type { Resolver } from '../src/resolver.ts';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play');
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
 
 const config = {
   policyDir: '/tmp/does-not-exist',
@@ -293,6 +293,142 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
   });
 });
 
+// §1. SEED FUNDING PER TOKEN.
+//
+// `fundVee` can only ever name the DEFAULT token, so a two-token deployment
+// could not fund its second currency at spawn at all - the wallet arrived
+// holding one of the two currencies its game uses.
+describe('POST /wallets fund: [{token, amount}]', () => {
+  /// A spawner whose keystore RECORDS ANY ACCESS AND THROWS, so a refusal that
+  /// arrived late shows as a touched keystore rather than as a passing test.
+  /// Local rather than reaching for the one further down the file: that one is
+  /// scoped to its own describe, and widening its scope to borrow it would make
+  /// two unrelated blocks share a fixture.
+  function on(modules: Record<string, unknown>): { s: Spawner; touched: string[] } {
+    const touched: string[] = [];
+    const s = new Spawner(
+      config,
+      { modules } as unknown as Chain,
+      new Proxy({}, {
+        get(_t, prop) {
+          touched.push(String(prop));
+          throw new Error('the keystore must not be reached: the request was refused first');
+        },
+      }) as Keystore,
+      new Store(':memory:'),
+      exploding('resolver') as Resolver,
+      DEFAULTS,
+    );
+    return { s, touched };
+  }
+
+  const TWO = {
+    tokens: [
+      { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 },
+      { key: 'au', address: '0xgold', symbol: 'GOLD', decimals: 6 },
+    ],
+    names: { address: '0xreg', tld: 'play' },
+  };
+
+  it('refuses fund AND fundVee together, rather than preferring either', async () => {
+    const { s, touched } = on(TWO);
+    expect(
+      await codeOf(() => s.spawn({ agentId: 'orch:a', fundVee: 1, fund: [{ token: 'au', amount: '1' }] })),
+    ).toBe('invalid_request');
+    // BEFORE THE FIRST SIDE EFFECT, like every other spawn refusal: a refusal
+    // that left a key file behind would make the retry take the idempotent
+    // path and report success for the request that was just refused.
+    expect(touched).toEqual([]);
+  });
+
+  it('refuses a token this deployment does not have, before any side effect', async () => {
+    const { s, touched } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ token: 'silver', amount: '1' }] }))).toBe(
+      'unknown_token',
+    );
+    expect(touched).toEqual([]);
+  });
+
+  it('refuses the same token named twice, rather than summing or last-wins', async () => {
+    // Both readings are defensible, which is exactly what makes choosing
+    // between them wrong: the caller wrote something ambiguous about money.
+    const { s } = on(TWO);
+    expect(
+      await codeOf(() =>
+        s.spawn({ agentId: 'orch:a', fund: [{ token: 'au', amount: '1' }, { token: 'GOLD', amount: '2' }] }),
+      ),
+    ).toBe('invalid_request');
+  });
+
+  it('refuses an entry that names no token', async () => {
+    // An entry in a LIST that names no token is a mistake, where an absent
+    // `token` on a single-token request is the documented default. The same
+    // argument means different things in the two shapes.
+    const { s } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ amount: '1' }] }))).toBe('invalid_request');
+  });
+
+  it('refuses a zero or negative amount', async () => {
+    const { s } = on(TWO);
+    expect(await codeOf(() => s.spawn({ agentId: 'orch:a', fund: [{ token: 'au', amount: '0' }] }))).toBe(
+      'invalid_amount',
+    );
+  });
+
+  it('SEEDS EACH TOKEN FROM ITS OWN CONTRACT, at its own decimals', async () => {
+    // THE TEST THE OTHERS EXIST TO SUPPORT. Two tokens whose decimals differ,
+    // so an amount parsed at the default token's scale is a 1e12x error rather
+    // than an invisible one - the increment-3 defect, which was invisible while
+    // every token was 18 dp.
+    //
+    // Asserting the CONTRACT each transfer addressed as well as the amount:
+    // seeding gold from play's contract moves real money on the wrong ledger
+    // while reporting a number that looks entirely correct.
+    const store = new Store(':memory:');
+    const address = '0x2222222222222222222222222222222222222222';
+    const sent: Array<{ to: string; args: unknown[] }> = [];
+    const chain = {
+      viemChain: { id: 31337 },
+      deployment: { treasury: '0x5', chainId: 31337 },
+      modules: TWO,
+      publicClient: {
+        getBalance: async () => 10n ** 18n,
+        readContract: async () => 0n, // holds nothing yet, so both seeds move
+        waitForTransactionReceipt: async () => ({}),
+      },
+      walletClient: {
+        account: { address: '0x5' },
+        sendTransaction: async () => '0xdead',
+        writeContract: async (a: { address: string; args: unknown[] }) => {
+          sent.push({ to: a.address, args: a.args });
+          return '0xbeef';
+        },
+      },
+    } as unknown as Chain;
+
+    const s = new Spawner(
+      { ...config, policyDir: mkdtempSync(join(tmpdir(), 'policies-')) } as Config,
+      chain,
+      { has: async () => true, load: async () => ({ address, privateKey: '0x00' }) } as unknown as Keystore,
+      store,
+      { lookup: async () => null, require: async () => ({ address, canonical: 'orch:a' }) } as unknown as Resolver,
+      DEFAULTS,
+    );
+
+    await s.spawn({
+      agentId: 'orch:a',
+      kind: 'burner', // no registration, so the only writes are the two seeds
+      fund: [{ token: 'play', amount: '2' }, { token: 'GOLD', amount: '3' }],
+    });
+
+    expect(sent).toEqual([
+      { to: '0xplay', args: [address, 2n * 10n ** 18n] }, // 2 PLAY at 18 dp
+      { to: '0xgold', args: [address, 3_000000n] }, //       3 GOLD at 6 dp
+    ]);
+    store.close();
+  });
+});
+
 describe('POST /sign-transfer validation', () => {
   it('refuses a frozen wallet before loading its key', async () => {
     const store = new Store(':memory:');
@@ -300,7 +436,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury(store);
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', vee: 1 })),
+      await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', amount: 1 })),
     ).toBe('wallet_frozen');
     store.close();
   });
@@ -308,7 +444,7 @@ describe('POST /sign-transfer validation', () => {
   it('refuses a two-colon destination', async () => {
     const t = treasury();
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'orch:pod1:alice', vee: 1 })),
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'orch:pod1:alice', amount: 1 })),
     ).toBe('invalid_name');
   });
 
@@ -318,7 +454,7 @@ describe('POST /sign-transfer validation', () => {
     const t = treasury();
     expect(
       await codeOf(() =>
-        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.play', vee: 1 }),
+        t.signTransfer(asWallet('orch:persona'), { fromAgentId: 'orch:victim', to: 'alpha.play', amount: 1 }),
       ),
     ).toBe('principal_mismatch');
   });
@@ -326,7 +462,7 @@ describe('POST /sign-transfer validation', () => {
   it('refuses the platform credential outright - it has no wallet identity', async () => {
     const t = treasury();
     expect(
-      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.play', vee: 1 })),
+      await codeOf(() => t.signTransfer({ scope: 'platform' }, { to: 'alpha.play', amount: 1 })),
     ).toBe('wrong_scope');
   });
 });
@@ -348,10 +484,15 @@ describe('policy defaults', () => {
       // Compared in WEI, not as numbers: a cap may be a decimal string, and
       // comparing those numerically is the imprecision the string form exists
       // to prevent.
-      expect(capToWei(DEFAULTS[kind].max_per_tx, 18)).toBeGreaterThan(0n);
-      expect(capToWei(DEFAULTS[kind].max_per_stage, 18)).toBeGreaterThanOrEqual(
-        capToWei(DEFAULTS[kind].max_per_tx, 18),
-      );
+      // PER TOKEN now, and asserted for EVERY token the defaults expanded to
+      // rather than for one: the `*` entry is copied to each deployed key, so a
+      // check of one key would pass while another carried nothing.
+      const caps = DEFAULTS[kind].caps;
+      expect(Object.keys(caps).length).toBeGreaterThan(0);
+      for (const pair of Object.values(caps)) {
+        expect(capToWei(pair.max_per_tx, 18)).toBeGreaterThan(0n);
+        expect(capToWei(pair.max_per_stage, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx, 18));
+      }
       // The file ships `treasury.{tld}`; this is the substitution having
       // happened, asserted through the value a wallet actually gets.
       expect(DEFAULTS[kind].deny).toContain('treasury.play');
@@ -361,7 +502,7 @@ describe('policy defaults', () => {
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play')).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
   });
 
   // §4.7. A pattern naming a TLD can match nothing on a deployment that
@@ -372,7 +513,7 @@ describe('policy defaults', () => {
     // whatever another file left in it.
     droppedPatternsLogged.clear();
     const lines: string[] = [];
-    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
 
     expect(defaults.agent.deny).toEqual([]);
     // `converter` SURVIVES and `*.{tld}` does not, which is the rule working
@@ -401,23 +542,32 @@ describe('policy defaults', () => {
 
   it('does not repeat the dropped-pattern line on a second load in the same process', () => {
     const lines: string[] = [];
-    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, (m) => lines.push(m));
+    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
     expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(bad, JSON.stringify({ org: {}, agent: {}, burner: {} }));
-    expect(() => loadPolicyDefaults(bad, 'play')).toThrow(/no valid/);
+    expect(() => loadPolicyDefaults(bad, 'play', ['play'])).toThrow(/no valid/);
 
     const negative = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
     writeFileSync(
       negative,
       JSON.stringify({
         org: DEFAULTS.org,
-        agent: { ...DEFAULTS.agent, max_per_tx: -1 },
+        // The bad cap is inside `caps` now, where caps live. Left at the top
+        // level it would be a field the loader no longer reads, so the file
+        // would be VALID and the test would assert nothing.
+        agent: { ...DEFAULTS.agent, caps: { '*': { max_per_tx: -1, max_per_stage: 5 } } },
         burner: DEFAULTS.burner,
       }),
     );
-    expect(() => loadPolicyDefaults(negative, 'play')).toThrow(/no valid "agent"/);
+    // The message moved with the shape: a bad cap is now reported by the caps
+    // expansion, which names the KIND and the CAPS KEY it was reading. The
+    // property is the same - a defaults file with an unusable cap does not
+    // load - and the message is more specific than the one it replaces.
+    expect(() => loadPolicyDefaults(negative, 'play', ['play'])).toThrow(
+      /"agent" caps "\*" is not \{max_per_tx, max_per_stage\} of usable amounts/,
+    );
   });
 
   // A bad CAP is invalid_amount, a bad LIST is invalid_request: a cap is an
@@ -512,7 +662,7 @@ describe('the reservation records a sound lower bound', () => {
       closedCallPolicy(),
     );
 
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'bounded' }).catch(() => undefined);
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'bounded' }).catch(() => undefined);
 
     const row = store.unresolvedIntents().find((r) => r.intentId === 'bounded');
     expect(row?.reservedAtBlock).toBe(10n); // the observed head, not the cursor's 3
@@ -530,7 +680,7 @@ describe('the release rule', () => {
   it('keeps the reservation when the broadcast fails', async () => {
     const store = new Store(':memory:');
     const t = treasury(store);
-    store.reserve({ intentId: 'i1', ...args });
+    store.reserve({ token: 'play', intentId: 'i1', ...args });
 
     const wallet = {
       sendRawTransaction: () => Promise.reject(new Error('socket hang up')),
@@ -545,8 +695,8 @@ describe('the release rule', () => {
       }),
     ).rejects.toThrow();
 
-    expect(store.spentThisStage('orch:a', 's1')).toBe(args.amount);
-    expect(store.reserve({ intentId: 'i1', ...args })).toEqual({ outcome: 'duplicate', txHash: null });
+    expect(store.spentThisStage('orch:a', 's1', 'play')).toBe(args.amount);
+    expect(store.reserve({ token: 'play', intentId: 'i1', ...args })).toEqual({ outcome: 'duplicate', txHash: null });
     store.close();
   });
 
@@ -557,7 +707,7 @@ describe('the release rule', () => {
   it('records the hash as soon as the send returns one, before the receipt', async () => {
     const store = new Store(':memory:');
     const t = treasury(store);
-    store.reserve({ intentId: 'i2', ...args });
+    store.reserve({ token: 'play', intentId: 'i2', ...args });
 
     // `chain` is the exploding proxy, so touching publicClient IS the failure
     // between the send and the receipt.
@@ -592,10 +742,12 @@ describe('the release rule', () => {
     // NOT treasury.play: that is on the default deny list, so the policy check
     // refuses first and the replay path is never reached - which is the correct
     // ordering, and made this fixture test the wrong thing until it was fixed.
-    const send = { fromAgentId: 'orch:a', to: 'bob.play', vee: '1', intentId: 'replay' };
+    // `amount`, not `vee`: the alias is a WIRE concern that readBody applies,
+    // and a direct method call is not the wire.
+    const send = { fromAgentId: 'orch:a', to: 'bob.play', amount: '1', intentId: 'replay' };
     const seed = (store: Store) => {
       const stage = store.currentStage();
-      store.reserve({ intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
+      store.reserve({ token: 'play', intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
     };
 
     it('returns the ORIGINAL hash when the first send completed', async () => {
@@ -681,7 +833,7 @@ describe('a missing intent id is visible, not silent', () => {
     const real = console.warn;
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
-      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1' }).catch(() => undefined);
+      await noIntent.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1' }).catch(() => undefined);
     } finally {
       console.warn = real;
     }
@@ -698,7 +850,7 @@ describe('a missing intent id is visible, not silent', () => {
     console.warn = (...a: unknown[]) => void said.push(a.join(' '));
     try {
       await noIntent
-        .signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'mine' })
+        .signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'mine' })
         .catch(() => undefined);
     } finally {
       console.warn = real;
@@ -780,7 +932,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   it('refuses an ALIAS of a denied wallet, and never reaches the chain', async () => {
     const t = await treasuryResolving('treasury.play', ['treasury.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'treasure.play', vee: '1', intentId: 'alias-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'treasure.play', amount: '1', intentId: 'alias-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -790,7 +942,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // a probe that refuses everything would pass the test above.
   it('still sends to an alias whose wallet is not denied', async () => {
     const t = await treasuryResolving('orch:bob', []);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '1', intentId: 'alias-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'alias-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -829,7 +981,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   it('refuses a wallet denied under a different alias entirely', async () => {
     const t = await treasuryWithAliases(['mark.play'], ['mark.play', 'marky.play']);
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'id-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'id-1' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -839,7 +991,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // the identity check is not simply refusing everything.
   it('still sends to a DIFFERENT wallet when a deny entry exists', async () => {
     const t = await treasuryWithAliases(['mark.play'], ['mark.play']);
-    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.play', vee: '1', intentId: 'id-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'someone-else.play', amount: '1', intentId: 'id-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -897,7 +1049,7 @@ describe('concurrent signTransfer against a stage cap', () => {
       throw new Error('registry read failed');
     });
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-1' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-1' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(code);
     expect(t.broadcasts).toBe(0);
@@ -907,7 +1059,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // is a real answer and not an unknown.
   it('sends when a deny entry names nothing registered', async () => {
     const t = treasuryWhoseLookup(async () => null);
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-2' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-2' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
@@ -922,12 +1074,12 @@ describe('concurrent signTransfer against a stage cap', () => {
     });
 
     const first = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-3' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-3' }),
     );
     expect(['chain_error', 'chain_unreachable']).toContain(first);
 
     const second = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'f-4' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'f-4' }),
     );
     expect(second).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(0);
@@ -946,14 +1098,14 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     // First send: the deny entry names nothing yet, so nothing matches.
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-1' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-1' });
     expect(t.broadcasts).toBe(1);
 
     // The name is now registered, to the same wallet the alias points at.
     registered = true;
 
     const code = await codeOf(() =>
-      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-2' }),
+      t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-2' }),
     );
     expect(code).toBe('counterparty_denied');
     expect(t.broadcasts).toBe(1); // still one: the second never reached the chain
@@ -971,18 +1123,18 @@ describe('concurrent signTransfer against a stage cap', () => {
     );
 
     expect(
-      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-3' })),
+      await codeOf(() => t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-3' })),
     ).toBe('counterparty_denied');
 
     pointsAtTarget = false;
-    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', vee: '1', intentId: 'l-4' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'marky.play', amount: '1', intentId: 'l-4' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 
   it('broadcasts exactly floor(cap/amount) of N concurrent sends', async () => {
     const t = await treasuryWithStageCap(100); // one 100-VEE send fits
     const send = (n: number) =>
-      t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `i${n}` });
+      t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: `i${n}` });
 
     const results = await Promise.allSettled(Array.from({ length: 8 }, (_, n) => send(n)));
 
@@ -1002,7 +1154,7 @@ describe('concurrent signTransfer against a stage cap', () => {
     const t = await treasuryWithStageCap(500);
     const results = await Promise.allSettled(
       Array.from({ length: 10 }, (_, n) =>
-        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: `j${n}` }),
+        t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: `j${n}` }),
       ),
     );
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
@@ -1013,7 +1165,7 @@ describe('concurrent signTransfer against a stage cap', () => {
   // pass for the wrong reason.
   it('broadcasts a single sequential send that fits, so the probe can pass', async () => {
     const t = await treasuryWithStageCap(100);
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', vee: '100', intentId: 'solo' });
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: 'solo' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
 });
@@ -1053,7 +1205,13 @@ describe('POST /wallets/:agentId/balance', () => {
     }
   }
 
-  function treasuryAt(balance: bigint, frozen = false): { t: RecordingTreasury; store: Store } {
+  function treasuryAt(
+    balance: bigint,
+    frozen = false,
+    /// What the TREASURY holds, distinct from what the wallet holds. Ample by
+    /// default so the tests that are about set-balance stay about set-balance.
+    treasuryFloat = vee(1_000_000),
+  ): { t: RecordingTreasury; store: Store } {
     const store = new Store(':memory:');
     store.markSpawned('orch:a', WALLET, null);
     if (frozen) store.freeze('orch:a');
@@ -1061,9 +1219,17 @@ describe('POST /wallets/:agentId/balance', () => {
       { ...config, policyDir: '/tmp/none' } as Config,
       {
         viemChain: {},
+        treasury: TREASURY,
         deployment: { treasury: TREASURY }, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }] },
         publicClient: {
-          readContract: async () => t.balance,
+          // KEYED ON WHOSE BALANCE IS ASKED FOR. One stub answering `t.balance`
+          // for every address meant the treasury's float and the wallet's
+          // balance were the same number - so a fixture could not express "the
+          // treasury is short" at all, and §1's guard had nothing to fail
+          // against. The same collapse the resolver table's third token exists
+          // to prevent, one layer down.
+          readContract: async ({ args }: { args?: readonly unknown[] } = {}) =>
+            args?.[0] === TREASURY ? treasuryFloat : t.balance,
           waitForTransactionReceipt: async () => ({}),
         },
         walletClient: {
@@ -1092,26 +1258,26 @@ describe('POST /wallets/:agentId/balance', () => {
   // it needed a test rather than a rebase.
   it('a TOP-UP records the intent id on its memo', async () => {
     const { t, store } = treasuryAt(vee(10));
-    await t.setBalance('orch:a', { vee: '100', intentId: 'top-up-1' });
+    await t.setBalance('orch:a', { amount: '100', intentId: 'top-up-1' });
     expect(store.memosFor(['0xfunded']).get('0xfunded')?.intentId).toBe('top-up-1');
   }, 20_000);
 
   it('a SWEEP records the intent id on its memo', async () => {
     const { t, store } = treasuryAt(vee(100));
-    await t.setBalance('orch:a', { vee: '40', intentId: 'sweep-1' });
+    await t.setBalance('orch:a', { amount: '40', intentId: 'sweep-1' });
     expect(store.memosFor(['0xswept']).get('0xswept')?.intentId).toBe('sweep-1');
   }, 20_000);
 
   it('funds the difference when the balance is below target', async () => {
     const { t } = treasuryAt(vee(10));
-    const res = await t.setBalance('orch:a', { vee: '100', intentId: 'b-1' });
+    const res = await t.setBalance('orch:a', { amount: '100', intentId: 'b-1' });
     expect(res.balance).toBe('100');
     expect(t.sent).toEqual([{ to: WALLET, amount: vee(90) }]);
   }, 20_000);
 
   it('sweeps the difference to the TREASURY when above target', async () => {
     const { t } = treasuryAt(vee(100));
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-2' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-2' });
     expect(res.balance).toBe('40');
     expect(res.txHash).toBe('0xswept');
   }, 20_000);
@@ -1130,7 +1296,7 @@ describe('POST /wallets/:agentId/balance', () => {
       return { ...s, sendRawTransaction: async () => { t.balance = vee(42); return '0xpartial' as `0x${string}`; } };
     };
 
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-measured' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-measured' });
 
     // 42, what the chain holds - not 40, what we asked for.
     expect(res.balance).toBe('42');
@@ -1138,7 +1304,7 @@ describe('POST /wallets/:agentId/balance', () => {
 
   it('does nothing at all when the balance is already correct', async () => {
     const { t } = treasuryAt(vee(50));
-    const res = await t.setBalance('orch:a', { vee: '50', intentId: 'b-3' });
+    const res = await t.setBalance('orch:a', { amount: '50', intentId: 'b-3' });
     expect(res).toEqual({ balance: '50' });
     expect(res.txHash).toBeUndefined();
     expect(t.sent).toHaveLength(0);
@@ -1149,7 +1315,7 @@ describe('POST /wallets/:agentId/balance', () => {
   // described.
   it('sets the balance of a FROZEN wallet', async () => {
     const { t } = treasuryAt(vee(100), true);
-    const res = await t.setBalance('orch:a', { vee: '40', intentId: 'b-4' });
+    const res = await t.setBalance('orch:a', { amount: '40', intentId: 'b-4' });
     expect(res.balance).toBe('40');
   }, 20_000);
 
@@ -1158,7 +1324,7 @@ describe('POST /wallets/:agentId/balance', () => {
   it('refuses a body that tries to name a destination', async () => {
     const { t } = treasuryAt(vee(100));
     const code = await codeOf(() =>
-      t.setBalance('orch:a', { vee: '40', to: '0xattacker', intentId: 'b-5' }),
+      t.setBalance('orch:a', { amount: '40', to: '0xattacker', intentId: 'b-5' }),
     );
     expect(code).toBe('invalid_request');
     expect(t.sent).toHaveLength(0);
@@ -1170,10 +1336,10 @@ describe('POST /wallets/:agentId/balance', () => {
   // any reservation is consulted, because "already correct" is the answer.
   it('a repeat after success moves nothing, because the balance is already right', async () => {
     const { t } = treasuryAt(vee(10));
-    await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
     const before = t.sent.length;
 
-    const again = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const again = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
 
     expect(again).toEqual({ balance: '100' });
     expect(t.sent).toHaveLength(before);
@@ -1185,12 +1351,12 @@ describe('POST /wallets/:agentId/balance', () => {
   // answers with the original transaction instead of funding a second time.
   it('replays the original transaction when the caller retries a lost response', async () => {
     const { t } = treasuryAt(vee(10));
-    const first = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const first = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
     const before = t.sent.length;
 
     t.balance = vee(10); // the retry sees the pre-transfer state
 
-    const second = await t.setBalance('orch:a', { vee: '100', intentId: 'same' });
+    const second = await t.setBalance('orch:a', { amount: '100', intentId: 'same' });
 
     expect(second.txHash).toBe(first.txHash);
     expect(t.sent).toHaveLength(before); // and did NOT fund again
@@ -1200,9 +1366,9 @@ describe('POST /wallets/:agentId/balance', () => {
   // over_stage_cap - the null cap hold, asserted through the endpoint.
   it('is not subject to the stage cap', async () => {
     const { t, store } = treasuryAt(vee(0));
-    const res = await t.setBalance('orch:a', { vee: '100000', intentId: 'b-6' });
+    const res = await t.setBalance('orch:a', { amount: '100000', intentId: 'b-6' });
     expect(res.balance).toBe('100000');
-    expect(store.spentThisStage('orch:a', store.currentStage())).toBe(0n);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
   }, 20_000);
 });
 
@@ -1228,7 +1394,9 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }
 
   const read = (dir: string) =>
-    JSON.parse(readFileSync(join(dir, 'orch%3Aa.json'), 'utf8')) as Record<string, unknown>;
+    JSON.parse(readFileSync(join(dir, 'orch%3Aa.json'), 'utf8')) as Record<string, unknown> & {
+      caps: Record<string, { max_per_tx: unknown; max_per_stage: unknown }>;
+    };
 
   // Every field, both directions: the one supplied changes and EVERY omitted
   // one survives. Asserting only the supplied field would leave the fallbacks
@@ -1239,9 +1407,15 @@ describe('PATCH /wallets/:agentId/policy', () => {
 
     await s.patchPolicy('orch:a', { max_per_stage: 4242 });
 
+    // A PATCH carrying the legacy pair still means the DEFAULT token, and only
+    // that token: the other half of the pair and every other token's caps come
+    // from the kind's defaults untouched. A patch that widened one number must
+    // not silently reset the rest.
     const p = read(dir);
-    expect(p.max_per_stage).toBe(4242);
-    expect(p.max_per_tx).toBe(DEFAULTS.agent.max_per_tx);
+    expect(p.caps.play).toEqual({
+      max_per_stage: 4242,
+      max_per_tx: DEFAULTS.agent.caps.play!.max_per_tx,
+    });
     expect(p.allow).toEqual(DEFAULTS.agent.allow);
     expect(p.deny).toEqual(DEFAULTS.agent.deny);
   }, 20_000);
@@ -1250,9 +1424,12 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const { s, dir } = spawnerWith();
     await s.patchPolicy('orch:a', { max_per_tx: 250 });
     await s.patchPolicy('orch:a', { max_per_stage: 999 });
+    // BOTH HALVES OF ONE TOKEN'S PAIR, and the property is unchanged by the
+    // reshape: a patch naming one number leaves the other alone. What the
+    // reshape adds is that it also leaves every OTHER token's pair alone,
+    // asserted below.
     const p = read(dir);
-    expect(p.max_per_tx).toBe(250); // not reset by the second patch
-    expect(p.max_per_stage).toBe(999);
+    expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 999 });
   }, 20_000);
 
   it('flips frozen both ways, and the store agrees with the file', async () => {
@@ -1316,10 +1493,23 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }, 20_000);
 
   // A2/A3: a wallet must be patchable in the form it was spawned with.
+  it('leaves every other token\'s caps alone when a patch names one', async () => {
+    // The multi-token half of the same property. A patch carrying the legacy
+    // pair is about the DEFAULT token; a second token's caps are not its
+    // business, and silently resetting them would be the widest possible
+    // reading of the narrowest possible request.
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { caps: { play: { max_per_tx: 5, max_per_stage: 6 }, gold: { max_per_tx: 7, max_per_stage: 8 } } });
+    await s.patchPolicy('orch:a', { max_per_tx: 250 });
+    const p = read(dir);
+    expect(p.caps.gold).toEqual({ max_per_tx: 7, max_per_stage: 8 });
+    expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 6 });
+  }, 20_000);
+
   it('accepts a STRING cap, the form POST /wallets accepts', async () => {
     const { s, dir } = spawnerWith();
     await s.patchPolicy('orch:a', { max_per_tx: '25' });
-    expect(read(dir).max_per_tx).toBe('25');
+    expect(read(dir).caps.play!.max_per_tx).toBe('25');
   }, 20_000);
 
   it('refuses to patch a wallet that does not exist', async () => {

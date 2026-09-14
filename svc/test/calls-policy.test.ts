@@ -145,11 +145,9 @@ const CONVERT = {
   function: 'convert',
   kinds: ['org', 'agent'],
   amount: { arg: 2, token: { arg: 0 } },
-  // The {arg} form carries a bound because it MIGHT resolve to a non-default
-  // token: `play -> gold` is bounded by max_per_tx, `gold -> play` by nothing
-  // the wallet holds. Decided from the entry's shape, so the operator meets it
-  // when they write the file.
-  perTxCap: '100',
+  // NO `perTxCap`. It is retired: caps are per wallet per token in policy now,
+  // so the wallet carries a bound for whichever currency the {arg} form
+  // resolves to, and the entry has nothing left to say about it.
   intentArg: 3,
   maxPerStage: 20,
   addressArgs: { '0': 'token', '1': 'token' },
@@ -161,7 +159,6 @@ const BUY = {
   function: 'buy',
   kinds: ['agent'],
   amount: { arg: 1, token: 'gold' },
-  perTxCap: '50',
   maxPerStage: 5,
 };
 const GOOD = { schema: 1, calls: [CONVERT, QUOTE, SET_PAIR, BUY] };
@@ -229,7 +226,10 @@ describe('a valid file', () => {
 
     expect(list.find('converter', 'quote')!.read).toBe(true);
     expect(list.find('converter', 'setPair')!.admin).toBe(true);
-    expect(list.find('shop', 'buy')!.perTxCap).toBe('50');
+    // `buy` carries an amount in a NON-DEFAULT token and no bound of its own,
+    // which is the shape this file refused one release ago and accepts now: the
+    // bound lives on the wallet, per token.
+    expect(list.find('shop', 'buy')!.amount).toEqual({ arg: 1, token: 'gold' });
   });
 
   it('carries the resolved ABI fragment, so nothing re-looks-it-up later', async () => {
@@ -399,63 +399,31 @@ describe('amount', () => {
     expect((await policy()).snapshot().entries).toHaveLength(0);
   });
 
-  it('requires perTxCap or uncapped for an amount in a non-default token', async () => {
-    // §3.2 step 6: increment 3 has no per-wallet per-token caps, so the entry
-    // carries the only bound there is. WITHOUT ONE, an agent could move any
-    // quantity of a non-default token through a call while its `max_per_tx` -
-    // which is denominated in the default token - looked on.
-    const { perTxCap: _dropped, ...noCap } = BUY;
-    write(only(noCap));
-    const p = await policy();
-    expect(p.snapshot().entries).toHaveLength(0);
-    expect(logged.join('\n')).toMatch(/needs "perTxCap" or "uncapped"/);
-  });
-
-  it('requires perTxCap or uncapped on the {arg} form, whatever it resolves to', async () => {
-    // THE HOLE THE SPEC'S OWN EXAMPLE WALKED THROUGH. `token: {arg: 0}` means
-    // "the token whose address is argument 0", chosen per call: for
-    // `convert(source, target, amountIn)`, `play -> gold` puts the amount in
-    // the default token and max_per_tx bounds it, while `gold -> play` puts it
-    // in gold, which NOTHING bounds - every wallet cap is denominated in the
-    // default token. So the bound is required from the entry's SHAPE, and the
-    // operator meets it when they write the file rather than a persona meeting
-    // it mid-game converting the wrong way round.
-    const { perTxCap: _dropped, ...noCap } = CONVERT;
-    write(only(noCap));
-    const p = await policy();
-    expect(p.snapshot().entries).toHaveLength(0);
-    expect(logged.join('\n')).toMatch(/needs "perTxCap" or "uncapped"/);
-
-    write(only({ ...noCap, uncapped: true }));
-    expect((await policy()).snapshot().entries).toHaveLength(1);
-  });
-
-  it('accepts uncapped: true as the written-out alternative', async () => {
-    const { perTxCap: _dropped, ...noCap } = BUY;
-    write(only({ ...noCap, uncapped: true }));
-    expect((await policy()).snapshot().find('shop', 'buy')!.uncapped).toBe(true);
-  });
-
-  it('does not require perTxCap when the amount is in the default token', async () => {
-    // `play` is tokens[0]. The wallet's own max_per_tx and stage cap are
-    // denominated in it, so the existing caps already bound this.
-    write(only({ ...BUY, amount: { arg: 1, token: 'play' }, perTxCap: undefined }));
-    expect((await policy()).snapshot().entries).toHaveLength(1);
-  });
-
-  it('refuses a perTxCap that is not a whole-unit amount', async () => {
-    for (const cap of ['', 'lots', '-5', 5, '5.5e3']) {
-      write(only({ ...BUY, perTxCap: cap }));
-      expect((await policy()).snapshot().entries).toHaveLength(0);
+  it('REFUSES an entry still carrying perTxCap or uncapped', async () => {
+    // RETIRED, AND REFUSED RATHER THAN IGNORED. These two existed for one
+    // release because caps were denominated in the default token only, so an
+    // amount in any other token was bounded by nothing the wallet carried and
+    // the ENTRY had to state the bound. Caps are per wallet per token now.
+    //
+    // A retired field read as a no-op would leave an operator believing a bound
+    // is in force that nothing enforces - the most expensive kind of stale
+    // config, because it looks like a policy and behaves like a comment.
+    for (const retired of [{ perTxCap: '50' }, { uncapped: true }]) {
+      write(only({ ...BUY, ...retired }));
+      const p = await policy();
+      expect(p.snapshot().entries).toHaveLength(0);
+      expect(logged.join('\n')).toMatch(/is retired; caps are per wallet per token in policy/);
     }
   });
 
-  it('refuses perTxCap and uncapped together', async () => {
-    // Two bounds, one of which says there is none. Whichever the code happened
-    // to read first would be the rule, and the file would not say which.
-    write(only({ ...BUY, uncapped: true }));
-    expect((await policy()).snapshot().entries).toHaveLength(0);
+  it('accepts an amount in ANY token with no bound on the entry at all', async () => {
+    // The point of the retirement: the bound lives on the WALLET, per token,
+    // so an entry naming a non-default token needs nothing extra. Before this,
+    // exactly this file was refused at load.
+    write(only(BUY));
+    expect((await policy()).snapshot().entries).toHaveLength(1);
   });
+
 });
 
 describe('intentArg', () => {
@@ -594,18 +562,24 @@ describe('the allow-list warning', () => {
   it('says nothing for an entry that moves no money', async () => {
     // No amount, nothing to enforce a policy against: the allow list is never
     // consulted, so naming it would be noise about a rule that does not apply.
-    const { amount: _none, perTxCap: _cap, ...noMoney } = CONVERT;
+    const { amount: _none, ...noMoney } = CONVERT;
     write(only({ ...noMoney, kinds: ['burner'] }));
     await withDefaults();
     expect(logged.join('\n')).not.toMatch(/does not name/);
   });
 
-  it('says nothing for an amount in a token that is not the default', async () => {
-    // Only a default-token amount reaches enforcePolicy at all; the rest are
-    // bounded by the entry's own perTxCap.
+  it('warns for an amount in ANY token, now that every one reaches the policy', async () => {
+    // THE PREMISE MOVED WITH THE RETIREMENT. This used to say "only a
+    // default-token amount reaches enforcePolicy at all; the rest are bounded
+    // by the entry's own perTxCap" - which stopped being true the moment caps
+    // became per token and every amount started going through the same check.
+    //
+    // Left as an assertion that the warning is SILENT would have been a test
+    // passing for a reason that no longer exists, which is worse than a red
+    // one: it would have read as cover for a rule nobody enforces.
     write(only({ ...BUY, kinds: ['burner'] }));
     await withDefaults();
-    expect(logged.join('\n')).not.toMatch(/does not name/);
+    expect(logged.join('\n')).toMatch(/burner's default allow list does not name "shop"/);
   });
 
   it('warns but still LOADS the entry', async () => {
@@ -613,6 +587,10 @@ describe('the allow-list warning', () => {
     // the kind defaults do not, and this side cannot see those files.
     write(only({ ...CONVERT, kinds: ['burner'], amount: { arg: 2, token: 'play' } }));
     expect((await withDefaults()).snapshot().entries).toHaveLength(1);
+    // "warns BUT still loads" is two facts and only the load was asserted. The
+    // sibling above kills the drop-the-warning mutant, so this is a test saying
+    // what it means rather than a hole being closed.
+    expect(logged.join('\n')).toMatch(/burner's default allow list does not name "converter"/);
   });
 });
 

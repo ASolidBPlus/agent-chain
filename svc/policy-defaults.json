@@ -2,7 +2,7 @@
   "_comment": [
     "PROVISIONAL GAME BALANCE, not engineering constants. These are the caps a",
     "wallet gets when POST /wallets carries no explicit `policy` object, chosen",
-    "as a starting point, and to be TUNED BY THE FACILITATOR through the game",
+    "as a starting point, and to be TUNED BY THE OPERATOR through the game",
     "config - Decision Ledger D8. Change them here rather than in code, and do",
     "not treat a number in this file as load-bearing for correctness.",
     "WHERE THE CAPS ARE ACTUALLY ENFORCED, because this comment used to send you",
@@ -29,23 +29,30 @@
     "[\"*.{tld}\"], which no contract key matches, so `converter` is listed",
     "explicitly. Every future custom-contract key is added the same way, by the",
     "PR that deploys it.",
+    "CAPS ARE PER TOKEN. `caps` is keyed by the manifest's token KEY, with",
+    "exactly two key forms and no globs: `*`, which is copied to every token the",
+    "deployment actually declares, and an explicit key, which REPLACES the whole",
+    "pair for that token rather than merging into the wildcard - so \"au gets a",
+    "bigger max_per_tx\" cannot silently inherit the wildcard's max_per_stage and",
+    "leave a wallet carrying two halves of one bound from two currencies. An",
+    "explicit key naming a token this deployment does not have is refused at",
+    "load, because a cap nothing will ever consult is a cap its author believes",
+    "in. A TOKEN WITH NO ENTRY CANNOT BE SPENT: silence fails closed here, since",
+    "an absent cap read as \"no limit\" is the one reading that costs money.",
     "JSON has no comment syntax, hence this key. It is ignored by the loader."
   ],
   "org": {
-    "max_per_tx": "1000",
-    "max_per_stage": "5000",
+    "caps": { "*": { "max_per_tx": "1000", "max_per_stage": "5000" } },
     "allow": ["*"],
     "deny": ["treasury.{tld}"]
   },
   "agent": {
-    "max_per_tx": "100",
-    "max_per_stage": "500",
+    "caps": { "*": { "max_per_tx": "100", "max_per_stage": "500" } },
     "allow": ["*.{tld}", "converter"],
     "deny": ["treasury.{tld}"]
   },
   "burner": {
-    "max_per_tx": "50",
-    "max_per_stage": "200",
+    "caps": { "*": { "max_per_tx": "50", "max_per_stage": "200" } },
     "allow": ["*.{tld}", "converter"],
     "deny": ["treasury.{tld}"]
   }

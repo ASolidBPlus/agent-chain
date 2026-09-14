@@ -17,7 +17,7 @@ import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
 import type { Treasury } from './treasury.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
-import { defaultToken, type ModuleKind, type Modules } from './modules.ts';
+import { defaultToken, resolveToken, type ModuleKind, type Modules } from './modules.ts';
 
 export interface Services {
   config: Config;
@@ -89,29 +89,70 @@ export interface Route {
 // Named functions, referenced directly in the table below, so the call graph
 // stays legible rather than hiding behind string lookups.
 
-async function getSupply({ services, principal }: RouteContext): Promise<unknown> {
+async function getSupply({ services, principal, url }: RouteContext): Promise<unknown> {
   requirePlatform(principal, 'GET /supply');
   const { chain } = services;
+  // §1: THE RULE IS ABOUT THE ARGUMENT, not about where it arrives - body or
+  // query string, writes and reads alike. This was the one read endpoint that
+  // never looked, so `?token=nonsense` was silently ignored and answered with
+  // every token, which is the shape of answer a caller reads as agreement.
+  //
+  // RESOLVED BEFORE THE READS, so an unknown token costs no chain calls and
+  // answers `unknown_token` like every other surface rather than an empty map.
+  const wanted = url.searchParams.get('token');
+  const only = wanted === null ? null : resolveToken(chain.modules, wanted);
   try {
-    const [total, treasury] = (await Promise.all([
-      chain.publicClient.readContract({
-        address: defaultToken(chain.modules).address,
-        abi: TokenAbi,
-        functionName: 'totalSupply',
+    // ONE PAIR OF READS PER TOKEN, and each formatted at the decimals of the
+    // SAME TokenModule the address came from. Reading the scale separately is
+    // what lets it belong to a different token than the balance it scales.
+    const per = await Promise.all(
+      (only ? [only] : chain.modules.tokens).map(async (t) => {
+        const [total, treasury] = (await Promise.all([
+          chain.publicClient.readContract({
+            address: t.address,
+            abi: TokenAbi,
+            functionName: 'totalSupply',
+          }),
+          chain.publicClient.readContract({
+            address: t.address,
+            abi: TokenAbi,
+            functionName: 'balanceOf',
+            args: [chain.treasury],
+          }),
+        ])) as [bigint, bigint];
+        return [t, total, treasury] as const;
       }),
-      chain.publicClient.readContract({
-        address: defaultToken(chain.modules).address,
-        abi: TokenAbi,
-        functionName: 'balanceOf',
-        args: [chain.treasury],
-      }),
-    ])) as [bigint, bigint];
+    );
 
-    const { decimals } = defaultToken(chain.modules);
+    const tokens = Object.fromEntries(
+      per.map(([t, total, treasury]) => [
+        t.symbol,
+        {
+          total: formatVee(total, t.decimals),
+          treasury: formatVee(treasury, t.decimals),
+          inPlay: formatVee(total - treasury, t.decimals),
+        },
+      ]),
+    );
+    // THE LEGACY TRIO ALWAYS DESCRIBES THE DEFAULT TOKEN, filtered or not.
+    // It is defined as the single-token view a v0.4.0 reader sees, and such a
+    // reader never sends `?token=` - so letting the filter change which token
+    // these three describe would make one field name mean two things depending
+    // on a query parameter nobody legacy sends. When the filter excludes the
+    // default token they are omitted rather than restated from another token's
+    // numbers: absent is honest, wrong is not.
+    const first = only === null ? per[0] : per.find(([t]) => t.key === defaultToken(chain.modules).key);
     return {
-      total: formatVee(total, decimals),
-      treasury: formatVee(treasury, decimals),
-      inPlay: formatVee(total - treasury, decimals),
+      tokens,
+      // The legacy top-level trio, for the DEFAULT token, for one release -
+      // removed at v0.6.0 with the `vee` request alias.
+      ...(first
+        ? {
+            total: formatVee(first[1], first[0].decimals),
+            treasury: formatVee(first[2], first[0].decimals),
+            inPlay: formatVee(first[1] - first[2], first[0].decimals),
+          }
+        : {}),
     };
   } catch (err) {
     throw asChainError(err);
@@ -234,6 +275,32 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
   // and a name can be re-registered, so the store's copy would age.
   const canonical = await services.resolver.reverseOf(row.address as `0x${string}`);
 
+  // §1: `balances` ONLY WHEN A TOKEN MODULE EXISTS, omitted otherwise. The
+  // route's `requires` stays empty so a names-only deployment keeps the
+  // endpoint - the wallet still has an address, a kind and a canonical, and
+  // those are the facts this endpoint is for. An empty map would say "this
+  // wallet holds nothing"; absent says "this deployment has no tokens", and
+  // they are different facts about different things.
+  //
+  // Each at ITS OWN decimals, read off the same TokenModule the address came
+  // from: key, symbol and decimals are three facts about one token.
+  const { tokens } = services.chain.modules;
+  const balances = tokens.length === 0
+    ? null
+    : Object.fromEntries(
+        await Promise.all(
+          tokens.map(async (t) => {
+            const wei = (await services.chain.publicClient.readContract({
+              address: t.address,
+              abi: TokenAbi,
+              functionName: 'balanceOf',
+              args: [row.address as `0x${string}`],
+            })) as bigint;
+            return [t.symbol, formatVee(wei, t.decimals)] as const;
+          }),
+        ),
+      );
+
   return {
     agentId,
     address: row.address,
@@ -241,6 +308,7 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
     kind: row.kind,
     frozen: services.store.isFrozen(agentId),
     bareIdCount: row.bareIdCount,
+    ...(balances === null ? {} : { balances }),
   };
 }
 
@@ -249,16 +317,49 @@ async function getBalance({ services, param, principal }: RouteContext): Promise
   const found = await services.resolver.require(name);
   assertMayRead(principal, found.canonical);
   try {
-    const [vee, eth] = await Promise.all([
-      services.chain.publicClient.readContract({
-        address: defaultToken(services.chain.modules).address,
-        abi: TokenAbi,
-        functionName: 'balanceOf',
-        args: [found.address],
-      }) as Promise<bigint>,
-      services.chain.publicClient.getBalance({ address: found.address }),
+    // EVERY TOKEN, each formatted at ITS OWN decimals. The scale is read off
+    // the SAME TokenModule the address came from rather than looked up
+    // separately - key, symbol and decimals are three facts about one token,
+    // and sourcing them apart is what lets one of them drift to a different
+    // token while the other two look right.
+    const { tokens } = services.chain.modules;
+    // EVERY BRANCH INSIDE AN ASYNC ARROW, including the single one. A bare
+    // `client.getBalance(...)` sitting in the array literal beside a
+    // `Promise.all(...)` is evaluated while the array is BUILT - so if it
+    // throws synchronously, the token promises are already in flight with
+    // nothing awaiting them, and their rejection is unhandled. Caught by a test
+    // whose stub throws by design; in production it is the shape that turns one
+    // RPC failure into an unhandled rejection beside the error you meant to
+    // see.
+    const [balances, eth] = await Promise.all([
+      (async () =>
+        Promise.all(
+          tokens.map(async (t) => {
+            const wei = (await services.chain.publicClient.readContract({
+              address: t.address,
+              abi: TokenAbi,
+              functionName: 'balanceOf',
+              args: [found.address],
+            })) as bigint;
+            return [t, wei] as const;
+          }),
+        ))(),
+      (async () => services.chain.publicClient.getBalance({ address: found.address }))(),
     ]);
-    return { vee: formatVee(vee, defaultToken(services.chain.modules).decimals), eth: formatEther(eth) };
+
+    const perToken = Object.fromEntries(balances.map(([t, wei]) => [t.symbol, formatVee(wei, t.decimals)]));
+    const first = balances[0];
+    return {
+      balances: perToken,
+      default: first?.[0].symbol ?? null,
+      // `eth` STAYS TOP-LEVEL and unchanged: the native gas balance is not a
+      // token, and folding it into the map would make it look like one.
+      eth: formatEther(eth),
+      // The legacy single-token field, for the DEFAULT token, for one release.
+      // Removed at v0.6.0 with the `vee` request alias - the two are the same
+      // migration seen from the two ends of the wire.
+      ...(first ? { vee: formatVee(first[1], first[0].decimals) } : {}),
+    };
   } catch (err) {
     throw asChainError(err);
   }
@@ -271,7 +372,10 @@ async function getHistory({ services, param, url, principal }: RouteContext): Pr
   if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
     throw new HttpError('invalid_request', 'limit must be an integer between 1 and 1000');
   }
-  return services.treasury.history(param, limit);
+  // `token` from the QUERY STRING, and through the same resolver a body's
+  // `token` goes through - §1's rule is about the ARGUMENT, not about where it
+  // arrives. Absent means the default token, which is this increment's one rule.
+  return services.treasury.history(param, limit, url.searchParams.get('token') ?? undefined);
 }
 
 async function postWallets({ services, body, principal }: RouteContext): Promise<unknown> {
@@ -408,7 +512,6 @@ async function getCalls({ services, principal }: RouteContext): Promise<unknown>
         },
       ),
       ...(e.maxPerStage !== undefined ? { maxPerStage: e.maxPerStage } : {}),
-      ...(e.perTxCap !== undefined ? { perTxCap: e.perTxCap } : {}),
     })),
   };
 }
@@ -524,6 +627,37 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return parsed as Record<string, unknown>;
 }
 
+/// §1. `vee` was one deployment's currency in a field name. It becomes `amount`
+/// on every wire, with ONE RELEASE of overlap.
+///
+/// NORMALISED HERE AND NOWHERE ELSE. Five handlers read an amount, and five
+/// separate alias checks would be five chances to spell the rule differently -
+/// which is how a field came to name a currency in the first place.
+///
+/// A HARD CUT WOULD COUPLE TWO MERGES: the consumer is on its own bump cadence,
+/// so the alias buys the two repositories the right to move separately. It is
+/// refused from v0.6.0, and the caller is TOLD on the reply rather than
+/// discovering it at the removal.
+export const DEPRECATION_HEADERS = {
+  Deprecation: 'true',
+  Warning: '299 - "vee is deprecated; use amount"',
+} as const;
+
+export function aliasVee(body: Record<string, unknown>): { body: Record<string, unknown>; deprecated: boolean } {
+  if (!('vee' in body)) return { body, deprecated: false };
+  if ('amount' in body) {
+    // TWO NAMES FOR ONE VALUE IS TWO VALUES as far as a reader is concerned,
+    // and silently preferring either is a guess about which the caller meant.
+    // A guess is cheap everywhere except where being wrong moves money.
+    throw new HttpError(
+      'invalid_request',
+      'a request carries either "amount" or the deprecated "vee", never both',
+    );
+  }
+  const { vee, ...rest } = body;
+  return { body: { ...rest, amount: vee }, deprecated: true };
+}
+
 /// The router-level scope check, kept as a named function so it can be tested
 /// on its own.
 ///
@@ -561,14 +695,28 @@ export function assertModulesDeployed(route: Route, modules: Modules, what: stri
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+function send(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  /// Extra reply headers. The deprecation pair rides here rather than being
+  /// written at the handler, so it reaches the caller on EVERY outcome - a
+  /// caller using the old field name needs telling even when its request fails
+  /// for some other reason, which is the case where it is most likely to be
+  /// editing that request.
+  extra: Record<string, string> = {},
+): void {
   const text = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...extra });
   res.end(text);
 }
 
 export async function handle(services: Services, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://chain-svc');
+  // Declared outside the try so the REFUSAL path carries it too: a caller whose
+  // deprecated field was the reason for the refusal must still be told the
+  // field is deprecated.
+  let deprecated = false;
   try {
     // Unauthenticated on purpose: compose's healthcheck must not need the
     // token, and it reveals nothing a caller could not learn by connecting.
@@ -585,7 +733,10 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
     assertModulesDeployed(found.route, services.chain.modules, `${req.method} ${url.pathname}`);
 
     const method = req.method ?? 'GET';
-    const body = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
+    const raw = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
+    const aliased = aliasVee(raw);
+    deprecated = aliased.deprecated;
+    const body = aliased.body;
 
     const marker = req.headers['x-wallet-client'];
     const result = await found.route.handler({
@@ -596,14 +747,14 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
       principal,
       clientMarker: Array.isArray(marker) ? marker[0] : marker,
     });
-    return send(res, 200, result);
+    return send(res, 200, result, deprecated ? { ...DEPRECATION_HEADERS } : {});
   } catch (err) {
     const httpError = toHttpError(err);
     if (httpError.code === 'internal_error') {
       // The detail may name a key file path or an RPC URL; log it, never ship it.
       console.error('chain-svc: unhandled error', err);
     }
-    return send(res, httpError.status, errorBody(httpError));
+    return send(res, httpError.status, errorBody(httpError), deprecated ? { ...DEPRECATION_HEADERS } : {});
   }
 }
 

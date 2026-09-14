@@ -14,15 +14,28 @@ import type { WalletConfig } from '../src/config.ts';
 const TOKEN = 'wallet-token-that-must-never-leak';
 const AGENT = 'orch:vendor';
 
-// The /modules reply the host passes into Wallet (spec S5). A single-token,
-// 18-place deployment whose symbol is PLAY - so the money-message wording these
-// tests assert is exactly what a VEE deployment produces.
+// The /modules reply the host passes into Wallet (spec S5), now with TWO
+// tokens - because every per-token guard in this package filters on one of four
+// things, and a fixture whose tokens agree on any of them cannot catch a guard
+// that read the wrong one:
+//
+//   key       play  vs  au       - what the wire and the caps map carry
+//   symbol    PLAY  vs  GOLD     - what a persona reads and may write back
+//   decimals  18    vs  6        - what an amount is scaled by
+//   caps      100   vs  5        - what it is compared against (see AGENT_POLICY)
+//
+// GOLD IS NOT `AU` UPPER-CASED, deliberately. With a symbol that is just the
+// key in capitals, a lookup that searched the wrong namespace would find the
+// right token anyway and every test here would pass.
 const MODULES = {
   schema: 1,
   chainId: 31337,
   treasury: '0xtreasury',
   defaultToken: 'play',
-  tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+  tokens: [
+    { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 },
+    { key: 'au', address: '0xgold', symbol: 'GOLD', decimals: 6 },
+  ],
   names: { address: '0xreg', tld: 'play' },
 };
 
@@ -53,6 +66,14 @@ interface Fake {
   callReply: { status: number; body: unknown };
   readReply: { status: number; body: unknown };
   menu: unknown;
+  /// Overrides GET /balance/:name entirely when set - for the shapes an
+  /// un-upgraded or failing chain-svc produces.
+  balanceReply: { status: number; body: unknown } | null;
+  /// The `token` query each /history call carried, or null when it carried
+  /// none. What was SENT, not only what came back: a filter that resolved the
+  /// right token and then failed to put it on the wire would return the
+  /// default's rows and look correct.
+  historyQueries: Array<string | null>;
 }
 
 async function fakeChainSvc(): Promise<Fake> {
@@ -75,6 +96,8 @@ async function fakeChainSvc(): Promise<Fake> {
     callReply: { status: 200, body: { txHash: '0xcall1' } },
     readReply: { status: 200, body: { result: '40' } },
     menu: { calls: [] },
+    balanceReply: null,
+    historyQueries: [],
     names: {
       'alpha.play': { address: '0xaaa', canonical: 'alpha:client' },
       'treasury.play': { address: '0xttt', canonical: 'treasury.play' },
@@ -109,12 +132,30 @@ async function fakeChainSvc(): Promise<Fake> {
           : json(404, { error: 'unknown_name', detail: `no wallet is registered as ${name}, nor as orch:${name}` });
       }
       if (url.pathname.startsWith('/reverse/')) return json(200, { canonical: AGENT, aliases: ['vendor.play'] });
-      if (url.pathname.startsWith('/balance/')) return json(200, { vee: '250', eth: '1' });
+      // chain-svc's reply since §2: a map KEYED BY SYMBOL, the default named,
+      // and the legacy single-token `vee` still beside them for one release.
+      // The legacy field is in the fixture ON PURPOSE - a reader that fell back
+      // to it would otherwise have nothing to fall back TO, and the test that
+      // forbids the fallback would pass vacuously.
+      if (url.pathname.startsWith('/balance/')) {
+        if (state.balanceReply) return json(state.balanceReply.status, state.balanceReply.body);
+        return json(200, { balances: { PLAY: '250', GOLD: '9.5' }, default: 'PLAY', eth: '1', vee: '250' });
+      }
+      // ONE TOKEN PER CALL, chosen by `?token=`, which is a KEY on the wire.
+      // The rows differ by token so a filter that ignored the query string
+      // would return the wrong amounts rather than the same ones.
       if (url.pathname.startsWith('/history/')) {
-        return json(200, [
-          { txHash: '0xh1', from: AGENT, to: 'alpha:client', vee: '50', blockNumber: '7', memo: 'stream job' },
-          { txHash: '0xh2', from: 'alpha:client', to: AGENT, vee: '5', blockNumber: '6' },
-        ]);
+        state.historyQueries.push(url.searchParams.get('token'));
+        const rows: Record<string, Array<Record<string, unknown>>> = {
+          play: [
+            { txHash: '0xh1', from: AGENT, to: 'alpha:client', amount: '50', vee: '50', token: 'PLAY', blockNumber: '7', memo: 'stream job' },
+            { txHash: '0xh2', from: 'alpha:client', to: AGENT, amount: '5', vee: '5', token: 'PLAY', blockNumber: '6' },
+          ],
+          au: [
+            { txHash: '0xg1', from: AGENT, to: 'alpha:client', amount: '2.5', vee: '2.5', token: 'GOLD', blockNumber: '9' },
+          ],
+        };
+        return json(200, rows[url.searchParams.get('token') ?? 'play'] ?? []);
       }
       if (url.pathname.startsWith('/intents/')) {
         const id = decodeURIComponent(url.pathname.slice('/intents/'.length));
@@ -167,10 +208,15 @@ function walletWith(policy: Record<string, unknown> | null): {
   return { wallet: new Wallet(config, { log: (m) => logs.push(m), modules: MODULES }), config, logs };
 }
 
+// Caps are PER TOKEN and keyed by KEY, and the two tokens' caps differ - so a
+// check that reached for the wrong entry refuses a send these tests expect to
+// succeed, rather than agreeing by coincidence.
 const AGENT_POLICY = {
   agentId: AGENT,
-  max_per_tx: 100,
-  max_per_stage: 500,
+  caps: {
+    play: { max_per_tx: 100, max_per_stage: 500 },
+    au: { max_per_tx: 5, max_per_stage: 20 },
+  },
   allow: ['*.play'],
   deny: ['treasury.play'],
   frozen: false,
@@ -190,7 +236,12 @@ describe('send', () => {
       txHash: '0xtx1',
     });
     expect(fake.transfers).toHaveLength(1);
-    expect(fake.transfers[0]).toMatchObject({ to: 'alpha.play', vee: '50', intentId: 'a1', memo: 'stream job' });
+    // `amount` and the token's KEY on the wire - never `vee`, and never the
+    // symbol the caller may have written.
+    expect(fake.transfers[0]).toMatchObject({
+      to: 'alpha.play', amount: '50', token: 'play', intentId: 'a1', memo: 'stream job',
+    });
+    expect(fake.transfers[0]!.vee).toBeUndefined();
   });
 
   // Criterion 4: the same call again returns the SAME txHash and the money
@@ -437,21 +488,171 @@ describe('send', () => {
 describe('reads', () => {
   it('reports who it is, with its aliases', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
-    expect(await wallet.whoami()).toEqual({ agentId: AGENT, address: '0xme', aliases: ['vendor.play'] });
+    expect(await wallet.whoami()).toEqual({
+      agentId: AGENT,
+      address: '0xme',
+      aliases: ['vendor.play'],
+      // SYMBOLS, which is what a persona reads everywhere else in this package.
+      tokens: ['PLAY', 'GOLD'],
+    });
   });
 
   it('labels history by direction and names the counterparty', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     const entries = (await wallet.history()) as Array<Record<string, unknown>>;
 
-    expect(entries[0]).toMatchObject({ direction: 'out', counterparty: 'alpha:client', vee: '50' });
-    expect(entries[1]).toMatchObject({ direction: 'in', counterparty: 'alpha:client', vee: '5' });
+    expect(entries[0]).toMatchObject({ direction: 'out', counterparty: 'alpha:client', amount: '50', token: 'PLAY' });
+    expect(entries[1]).toMatchObject({ direction: 'in', counterparty: 'alpha:client', amount: '5', token: 'PLAY' });
+    // The legacy field is not carried through, even though the row still has it.
+    expect(entries[0]!.vee).toBeUndefined();
   });
 
   it('resolves a name to an address and a canonical id', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     expect(await wallet.resolve('alpha.play')).toEqual({ address: '0xaaa', canonical: 'alpha:client' });
     expect(await wallet.resolve('nobody.play')).toMatchObject({ error: expect.any(String) });
+  });
+});
+
+// §3. The deployment has two tokens, and every money path has to say WHICH.
+//
+// The fixture's tokens disagree in key, symbol, caps and decimals (see MODULES
+// and AGENT_POLICY), so each case below distinguishes "read the named token"
+// from "read the default and get away with it".
+describe('one wallet, two tokens', () => {
+  it('reports every token\'s balance, and which one is the default', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    expect(await wallet.balance()).toEqual({
+      // KEYED BY SYMBOL, which is what chain-svc sends and what a persona reads.
+      balances: { PLAY: '250', GOLD: '9.5' },
+      default: 'PLAY',
+    });
+  });
+
+  // The legacy single-token field is still in the fixture reply. Falling back to
+  // it would PASS for the whole deprecation window while silently reporting one
+  // token, and break only once the field went - so the window in which anyone
+  // could notice is exactly the window in which nothing looks wrong.
+  it('fails loudly on a chain-svc too old to send balances, rather than reading vee', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    fake.balanceReply = { status: 200, body: { vee: '250', eth: '1' } };
+    expect(await wallet.balance()).toEqual({ error: 'balance unavailable' });
+  });
+
+  it('sends the default token when none is named', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    expect(await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'd1' })).toMatchObject({ ok: true });
+    expect(fake.transfers[0]).toMatchObject({ amount: '50', token: 'play' });
+  });
+
+  // Either namespace, either case - and the KEY is what goes on the wire
+  // whichever one the caller wrote, because the key is what chain-svc stores.
+  it('accepts a token by key or by symbol, case-insensitively', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    for (const [i, written] of ['au', 'AU', 'GOLD', 'gold'].entries()) {
+      expect(await wallet.send({ to: 'alpha.play', amount: '1', token: written, intent_id: `e${i}` }))
+        .toMatchObject({ ok: true });
+      expect(fake.transfers[i]).toMatchObject({ token: 'au' });
+    }
+  });
+
+  // The cap that applies is the NAMED token's. 50 is under PLAY's 100 and over
+  // GOLD's 5, so one amount gets two answers - and the refusal never reaches
+  // chain-svc, which is the point of a local pre-check.
+  it('caps the named token by its own limit', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    expect(await wallet.send({ to: 'alpha.play', amount: '50', intent_id: 'f1' })).toMatchObject({ ok: true });
+    expect(await wallet.send({ to: 'alpha.play', amount: '50', token: 'GOLD', intent_id: 'f2' })).toMatchObject({
+      ok: false,
+      reason: 'over_max_per_tx',
+    });
+    expect(fake.transfers).toHaveLength(1);
+  });
+
+  // A readable policy that says nothing about this token is a REFUSAL, not a
+  // deferral: an absent cap read as "no limit" is the one reading that costs
+  // money. (An UNREADABLE policy still defers - see policy.test.ts.)
+  it('refuses a token the policy sets no cap for', async () => {
+    const { wallet } = walletWith({ ...AGENT_POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } });
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', token: 'GOLD', intent_id: 'g1' });
+    expect(result).toMatchObject({ ok: false, reason: 'over_max_per_tx' });
+    expect(result.detail).toContain('au');
+    expect(fake.transfers).toHaveLength(0);
+  });
+
+  it('refuses a token this deployment does not have, and says what it does', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', token: 'ETH', intent_id: 'h1' });
+    expect(result).toMatchObject({ ok: false, reason: 'unknown_token' });
+    expect(result.detail).toContain('play (PLAY)');
+    expect(result.detail).toContain('au (GOLD)');
+    expect(fake.transfers).toHaveLength(0);
+  });
+
+  // A model that writes `{"token": 4}` is told what a token IS. Not
+  // `unknown_token`, which would send it looking for the right spelling of 4.
+  it('refuses a token that is not a string as bad input', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', token: 4, intent_id: 'h2' });
+    expect(result).toMatchObject({ ok: false, reason: 'error' });
+    expect(result.detail).toContain('must be a string');
+    expect(fake.transfers).toHaveLength(0);
+  });
+
+  // The token is PART OF WHAT MAKES A REPLAY A REPLAY. Same id, same
+  // counterparty, same amount, different token is a DIFFERENT payment - and
+  // answering it with the first one's txHash would report a GOLD transfer that
+  // never happened as settled.
+  it('treats the same intent id under a different token as a different payment', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+    const first = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'i1' });
+    expect(first).toMatchObject({ ok: true });
+
+    const second = await wallet.send({ to: 'alpha.play', amount: '1', token: 'GOLD', intent_id: 'i1' });
+    expect(second).toMatchObject({ ok: false, reason: 'duplicate_intent' });
+    // And it says which token the id was spent on, by SYMBOL - the ledger holds
+    // the key, and a persona reading "already used to send 1 au" would be told
+    // the id was spent on something it has never seen named.
+    expect(second.detail).toContain('1 PLAY');
+    expect(fake.transfers).toHaveLength(1);
+
+    // The identical send under the same token is still a replay.
+    expect(await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'i1' })).toEqual(first);
+    expect(fake.transfers).toHaveLength(1);
+  });
+
+  // ONE TOKEN PER CALL (chain-svc's rule): a merged history would interleave
+  // amounts in different scales under one field. So the filter has to reach the
+  // wire, not just the resolver.
+  it('asks for one token\'s history and puts the key on the wire', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+
+    const play = (await wallet.history()) as Array<Record<string, unknown>>;
+    expect(play.map((e) => e.token)).toEqual(['PLAY', 'PLAY']);
+
+    const gold = (await wallet.history(20, 'GOLD')) as Array<Record<string, unknown>>;
+    expect(gold).toHaveLength(1);
+    expect(gold[0]).toMatchObject({ direction: 'out', amount: '2.5', token: 'GOLD' });
+
+    // Written as a symbol, sent as a key - both times.
+    expect(fake.historyQueries).toEqual(['play', 'au']);
+  });
+
+  it('refuses history for a token this deployment does not have, BY CODE', async () => {
+    // The CODE in `error` and the sentence in `detail`, which is `send`'s shape
+    // for the identical resolution. Asserting only that the sentence appeared
+    // let the two paths drift: one rule reached a persona as `unknown_token`
+    // through `send` and as free text through `history`, and the closed set of
+    // reasons is exactly what a model is supposed to be able to switch on.
+    //
+    // Caught by the stdio smoke, not by this suite - because this assertion
+    // was satisfied by the detail whichever field carried it.
+    const { wallet } = walletWith(AGENT_POLICY);
+    expect(await wallet.history(20, 'ETH')).toMatchObject({
+      error: 'unknown_token',
+      detail: expect.stringContaining('no token "ETH"'),
+    });
+    expect(fake.historyQueries).toHaveLength(0);
   });
 });
 

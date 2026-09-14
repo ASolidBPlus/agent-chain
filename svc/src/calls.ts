@@ -62,8 +62,9 @@ export interface CallEntry {
   /// Whole units of the amount's token. Increment 3 has no per-wallet per-token
   /// caps, so an amount in a token other than the default carries the only
   /// bound there is; increment 4 retires this.
-  perTxCap?: string;
-  uncapped?: boolean;
+  // `perTxCap` and `uncapped` were here for one release and are retired: caps
+  // are per wallet per token in policy now, and an entry still carrying either
+  // is refused at load rather than ignored.
   intentArg?: number;
   maxPerStage?: number;
   addressArgs: Record<number, AddressRule>;
@@ -284,6 +285,14 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
       throw new Error(`${where}: amount.arg ${arg} is ${inputs[arg]!.type}, not uint256`);
     }
     if (typeof a.token === 'string') {
+      // EXACT KEY, NOT `resolveToken`, and that is the intended asymmetry. §1's
+      // key-or-symbol rule is about what a PERSONA may write on the wire, where
+      // accepting the symbol it just read back is the whole point. This is an
+      // OPERATOR CONFIG FILE, read once at load, and a file that may spell a
+      // token two ways is a file where two entries can name the same token
+      // without looking alike - so the allowlist would be harder to audit for
+      // the sake of a convenience nobody typing it needs. A wrong spelling is
+      // refused by name at load, in front of the operator who wrote it.
       const token = modules.tokens.find((t) => t.key === a.token);
       if (!token) {
         throw new Error(`${where}: amount.token "${a.token}" is not a token in this deployment`);
@@ -301,44 +310,24 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     }
   }
 
-  // §3.2 step 6. An amount in a token that is NOT the default is bounded by
-  // nothing the wallet carries: `max_per_tx` and the stage cap are denominated
-  // in the default token. So the entry states the bound or states that there is
-  // none, and a file that does neither is refused rather than read as "no
-  // limit" - which is the reading that costs money.
-  const capped = typeof e.perTxCap === 'string' || e.perTxCap !== undefined;
-  const uncapped = e.uncapped === true;
+  // §2 (multi-token). `perTxCap` and `uncapped` ARE RETIRED, and an entry still
+  // carrying either is REFUSED rather than ignored.
   //
-  // THE {arg} FORM ALWAYS NEEDS A BOUND, and this is the case the rule was
-  // originally written without. `amount.token: {arg: i}` says "the token whose
-  // address is argument i", chosen per call - so one entry carries an amount in
-  // the default token on one call and in another token on the next. For
-  // `convert(source, target, amountIn)`, `play -> gold` puts the amount in
-  // `play` and `max_per_tx` bounds it; `gold -> play` puts it in `gold`, which
-  // nothing bounds, because every wallet cap is denominated in the default
-  // token. An entry loadable without a bound would be unbounded in exactly the
-  // direction nobody tested.
+  // They existed for one release because caps were denominated in the default
+  // token only, so an amount in any other token was bounded by nothing the
+  // wallet carried and the ENTRY had to state the bound. Caps are now per
+  // wallet PER TOKEN, so the wallet carries a bound for every currency it may
+  // spend and the entry has nothing left to say about it.
   //
-  // DECIDED FROM THE ENTRY'S SHAPE, never from which token a call names:
-  // the point is that the operator meets this when they write the file, not
-  // that a persona meets it mid-game converting the wrong way round.
-  if (amount !== undefined) {
-    const isDefault =
-      typeof amount.token === 'string' && amount.token === defaultTokenKey(modules);
-    if (!isDefault) {
-      if (capped && uncapped) {
-        // Two bounds, one of which says there is none. Whichever the code read
-        // first would be the rule, and the file would not say which.
-        throw new Error(`${where}: "perTxCap" and "uncapped" are both set`);
-      }
-      if (!capped && !uncapped) {
-        throw new Error(
-          `${where}: an amount in a token other than the default needs "perTxCap" or "uncapped"`,
-        );
-      }
-      if (capped && (typeof e.perTxCap !== 'string' || !WHOLE_UNITS.test(e.perTxCap))) {
-        throw new Error(`${where}: "perTxCap" must be a whole-unit decimal string`);
-      }
+  // REFUSED, NOT IGNORED, and that is the whole point of the line. A retired
+  // field read as a no-op would leave an operator believing a bound is in force
+  // that nothing enforces - the most expensive kind of stale config, because it
+  // looks like a policy and behaves like a comment.
+  for (const retired of ['perTxCap', 'uncapped'] as const) {
+    if (e[retired] !== undefined) {
+      throw new Error(
+        `${where}: "${retired}" is retired; caps are per wallet per token in policy`,
+      );
     }
   }
 
@@ -386,8 +375,6 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     admin,
     read,
     amount,
-    perTxCap: typeof e.perTxCap === 'string' ? e.perTxCap : undefined,
-    uncapped: uncapped || undefined,
     intentArg,
     maxPerStage,
     addressArgs,
@@ -426,13 +413,12 @@ function warnAboutUnallowedContracts(
   log: (line: string) => void,
 ): void {
   if (!defaults) return;
-  const defaultKey = defaultTokenKey(modules);
   for (const entry of entries) {
-    // Only an amount in the DEFAULT token reaches enforcePolicy at all.
-    const movesDefault =
-      entry.amount !== undefined &&
-      (typeof entry.amount.token !== 'string' || entry.amount.token === defaultKey);
-    if (!movesDefault) continue;
+    // ANY amount reaches enforcePolicy now. This used to skip everything but
+    // the default token, because caps were denominated in it and other tokens
+    // were bounded by the entry's own `perTxCap` - retired with per-token caps,
+    // so the allow list is consulted for every currency a call can move.
+    if (entry.amount === undefined) continue;
 
     for (const kind of entry.kinds) {
       const allow = defaults[kind]?.allow ?? [];

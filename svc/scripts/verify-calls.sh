@@ -86,7 +86,10 @@ echo "  play=$PLAY gold=$GOLD converter=$CONV"
 
 step "the allowlist"
 mkdir -p "$WORK/policies"
-# §2's example, verbatim except for the perTxCap the {arg} form requires.
+# §2's example. No `perTxCap`: it is retired as of the multi-token increment -
+# caps are per wallet per token in policy, so the wallet carries a bound for
+# whichever currency the {arg} form resolves to, and an entry still carrying the
+# field is refused at load.
 cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
 {
   "schema": 1,
@@ -94,7 +97,6 @@ cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
     { "contract": "converter", "function": "convert",
       "kinds": ["org", "agent"],
       "amount": { "arg": 2, "token": { "arg": 0 } },
-      "perTxCap": "100",
       "intentArg": 3,
       "maxPerStage": 20,
       "addressArgs": { "0": "token", "1": "token" } },

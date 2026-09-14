@@ -4,7 +4,7 @@
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
 import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
-import { defaultTokenOf, type ModulesReply } from './modules.ts';
+import { defaultTokenOf, resolveTokenOrRefusal, type ModulesReply, type TokenModule } from './modules.ts';
 // TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
 // erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
 // runs on node or bun with chain-svc absent (spec S5 - org-core imports this as
@@ -106,6 +106,9 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   //    the arguments are this wallet's own input, and a revert is a fact about
   //    what its own call did.
   unknown_contract: 'unknown_contract',
+  // The token half of the same fact: which tokens this deployment carries is
+  // the registry, and the persona has already been shown their symbols.
+  unknown_token: 'unknown_token',
   function_not_allowed: 'function_not_allowed',
   bad_args: 'bad_args',
   // The CODE is persona-facing and the REASON is not. chain-svc decodes the
@@ -129,6 +132,12 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // persona cannot cause this and learns nothing from it.
   invalid_agent_id: null,
   invalid_request: null,
+  // THE TREASURY'S FLOAT IS THE GAME'S SUPPLY POSITION, and a persona that
+  // could read it from a refusal could probe it by asking to be funded. An
+  // operator fact, and `fund` is platform scope so no persona reaches it today
+  // - but this is declared rather than left to that, because "no route reaches
+  // it" is a property of today's routes and this map is the standing answer.
+  treasury_insufficient: null,
   // Infrastructure: tells a persona only "it did not happen", which the generic
   // reason already says.
   chain_error: null,
@@ -186,12 +195,15 @@ export class Wallet {
   private readonly client: ChainSvcClient;
   private readonly store: WalletStore;
   private readonly log: LogSink;
-  /// The default token's symbol and decimals, from the /modules reply. Only the
-  /// money methods use them, and those are only advertised when a default token
-  /// exists (server.ts), so the fallbacks below are unreachable in the stdio
-  /// path and org-core does not exist yet.
-  private readonly symbol: string;
-  private readonly decimals: number;
+  /// The whole /modules reply, NOT a symbol and a decimals lifted out of it.
+  ///
+  /// KEY, SYMBOL and DECIMALS are three facts about ONE token. Held as separate
+  /// fields they were a snapshot of the DEFAULT token, so the day `send` grew a
+  /// `token` argument they would have scaled a GOLD amount by PLAY's decimals
+  /// and named PLAY in the refusal - each field looking right on its own. The
+  /// resolved token now travels as one value down every per-call path, which
+  /// makes a mixed-source amount unrepresentable rather than merely tested for.
+  private readonly modules: ModulesReply;
 
   /// `options` is REQUIRED, and so are `options.log` and `options.modules`.
   /// Every construction site then has to name both, and typecheck is what makes
@@ -203,9 +215,7 @@ export class Wallet {
     this.client = new ChainSvcClient(config);
     this.store = new WalletStore(config.stateFile);
     this.log = options.log;
-    const token = defaultTokenOf(options.modules);
-    this.symbol = token?.symbol ?? 'tokens';
-    this.decimals = token?.decimals ?? 0;
+    this.modules = options.modules;
   }
 
   /// Strips the wallet token from anything on its way to the model.
@@ -287,24 +297,60 @@ export class Wallet {
     return { ok: false, reason, ...(detail ? { detail: this.redact(detail) } : {}) };
   }
 
-  async whoami(): Promise<{ agentId: string; address: string | null; aliases: string[] }> {
+  /// The symbol for a token KEY recorded in the ledger. An entry written before
+  /// this release carries no token, and the default is the right reading for it:
+  /// every transfer was the default token then.
+  private symbolOf(key?: string): string {
+    if (key) {
+      const found = this.modules.tokens.find((t) => t.key === key);
+      if (found) return found.symbol;
+    }
+    return this.defaultSymbol();
+  }
+
+  /// The DEFAULT token's symbol, for the paths that genuinely mean "the default"
+  /// rather than a token the caller named.
+  private defaultSymbol(): string {
+    return defaultTokenOf(this.modules)?.symbol ?? 'tokens';
+  }
+
+  async whoami(): Promise<{ agentId: string; address: string | null; aliases: string[]; tokens: string[] }> {
+    // The deployment's SYMBOLS, which is what a persona reads everywhere else.
+    // Either form is accepted back on a `token` argument, so showing symbols
+    // here does not commit it to writing one.
+    const tokens = this.modules.tokens.map((t) => t.symbol);
     const resolved = await this.client.resolve(this.config.agentId);
     const body = resolved.outcome === 'response' ? (resolved.body as { address?: string } | null) : null;
     if (resolved.outcome !== 'response' || resolved.status !== 200 || !body?.address) {
-      return { agentId: this.config.agentId, address: null, aliases: [] };
+      return { agentId: this.config.agentId, address: null, aliases: [], tokens };
     }
     const reverse = await this.client.reverse(body.address);
     const rev = reverse.outcome === 'response' ? (reverse.body as { aliases?: string[] } | null) : null;
-    return { agentId: this.config.agentId, address: body.address, aliases: rev?.aliases ?? [] };
+    return { agentId: this.config.agentId, address: body.address, aliases: rev?.aliases ?? [], tokens };
   }
 
-  async balance(): Promise<{ vee: string } | { error: string }> {
+  /// Every deployed token, each formatted at ITS OWN decimals by chain-svc, and
+  /// the default named so a persona knows which one an omitted `token` means.
+  ///
+  /// READS `balances` ONLY, NEVER THE LEGACY `vee`. That field is a shim for
+  /// consumers on their own bump cadence; this package ships in the same release
+  /// as the endpoint, so reading it would be reading our own deprecation.
+  /// `balances ?? vee` is the tempting edit and the wrong one: it PASSES for the
+  /// whole deprecation window while silently reporting a single token, and only
+  /// breaks once the field goes - so the window in which someone could notice is
+  /// exactly the window in which nothing looks wrong. Absent `balances` is an
+  /// error here, which makes an un-upgraded chain-svc fail loudly instead.
+  async balance(): Promise<{ balances: Record<string, string>; default: string } | { error: string }> {
     const res = await this.client.balance(this.config.agentId);
     const down = Wallet.unreachable(res);
     if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'balance unavailable') };
-    const body = res.body as { vee?: string; error?: string } | null;
-    if (res.status !== 200 || !body?.vee) return { error: this.redact(body?.error ?? 'balance unavailable') };
-    return { vee: body.vee };
+    const body = res.body as
+      | { balances?: Record<string, string>; default?: string; error?: string }
+      | null;
+    if (res.status !== 200 || !body?.balances || !body.default) {
+      return { error: this.redact(body?.error ?? 'balance unavailable') };
+    }
+    return { balances: body.balances, default: body.default };
   }
 
   /// The primary addressing path (spec S5). A persona pays a NAME.
@@ -354,8 +400,24 @@ export class Wallet {
     };
   }
 
-  async history(limit = 20): Promise<Array<Record<string, unknown>> | { error: string }> {
-    const res = await this.client.history(this.config.agentId, limit);
+  /// ONE TOKEN PER CALL, the default when omitted. Not merged: a merged history
+  /// interleaves amounts in different scales under one field and makes the
+  /// reader carry the unit per row.
+  async history(
+    limit = 20,
+    token?: unknown,
+  ): Promise<Array<Record<string, unknown>> | { error: string; detail?: string }> {
+    const resolved = resolveTokenOrRefusal(this.modules, token);
+    if (!resolved.ok) {
+      // THE CODE IN `error`, THE SENTENCE IN `detail` - the shape every other
+      // refusal on this side uses, and `send`'s shape for the identical
+      // resolution. This returned the DETAIL as the error, so one rule reached
+      // a persona as `unknown_token` through `send` and as a sentence through
+      // `history`: two shapes for one refusal, and the closed set of reasons is
+      // exactly what the model is supposed to be able to switch on.
+      return { error: resolved.reason, detail: this.redact(resolved.detail) };
+    }
+    const res = await this.client.history(this.config.agentId, limit, resolved.token.key);
     const down = Wallet.unreachable(res);
     if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'history unavailable') };
     if (res.status !== 200 || !Array.isArray(res.body)) {
@@ -369,12 +431,20 @@ export class Wallet {
       when: entry.blockNumber,
       direction: entry.from === this.config.agentId ? 'out' : 'in',
       counterparty: entry.from === this.config.agentId ? entry.to : entry.from,
-      vee: entry.vee,
+      // `amount`, never the entry's legacy `vee` - same reasoning as balance().
+      amount: entry.amount,
+      token: entry.token,
       ...(entry.memo === undefined ? {} : { memo: entry.memo }),
     }));
   }
 
-  async send(args: { to: unknown; amount: unknown; intent_id: unknown; memo?: unknown }): Promise<SendResult> {
+  async send(args: {
+    to: unknown;
+    amount: unknown;
+    token?: unknown;
+    intent_id: unknown;
+    memo?: unknown;
+  }): Promise<SendResult> {
     const to = typeof args.to === 'string' ? args.to.trim() : '';
     const intentId = typeof args.intent_id === 'string' ? args.intent_id.trim() : '';
     // `amount` IS A DECIMAL STRING on every money wire (ruled). A number is
@@ -396,6 +466,14 @@ export class Wallet {
       );
     }
 
+    // Resolved ONCE, and carried as one value from here down: the scale below,
+    // the symbol in every message, the key on the wire and in the ledger all
+    // read off this object. Sourced separately they could name different tokens
+    // while each looked right.
+    const chosen = resolveTokenOrRefusal(this.modules, args.token);
+    if (!chosen.ok) return this.fail(chosen.reason, chosen.detail);
+    const token = chosen.token;
+
     // Idempotence, and the one refusal only this side can see. A replay of the
     // SAME send returns the original result - the model retried, it did not
     // decide twice. Reusing an intent id for a DIFFERENT send is the mistake
@@ -415,12 +493,12 @@ export class Wallet {
             `${previous.call.contract}`,
         );
       }
-      if (previous.to === to && previous.vee === amount) {
+      if (previous.to === to && previous.vee === amount && previous.token === token.key) {
         return { ok: true, txHash: previous.txHash };
       }
       return this.fail(
         'duplicate_intent',
-        `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbol} to ${previous.to}`,
+        `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbolOf(previous.token)} to ${previous.to}`,
       );
     }
 
@@ -478,15 +556,20 @@ export class Wallet {
       return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, this.decimals);
-    if (local) return this.fail(local);
+    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, token);
+    if (local) return this.fail(local.reason, local.detail);
 
-    // THE ONE PLACE THE TWO NAMES MEET. The model fills `amount`; the HTTP
-    // body carries `vee`, which is chain-svc's field name until increment 4
-    // renames the wire alongside the token argument. Mapped here rather than
-    // renamed on both sides, so the tool a persona reads stops naming one
-    // deployment's currency without a breaking change to the service contract.
-    const res = await this.client.signTransfer({ to, vee: amount, intentId, ...(memo ? { memo } : {}) });
+    // The wire says `amount` and names its token, on both sides, since the
+    // rename landed. Nothing is mapped here any more: what the model wrote and
+    // what chain-svc reads are the same two fields, so there is no second
+    // spelling for either to drift from.
+    const res = await this.client.signTransfer({
+      to,
+      amount,
+      token: token.key,
+      intentId,
+      ...(memo ? { memo } : {}),
+    });
 
     // THE DISTINCTION THIS WHOLE TYPE EXISTS FOR. A transport failure used to
     // arrive as a raw exception, which carries no answer to the only question
@@ -514,7 +597,7 @@ export class Wallet {
     const body = res.body as { txHash?: string; error?: string; detail?: string } | null;
 
     if (res.status === 200 && body?.txHash) {
-      this.store.remember(intentId, { txHash: body.txHash, vee: amount, to, at: Date.now() });
+      this.store.remember(intentId, { txHash: body.txHash, vee: amount, token: token.key, to, at: Date.now() });
       return { ok: true, txHash: body.txHash };
     }
 
@@ -523,7 +606,7 @@ export class Wallet {
     // way to act on - and whose only obvious action, re-sending, is the double
     // charge this whole mechanism exists to prevent.
     if (res.status === 409 && body?.error === 'intent_unresolved') {
-      return await this.reconcile(intentId, to, amount);
+      return await this.reconcile(intentId, to, amount, token);
     }
 
     // The DETAIL travels with a persona-facing reason and NEVER with a generic
@@ -621,7 +704,7 @@ export class Wallet {
         previous.call
           ? `intent_id ${intentId} was already used to call ${previous.call.function} on ` +
             `${previous.call.contract} with different arguments`
-          : `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbol} to ${previous.to}`,
+          : `intent_id ${intentId} was already used to send ${previous.vee} ${this.symbolOf(previous.token)} to ${previous.to}`,
       );
     }
 
@@ -685,7 +768,20 @@ export class Wallet {
   /// Polls GET /intents/:intentId until the reservation resolves or the budget
   /// runs out (spec S5). Never re-sends: the only safe move on an unresolved
   /// intent is to ASK, and asking is what this does.
-  private async reconcile(intentId: string, to: string, vee: string): Promise<SendResult> {
+  /// `token` is the RESOLVED TOKEN, not its symbol. It used to be the symbol
+  /// alone, which was enough for the failure message and not enough for the
+  /// ledger: the entry written below carries the KEY, and a replay is only a
+  /// replay if the token matches. Recorded without one, the row could never
+  /// match anything, so a persona's safe re-send after reconciliation came back
+  /// as `duplicate_intent` - the ONE outcome this path exists to prevent.
+  /// Caught by a test; the shape that let it happen was two facts about one
+  /// token arriving by different routes, which is why it now arrives as one.
+  private async reconcile(
+    intentId: string,
+    to: string,
+    vee: string,
+    token: TokenModule,
+  ): Promise<SendResult> {
     const deadline = Date.now() + RECONCILE_BUDGET_MS;
 
     while (Date.now() < deadline) {
@@ -696,11 +792,11 @@ export class Wallet {
         if (body?.status === 'confirmed' && body.txHash) {
           // It DID happen. Recording it now is what makes a persona's re-send
           // return this same hash instead of moving money a second time.
-          this.store.remember(intentId, { txHash: body.txHash, vee, to, at: Date.now() });
+          this.store.remember(intentId, { txHash: body.txHash, vee, to, token: token.key, at: Date.now() });
           return { ok: true, txHash: body.txHash };
         }
         if (body?.status === 'failed') {
-          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no ${this.symbol} moved`);
+          return this.fail('error', `the transfer to ${to} was broadcast and reverted; no ${token.symbol} moved`);
         }
         // reserved or broadcast: not settled yet. Keep waiting.
       }

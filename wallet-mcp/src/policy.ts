@@ -47,6 +47,11 @@ export type Refusal =
   /// include this wallet's kind - deliberately: distinguishing them would tell
   /// a persona what OTHER kinds of wallet are permitted to do.
   | 'function_not_allowed'
+  /// No token by that key or symbol in this deployment. A fact about the PUBLIC
+  /// registry, like `unknown_contract` and `unknown_name`: a persona reads token
+  /// SYMBOLS in every balance and every history entry, so refusing to say which
+  /// ones exist would refuse it the vocabulary the service itself taught it.
+  | 'unknown_token'
   /// The arguments did not match the function's ABI, with the index and the
   /// expected type. A fact about what the persona just typed, like
   /// `invalid_amount`, and the detail is what lets a model fix its own call
@@ -58,14 +63,19 @@ export type Refusal =
   /// says more about the game's machinery than a player should read.
   | 'revert';
 
-export interface WalletPolicy {
-  agentId: string;
-  /// NUMBER OR DECIMAL STRING, matching chain-svc, which writes this file. A
-  /// cap is an amount and every other amount here is a decimal string; a
-  /// reader stricter than the writer would refuse a policy the boundary
-  /// accepted, which is the same disagreement the shared file exists to stop.
+export interface TokenCaps {
   max_per_tx: number | string;
   max_per_stage: number | string;
+}
+
+export interface WalletPolicy {
+  agentId: string;
+  /// KEYED BY TOKEN KEY, never by symbol - chain-svc writes this file and its
+  /// own bookkeeping stores the key. `resolveTokenOrRefusal` is where a key and
+  /// a symbol meet, once.
+  ///
+  /// A TOKEN WITH NO ENTRY CANNOT BE SPENT: see `capsRefusal`.
+  caps: Record<string, TokenCaps>;
   allow: string[];
   deny: string[];
   frozen: boolean;
@@ -77,8 +87,17 @@ export interface WalletPolicy {
 export function readPolicy(path: string): WalletPolicy | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as WalletPolicy;
-    const cap = (v: unknown) => typeof v === 'number' || typeof v === 'string';
-    if (cap(parsed?.max_per_tx) && Array.isArray(parsed?.allow)) return parsed;
+    // A file with no `caps` is the PRE-MULTI-TOKEN shape, and it is treated as
+    // unreadable rather than migrated here. Two reasons, and the second is the
+    // one that matters: chain-svc already migrates it in memory and rewrites it,
+    // so a second migration in this package would be the same rule written
+    // twice; and returning null defers to chain-svc, which is the authority,
+    // instead of failing closed on every send until that rewrite happens. A
+    // wallet frozen by its own fast path during an ordinary upgrade is the
+    // failure this avoids. "I cannot read the rules" and "the rules say nothing
+    // about this token" are different, and only the second refuses.
+    const caps = (parsed as { caps?: unknown } | null)?.caps;
+    if (caps && typeof caps === 'object' && Array.isArray(parsed?.allow)) return parsed;
   } catch {
     // Unreadable policy: see checkLocally - this is NOT treated as permission.
   }
@@ -148,17 +167,54 @@ export function veeToWei(vee: string, decimals: number): bigint {
   return BigInt(whole + frac.padEnd(decimals, '0').slice(0, decimals));
 }
 
+/// The local mirror of chain-svc's `capsFor`, and the counterpart its agreement
+/// test asserts against.
+///
+/// RETURNS rather than throws - chain-svc's throws an `HttpError` this package
+/// cannot import at runtime - so the test normalises one against the other. The
+/// sentence is built the same way on both sides so they cannot drift into
+/// refusing for the same reason with different words.
+///
+/// A TOKEN WITH NO ENTRY CANNOT BE SPENT. Silence fails CLOSED: an absent cap
+/// read as "no limit" is the one reading that costs money, and it is the reading
+/// a careless caller reaches for first.
+export function capsRefusal(
+  policy: WalletPolicy,
+  tokenKey: string,
+): { reason: Refusal; detail: string } | null {
+  const caps = policy.caps?.[tokenKey];
+  if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
+    return { reason: 'over_max_per_tx', detail: `no cap set for ${tokenKey}` };
+  }
+  return null;
+}
+
+/// `token` arrives as ONE value, not as a key and a decimals read separately.
+/// Key, symbol and decimals are three facts about one token: sourced apart they
+/// can drift to different tokens while each looks right, and only one of the
+/// three is checkable by a value assertion. Passing the resolved token makes a
+/// mixed-source amount unrepresentable rather than merely tested for.
 export function checkLocally(
   policy: WalletPolicy | null,
   to: string,
-  vee: string,
-  decimals: number,
-): Refusal | null {
-  if (!policy) return null; // unreadable: let chain-svc decide rather than guess either way
-  if (policy.frozen) return 'frozen';
-  if (veeToWei(vee, decimals) > veeToWei(String(policy.max_per_tx), decimals)) return 'over_max_per_tx';
+  amount: string,
+  token: { key: string; decimals: number },
+): { reason: Refusal; detail?: string } | null {
+  // Unreadable, or a shape this version does not parse: let chain-svc decide
+  // rather than guess either way. NOT the same as a readable policy that says
+  // nothing about this token, which refuses below.
+  if (!policy) return null;
+  if (policy.frozen) return { reason: 'frozen' };
+
+  const capless = capsRefusal(policy, token.key);
+  if (capless) return capless;
+  const caps = policy.caps[token.key]!;
+
+  if (veeToWei(amount, token.decimals) > veeToWei(String(caps.max_per_tx), token.decimals)) {
+    return { reason: 'over_max_per_tx' };
+  }
   // Deny beats allow, and an empty allow list denies everything.
-  if (policy.deny.some((p) => matchesPattern(p, to))) return 'counterparty_denied';
-  if (!policy.allow.some((p) => matchesPattern(p, to))) return 'counterparty_denied';
+  if (policy.deny.some((p) => matchesPattern(p, to))) return { reason: 'counterparty_denied' };
+  if (!policy.allow.some((p) => matchesPattern(p, to))) return { reason: 'counterparty_denied' };
   return null;
 }

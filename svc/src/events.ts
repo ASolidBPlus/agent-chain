@@ -249,11 +249,29 @@ export class EventTail {
   /// returns null for it before the flag is ever read, and answering `false`
   /// here would state something untrue about a topic we know nothing about.
   private isExpectedEmitter(topic: string, emitter: string): boolean {
-    const key = this.store.callContractForTopic(topic);
+    const routing = this.store.intentRouting(topic);
+    // An intent this store never reserved. `recordEmission` returns null for
+    // it BEFORE this flag is read, so the branch is unreachable by
+    // construction - a mutation flipping it to `false` SURVIVES the suite, and
+    // that is correct rather than a coverage gap: no sequence of polls can
+    // reach a state where the answer matters. It is written as `true` anyway
+    // because the alternative states something untrue about a topic we know
+    // nothing about, and the day the early return in `recordEmission` moves,
+    // this is the line that decides whether every stranger's event becomes an
+    // anomaly.
+    if (routing === null) return true;
+
+    // A CALL expects the contract it named. A TRANSFER expects THE TOKEN IT
+    // MOVED - not the default token, which is what this computed before there
+    // could be more than one. That distinction is the whole of §4: a second
+    // token's IntentTransfer is an ORDINARY emission, and a cross-token one
+    // under the same id is the anomaly.
     const expected =
-      key === null
-        ? this.chain.modules.tokens[0]?.address
-        : this.chain.modules.byKey.get(key)?.address;
+      routing.callContract !== null
+        ? this.chain.modules.byKey.get(routing.callContract)?.address
+        : routing.token !== null
+          ? this.chain.modules.tokens.find((t) => t.key === routing.token)?.address
+          : this.chain.modules.tokens[0]?.address;
     if (expected === undefined) return true;
     return emitter.toLowerCase() === expected.toLowerCase();
   }

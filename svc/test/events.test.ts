@@ -298,6 +298,7 @@ describe('the intent anomaly', () => {
   it('raises chain.anomaly when one intent id has two transfers', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-anom', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -331,6 +332,7 @@ describe('the intent anomaly', () => {
   it('counts an emission with no sender, recording the sender as null', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-nosender', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -369,6 +371,7 @@ describe('the intent anomaly', () => {
   it('raises chain.anomaly across TWO polls, not just within one', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-late', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -431,6 +434,7 @@ describe('the intent anomaly', () => {
   it('catches the split-brain double-spend: same id, same sender, two polls', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'shared-key', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -483,6 +487,7 @@ describe('the intent anomaly', () => {
   it('counts a third emission, across three polls', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'thrice', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -509,6 +514,7 @@ describe('the intent anomaly', () => {
   it('does not double-count a re-seen SECOND emission', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 're-second', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -534,6 +540,7 @@ describe('the intent anomaly', () => {
   it('does not double-count the same emission across a replayed window', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'replayed', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -558,6 +565,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: 'i-foreign', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -586,6 +594,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: `i-${idSource}`, topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n, idSource,
     });
@@ -607,6 +616,7 @@ describe('the intent anomaly', () => {
     const WALLET = '0x000000000000000000000000000000000000bEEF';
     store.markSpawned('orch:mark', WALLET, null);
     store.reserve({
+      token: 'play',
       intentId: 'i-ours', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -626,6 +636,7 @@ describe('the intent anomaly', () => {
     const store = new Store(':memory:');
     store.markSpawned('orch:mark', '0x000000000000000000000000000000000000bEEF', null);
     store.reserve({
+      token: 'play',
       intentId: 'i-case', topic: TOPIC, agentId: 'orch:mark',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -646,6 +657,7 @@ describe('the intent anomaly', () => {
   it('makes no foreign judgement when the wallet is unknown', async () => {
     const store = new Store(':memory:');
     store.reserve({
+      token: 'play',
       intentId: 'i-unknown', topic: TOPIC, agentId: 'orch:nowallet',
       stage: 's1', amount: 1n, capWei: 10n ** 21n,
     });
@@ -695,6 +707,7 @@ describe('sweepOnce', () => {
   /// every assertion below would pass for the wrong reason.
   const reserve = (store: Store, intentId: string, block: bigint | undefined) =>
     store.reserve({
+      token: 'play',
       intentId, topic: TOPIC2, agentId: 'orch:mark', stage: store.currentStage(),
       amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: block,
     });
@@ -708,7 +721,7 @@ describe('sweepOnce', () => {
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
     expect(store.intentTxHash('landed')).toBe('0xaaa');
     // The money moved, so the budget stays spent.
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n);
     store.close();
   });
 
@@ -746,11 +759,12 @@ describe('sweepOnce', () => {
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
     // The hold stands...
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n);
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n);
     // ...and the id is still consumed, which is the half that matters: a retry
     // must be refused, not broadcast a second time.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'unlanded', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -820,6 +834,7 @@ describe('sweepOnce', () => {
     // property: an aged row that stops refusing a retry is a double-charge.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'ancient-by-clock', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -863,6 +878,7 @@ describe('sweepOnce', () => {
 
     // And one in the new stage, also landed.
     store.reserve({
+      token: 'play',
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
       stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
@@ -886,6 +902,7 @@ describe('sweepOnce', () => {
 
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'rolled', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }).outcome,
@@ -914,6 +931,7 @@ describe('sweepOnce', () => {
     // never admitted as a fresh reservation.
     expect(
       store.reserve({
+        token: 'play',
         intentId: 'terminal', topic: TOPIC2, agentId: 'orch:mark',
         stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
       }),
@@ -930,7 +948,7 @@ describe('sweepOnce', () => {
     store.setCursor('chain-log-tail', 9_999_999n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 0, held: 1 });
-    expect(store.spentThisStage('orch:mark', store.currentStage())).toBe(10n ** 18n); // still held
+    expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n); // still held
     store.close();
   });
 
@@ -1159,6 +1177,7 @@ describe('an IntentTransfer from a token we did not issue for', () => {
     // matched on that, not on the id string. Passing it explicitly keeps the
     // fixture honest about which of the two the poll compares.
     store.reserve({
+      token: 'play',
       intentId: 'gold-anomaly', topic: TOPIC, agentId: 'orch:a', stage: store.currentStage(),
       amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
@@ -1227,6 +1246,10 @@ describe('an IntentTransfer from a token we did not issue for', () => {
 // swallow it silently.
 describe('generic decoding', () => {
   const CONVERTER = '0xconv';
+  /// A second TOKEN's address, distinct from the converter and from the default
+  /// token - the fixture cannot test "which token did this intent move" unless
+  /// there are two to tell apart.
+  const GOLD_TOKEN = '0xgold';
   const CONVERTED_TOPIC = '0x1111111111111111111111111111111111111111111111111111111111111111';
   const INTENT = `0x${'cd'.repeat(32)}`;
 
@@ -1298,6 +1321,22 @@ describe('generic decoding', () => {
     };
   }
 
+  // AN EXPLICIT BUDGET, AND THE NUMBER IS ABOUT SCHEDULING, NOT ABOUT THE WORK.
+  //
+  // This test does one `pollOnce()` against a stub: no sleeps, no I/O, nothing
+  // that can legitimately take seconds. It is green in isolation and was
+  // MEASURED at 7770 ms under full-suite load, past bun's 5000 ms default - so
+  // the overrun says the process was starved, not that the code was slow, and
+  // the framework's timeout fired first and reported an opaque failure in place
+  // of whatever the test would have said.
+  //
+  // Not made "deterministic", because there is nothing non-deterministic here
+  // to fix: one pass, one stub, no clock. Raising the budget is the honest
+  // change; shrinking the work would be pretending the test was the problem.
+  // The same shape as guards.test.ts's 30s cases, and for the same reason.
+  //
+  // NOT REPRODUCED HERE - it did not fire in any of my runs. The measurement is
+  // the evaluator's and is recorded as theirs.
   it('enqueues a chain.event for a registered contract log', async () => {
     const store = new Store(':memory:');
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
@@ -1309,7 +1348,7 @@ describe('generic decoding', () => {
     expect((event.args as Record<string, unknown>).amountIn).toBe('40');
     expect((event.args as Record<string, unknown>).intentId).toBe(INTENT);
     store.close();
-  });
+  }, 20_000);
 
   it('does not double-report an event the named passes already emit', async () => {
     // A token's Transfer is carried by the named pass, with its amount
@@ -1393,12 +1432,19 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null,
+      capWei: null, token: 'play',
       call: { contract: 'converter', function: 'convert', argsHash: 'h' },
     });
 
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
 
+    // THE EMISSION WAS RECORDED, asserted before the absence. Zero anomalies is
+    // also what an emission that was ignored entirely produces, so on its own it
+    // says the detector stayed quiet and nothing about whether the intent was
+    // RESOLVED - the first half of this test's own name. Siblings do kill the
+    // "record nothing" mutant, so this closed no hole; it stops this test
+    // passing for a reason it does not claim.
+    expect(store.intentRecord('call-1')?.emissions).toBe(1);
     const anomalies = payloads(store).filter((p) => p.kind === 'chain.anomaly');
     expect(anomalies).toHaveLength(0);
     store.close();
@@ -1417,11 +1463,92 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null,
+      capWei: null, token: 'play',
       call: { contract: 'play', function: 'transfer', argsHash: 'h' },
     });
 
     await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+
+    const anomaly = payloads(store).find((p) => p.kind === 'chain.anomaly')!;
+    expect(anomaly.reason).toBe('foreign_token');
+    store.close();
+  });
+
+  it('does not call a SECOND TOKEN\'s transfer foreign, when that is the token it moved', async () => {
+    // §4. The expected emitter for a TRANSFER intent is the token that intent
+    // MOVED, read from its own row - not the deployment's default. Before this,
+    // every non-default token's IntentTransfer was an anomaly by construction,
+    // so a game with two currencies would have reported every second-currency
+    // send as a foreign emission.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'gold-1',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 5n,
+      capWei: null,
+      token: 'gold',
+    });
+
+    // The emission comes from GOLD's contract, which is not the default token.
+    const chain = chainWithLogs([convertedLog({ address: GOLD_TOKEN })], {
+      tokens: [
+        { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 },
+        { key: 'gold', address: GOLD_TOKEN, symbol: 'GOLD', decimals: 6 },
+      ],
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+        { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI },
+      ],
+      byKey: new Map<string, unknown>([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+        ['gold', { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI }],
+      ]),
+    });
+    await new EventTail({} as Config, chain, store).pollOnce();
+
+    // THE EMISSION WAS RECORDED. Identical reasoning to the Converted case one
+    // describe up, and I fixed that one and did not look for this one - the
+    // same assertion, the same file, three hundred lines apart. Zero anomalies
+    // is also what an emission nobody recorded produces.
+    expect(store.intentRecord('gold-1')?.emissions).toBe(1);
+    expect(payloads(store).filter((p) => p.kind === 'chain.anomaly')).toHaveLength(0);
+    store.close();
+  });
+
+  it('DOES call it foreign when the emission comes from a token the intent did not move', async () => {
+    // The mirror, and the reason the first test is not enough on its own: a
+    // check that answered "expected" for every token would pass it too.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'play-1',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 5n,
+      capWei: null,
+      token: 'play', // reserved in PLAY...
+    });
+
+    // ...but the emission comes from GOLD.
+    const chain = chainWithLogs([convertedLog({ address: GOLD_TOKEN })], {
+      tokens: [
+        { key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 },
+        { key: 'gold', address: GOLD_TOKEN, symbol: 'GOLD', decimals: 6 },
+      ],
+      contracts: [
+        { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+        { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI },
+      ],
+      byKey: new Map<string, unknown>([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+        ['gold', { key: 'gold', kind: 'token', name: 'Token', address: GOLD_TOKEN, abi: CONVERTER_ABI }],
+      ]),
+    });
+    await new EventTail({} as Config, chain, store).pollOnce();
 
     const anomaly = payloads(store).find((p) => p.kind === 'chain.anomaly')!;
     expect(anomaly.reason).toBe('foreign_token');
