@@ -16,6 +16,13 @@ with nothing reaching a public network. One `docker compose` profile brings up:
 - **`wallet-mcp`** — a small stdio [MCP](https://modelcontextprotocol.io) server
   an agent runs to hold and spend by *name*, never by address. It keeps no key
   and maps every refusal onto a short, closed set of reasons an agent may see.
+  It is one client of `chain-svc`'s HTTP API, not the only one.
+
+**The API is `chain-svc`'s HTTP interface.** Anything that holds a wallet token
+can use it — an agent through `wallet-mcp`, or any application or service
+directly: spawn is the operator's, but balance, history, name lookup and sending
+by name are the same calls for every wallet holder. The platform token is the
+operator's: mint, fund, spawn, freeze, rotate, set a balance, read anything.
 
 ## How the pieces fit (the design; nodes marked *next* land with the next release)
 
@@ -43,9 +50,10 @@ flowchart LR
   L -- read at boot --> svc
   svc -- signed, zero-fee txs --> chain
   chain -- logs --> E
-  A["Agent<br/>(any MCP host)"] -- stdio --> W["wallet-mcp<br/>no key, one token"]
-  W -- "HTTP + wallet token" --> svc
-  H["Operator / harness"] -- "HTTP + platform token" --> svc
+  A["Agent<br/>(any MCP host)"] -- stdio --> W["wallet-mcp<br/>no key, one wallet token"]
+  W -- "HTTP, wallet token" --> svc
+  U["Consumer<br/>(any app or service holding a wallet)"] -- "HTTP, wallet token" --> svc
+  H["Operator<br/>(hub, harness, setup)"] -- "HTTP, platform token" --> svc
   E -- events --> H
 ```
 
