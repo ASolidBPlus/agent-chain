@@ -94,6 +94,43 @@ in one call. The contract records the id in its event and deliberately does not
 deduplicate, so a second emission under one id (from anywhere) is visible as an
 anomaly rather than suppressed.
 
+## The contracts
+
+**Token** (`contracts/src/VEEBux.sol` today; a generic `Token` named at deploy
+lands with the next release, same interface plus a burn role). An OpenZeppelin
+ERC-20 with 18 decimals and role-based access:
+
+- `mint(to, amount)` — `MINTER_ROLE` only. The treasury holds it; nothing an
+  agent can reach does. Total supply is whatever the operator has minted.
+- `transferWithIntent(to, amount, intentId)` — a normal transfer that also
+  emits `IntentTransfer(intentId, from, to, amount)`. The intent id is chosen by
+  the payer and is the handle every later question about the payment uses. The
+  contract records it and deliberately does **not** deduplicate: chain-svc
+  refuses a second send under the same id before it is broadcast, and a second
+  emission under one id, from anywhere, is therefore visible as an anomaly.
+- No pause, no blacklist, no burn from outside. Freezing a wallet is policy in
+  chain-svc, not a contract action. Next release adds `BURNER_ROLE` +
+  `burnFrom`, granted to nobody at deploy, for a converter between tokens.
+
+**NameRegistry** (`contracts/src/NameRegistry.sol`). Names are the addressing
+layer: an agent pays `shadowbroker`, never `0x…`.
+
+- A record per name: `owner` (who may change it) and `target` (the address it
+  resolves to). `resolve(name) → address`, `reverseOf(address) → name`.
+- `register` and `registerFor` are `REGISTRAR_ROLE` only — the treasury, through
+  chain-svc — so a name cannot be squatted by anyone who is not the operator.
+  `registerFor` sets the owner to the wallet the name is for and writes the
+  reverse entry once; that reverse entry is the wallet's canonical name.
+- Canonical names carry one colon, `org:agent`; vanity aliases carry none and
+  point at the same wallet. `transfer(name, newOwner)` and `setTarget(name,
+  target)` are the owner's; `setTargetFor` is the registrar's (used to retire a
+  wallet by pointing its aliases away). Events: `Registered`, `Transferred`,
+  `TargetChanged`. Names are validated on chain (length and character set).
+
+Both contracts are deployed by `chain-deploy` from the treasury key, which is
+granted `MINTER_ROLE` and `REGISTRAR_ROLE` in the constructors. Their ABIs are
+generated into `svc/src/abi.ts` and drift-checked in CI.
+
 ## Layout
 
 ```
