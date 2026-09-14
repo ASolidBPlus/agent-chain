@@ -112,6 +112,17 @@ ERC-20 with 18 decimals and role-based access:
   chain-svc, not a contract action. Next release adds `BURNER_ROLE` +
   `burnFrom`, granted to nobody at deploy, for a converter between tokens.
 
+```mermaid
+flowchart LR
+  TR[Treasury] -- "mint (MINTER_ROLE)" --> T[Token]
+  T -- balances --> W1[Wallet A]
+  W1 -- "transferWithIntent(to, amount, intentId)" --> W2[Wallet B]
+  W1 -. "emits IntentTransfer" .-> L[(logs)]
+  CV[Converter] -. "burnFrom (BURNER_ROLE)" .-> T
+  classDef next stroke-dasharray: 5 5
+  class CV next
+```
+
 **NameRegistry** (`contracts/src/NameRegistry.sol`). Names are the addressing
 layer: an agent pays `shadowbroker`, never `0x…`.
 
@@ -126,6 +137,16 @@ layer: an agent pays `shadowbroker`, never `0x…`.
   target)` are the owner's; `setTargetFor` is the registrar's (used to retire a
   wallet by pointing its aliases away). Events: `Registered`, `Transferred`,
   `TargetChanged`. Names are validated on chain (length and character set).
+
+```mermaid
+flowchart LR
+  TR[Treasury via chain-svc] -- "registerFor (REGISTRAR_ROLE)" --> R[NameRegistry]
+  R --- N1["org:agent<br/>owner · target"]
+  R --- N2["alias<br/>owner · target"]
+  N1 -- resolve --> W[Wallet address]
+  N2 -- resolve --> W
+  W -- reverseOf --> N1
+```
 
 Both contracts are deployed by `chain-deploy` from the treasury key, which is
 granted `MINTER_ROLE` and `REGISTRAR_ROLE` in the constructors. Their ABIs are
