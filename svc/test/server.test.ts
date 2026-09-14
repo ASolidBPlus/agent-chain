@@ -2,7 +2,7 @@
 // calling handlers directly - the bug that matters lives in the wiring (does an
 // unauthenticated request actually get refused?), not in the handler.
 
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import type { Server } from 'node:http';
 import { createChainSvcServer, type Services } from '../src/server.ts';
 import { authenticate, hashToken } from '../src/auth.ts';
@@ -115,13 +115,59 @@ const services = {
   },
 } as unknown as Services;
 
+/// EVERY HTTP TEST ASSERTS A STATUS, enforced rather than asked for.
+///
+/// The rule exists because headers are the ONE artefact a crashed handler still
+/// produces correctly: they are written at route dispatch, before the handler
+/// runs. Two alias tests here read only headers, every POST /fund answered 500
+/// against a stub with no `fund`, and both passed for the whole increment while
+/// the suite printed an unhandled error on every run.
+///
+/// A TYPE CANNOT CLOSE THIS. `as unknown as Services` is not the defect - a
+/// fully typed stub would have been just as blind, because typecheck knows
+/// which methods an object DECLARES and never which ones a ROUTE REACHES. The
+/// guard has to sit on the test.
+///
+/// It shadows `status` with a recording getter rather than wrapping the
+/// Response in a Proxy: `json()`, `headers` and the rest stay the real thing,
+/// so the guard cannot change what any assertion sees.
+const unchecked: string[] = [];
+const realFetch = globalThis.fetch;
+
 beforeAll(async () => {
+  globalThis.fetch = (async (input: Parameters<typeof realFetch>[0], init?: RequestInit) => {
+    const res = await realFetch(input, init);
+    const where = `${init?.method ?? 'GET'} ${typeof input === 'string' ? input : String(input)}`;
+    const real = res.status;
+    unchecked.push(where);
+    Object.defineProperty(res, 'status', {
+      configurable: true,
+      get() {
+        const i = unchecked.indexOf(where);
+        if (i !== -1) unchecked.splice(i, 1);
+        return real;
+      },
+    });
+    return res;
+  }) as typeof globalThis.fetch;
+
   server = createChainSvcServer(services);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 
-afterAll(() => server.close());
+afterAll(() => {
+  globalThis.fetch = realFetch;
+  server.close();
+});
+
+afterEach(() => {
+  // Named, not counted: the failure has to say WHICH request went unchecked or
+  // it is a puzzle rather than a report.
+  const missed = [...unchecked];
+  unchecked.length = 0;
+  expect(missed).toEqual([]);
+});
 
 const auth = { authorization: `Bearer ${TOKEN}` };
 
@@ -278,17 +324,23 @@ describe('credential scopes', () => {
       // A view on a registered contract is public information on a private
       // chain, so neither credential is turned away AT THE ROUTER.
       //
-      // The assertion is on the CODE, not on the status: this deployment has
-      // an empty allowlist, so /read gets as far as `function_not_allowed`,
-      // which is also a 403. Asserting `not 403` would have read the right
-      // outcome as the wrong one - the two refusals share a status and say
-      // completely different things about who the caller is.
+      // The DISCRIMINATING assertion is on the CODE, not on the status: this
+      // deployment has an empty allowlist, so /read gets as far as
+      // `function_not_allowed`, which is also a 403. Asserting `not 403` would
+      // have read the right outcome as the wrong one - the two refusals share a
+      // status and say completely different things about who the caller is.
+      //
+      // The status is still asserted, to the value it must have. That is not
+      // the same claim: 403-with-function_not_allowed says the request REACHED
+      // the handler and was refused by the allowlist, and without it a 500 from
+      // a handler that could not run also satisfies "not wrong_scope".
       for (const headers of [auth, wallet]) {
         const read = await post('/read', headers, {
           contract: 'converter',
           function: 'quote',
           args: [],
         });
+        expect(read.status).toBe(403);
         expect((await body(read)).error).not.toBe('wrong_scope');
         const calls = await fetch(`${base}/calls`, { headers });
         expect(calls.status).toBe(200);
@@ -357,6 +409,7 @@ describe('GET /wallets/:agentId', () => {
   it('carries an unrecorded kind through as null', async () => {
     store.markSpawned('orch:oldrow', WALLET, null);
     const res = await fetch(`${base}/wallets/${encodeURIComponent('orch:oldrow')}`, { headers: auth });
+    expect(res.status).toBe(200);
     expect((await res.json() as { kind: unknown }).kind).toBeNull();
   });
 
@@ -588,6 +641,9 @@ describe('the vee -> amount alias', () => {
 
   it('leaves a body with neither alone', async () => {
     const res = await post('/stage', { stage: 's2' });
+    // The same absence, needing the same live request under it as the test
+    // above: a 500 carries no deprecation header either.
+    expect(res.status).toBe(200);
     expect(res.headers.get('deprecation')).toBeNull();
   });
 });
@@ -670,7 +726,9 @@ describe('per-token reads', () => {
 
   it('reports EVERY token on /balance, keyed by symbol, each at its own scale', async () => {
     const { server: s, base: b } = await twoTokenServer();
-    const res = (await (await fetch(`${b}/balance/alpha.play`, { headers: auth })).json()) as Record<string, unknown>;
+    const raw = await fetch(`${b}/balance/alpha.play`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
     s.close();
 
     // Each formatted at ITS OWN decimals: 5 PLAY at 18 dp and 7 GOLD at 6 dp
@@ -744,8 +802,14 @@ describe('per-token reads', () => {
     // dropping `url.searchParams.get('token')` survives every such test.
     const asked: string[] = [];
     const { server: s, base: b } = await twoTokenServer({ onEvents: (a) => asked.push(a) });
-    await fetch(`${b}/history/alpha.play?token=au`, { headers: auth });
+    const res = await fetch(`${b}/history/alpha.play?token=au`, { headers: auth });
     s.close();
+    // BOTH, and the second is the one this test is FOR. A body check in place
+    // of the side channel would be robust to a crashed handler and would stop
+    // testing the wire - the mutant dropping `searchParams.get('token')` would
+    // go back to surviving. The status proves the request WORKED; `asked`
+    // proves it CARRIED the token. Two facts, two assertions.
+    expect(res.status).toBe(200);
     expect([...new Set(asked)]).toEqual(['0xau']);
   });
 
@@ -756,16 +820,18 @@ describe('per-token reads', () => {
     // 7 GOLD at 6 dp is 7_000000 wei; scaled at PLAY's 18 it would read
     // 0.000000000007.
     const { server: s, base: b } = await twoTokenServer({ withTransfer: true });
-    const res = (await (await fetch(`${b}/history/alpha.play?token=GOLD`, { headers: auth })).json()) as Array<
-      Record<string, unknown>
-    >;
+    const raw = await fetch(`${b}/history/alpha.play?token=GOLD`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Array<Record<string, unknown>>;
     s.close();
     expect(res[0]).toMatchObject({ amount: '7', vee: '7', token: 'GOLD' });
   });
 
   it('reports every token on /supply', async () => {
     const { server: s, base: b } = await twoTokenServer();
-    const res = (await (await fetch(`${b}/supply`, { headers: auth })).json()) as Record<string, unknown>;
+    const raw = await fetch(`${b}/supply`, { headers: auth });
+    expect(raw.status).toBe(200);
+    const res = (await raw.json()) as Record<string, unknown>;
     s.close();
     expect(res.tokens).toEqual({
       PLAY: { total: '10', treasury: '5', inPlay: '5' },
