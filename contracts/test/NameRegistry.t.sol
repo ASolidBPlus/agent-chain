@@ -15,7 +15,7 @@ contract NameRegistryTest is Test {
     address internal scammer = makeAddr("scammer");
 
     string internal constant CANONICAL = "orch:vendor";
-    string internal constant ALIAS = "vendor.vee";
+    string internal constant ALIAS = "vendor.play";
 
     function setUp() public {
         registry = new NameRegistry(treasury);
@@ -88,7 +88,7 @@ contract NameRegistryTest is Test {
     /// Views return a miss as a VALUE, never a revert (ruled):
     /// chain-svc turns address(0) into its 404 and cannot decode a revert.
     function test_ResolveUnknownNameReturnsZeroAddress() public view {
-        assertEq(registry.resolve("nobody.vee"), address(0));
+        assertEq(registry.resolve("nobody.play"), address(0));
     }
 
     function test_ReverseOfUnknownAddressReturnsEmptyString() public view {
@@ -198,35 +198,54 @@ contract NameRegistryTest is Test {
     function test_SetTargetForUnknownNameReverts() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.UnknownName.selector);
-        registry.setTargetFor("nobody.vee", scammer);
+        registry.setTargetFor("nobody.play", scammer);
 
-        assertEq(registry.resolve("nobody.vee"), address(0));
+        assertEq(registry.resolve("nobody.play"), address(0));
     }
 
     function test_TransferOfUnknownNameReverts() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.UnknownName.selector);
-        registry.transfer("nobody.vee", scammer);
+        registry.transfer("nobody.play", scammer);
     }
 
     // --- names as given ----------------------------------------------------
 
-    /// Phishing-by-name is a game mechanic (spec S3.2): `aIpha.vee` (capital i)
-    /// and `alpha.vee` (lowercase L) are two different, equally valid names and
+    /// Phishing-by-name is a game mechanic (spec S3.2): `aIpha.play` (capital i)
+    /// and `alpha.play` (lowercase L) are two different, equally valid names and
     /// the registry must not normalise them together. If this test ever fails
     /// because the charset rejected the capital, the mechanic is gone.
+    ///
+    /// ⚠ THE TWO NAMES MUST STAY VISUALLY CONFUSABLE AND BYTE-DISTINCT. That is
+    /// the whole property, and it is the one a later rename can destroy while
+    /// leaving every assertion green: make them merely different (`alpha` and
+    /// `bravo`) and this test passes forever without testing the mechanic at
+    /// all. Do not "tidy" the capital I into an l, and do not replace the pair
+    /// with two unrelated names.
+    ///
+    /// The assertions below are deliberately stronger than "the addresses
+    /// differ": they pin that the NAMES differ as bytes and that BOTH resolve,
+    /// so a rename that collapsed them into one string fails here rather than
+    /// passing on a comparison of a name with itself.
     function test_LookalikeNamesCoexist() public {
+        assertTrue(
+            keccak256(bytes("alpha.play")) != keccak256(bytes("aIpha.play")),
+            "the lookalike pair has stopped being two different names"
+        );
+
         _spawn("alpha:client", client);
         vm.prank(treasury);
-        registry.registerFor("alpha.vee", client, client);
+        registry.registerFor("alpha.play", client, client);
 
         _spawn("orch:scammer", scammer);
         vm.prank(treasury);
-        registry.registerFor("aIpha.vee", scammer, scammer);
+        registry.registerFor("aIpha.play", scammer, scammer);
 
-        assertEq(registry.resolve("alpha.vee"), client);
-        assertEq(registry.resolve("aIpha.vee"), scammer);
-        assertTrue(registry.resolve("alpha.vee") != registry.resolve("aIpha.vee"));
+        assertEq(registry.resolve("alpha.play"), client);
+        assertEq(registry.resolve("aIpha.play"), scammer);
+        assertTrue(registry.resolve("alpha.play") != address(0), "alpha.play must resolve");
+        assertTrue(registry.resolve("aIpha.play") != address(0), "aIpha.play must resolve");
+        assertTrue(registry.resolve("alpha.play") != registry.resolve("aIpha.play"));
     }
 
     function test_NameTooShortReverts() public {
@@ -266,6 +285,6 @@ contract NameRegistryTest is Test {
     function test_SpaceIsRejected() public {
         vm.prank(treasury);
         vm.expectRevert(abi.encodeWithSelector(NameRegistry.InvalidNameChar.selector, 5, bytes1(" ")));
-        registry.registerFor("alpha .vee", vendor, vendor);
+        registry.registerFor("alpha .play", vendor, vendor);
     }
 }

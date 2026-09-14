@@ -26,19 +26,19 @@ contract NameRegistryZeroAddressTest is Test {
     function test_RegisterForRejectsAZeroOwner() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.registerFor("ghost.vee", address(0), wallet);
+        registry.registerFor("ghost.play", address(0), wallet);
     }
 
     function test_RegisterForRejectsAZeroTarget() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.registerFor("ghost.vee", wallet, address(0));
+        registry.registerFor("ghost.play", wallet, address(0));
     }
 
     function test_RegisterRejectsAZeroTarget() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.register("ghost.vee", address(0));
+        registry.register("ghost.play", address(0));
     }
 
     /// The recovery path, which is the part that makes the zero-owner case a
@@ -48,17 +48,17 @@ contract NameRegistryZeroAddressTest is Test {
     function test_ARejectedZeroOwnerLeavesNoRecordAndNoReverse() public {
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.registerFor("ghost.vee", address(0), wallet);
+        registry.registerFor("ghost.play", address(0), wallet);
 
         // Nothing was captured on the way to the revert.
-        assertEq(registry.resolve("ghost.vee"), address(0), "a rejected registration left a record");
+        assertEq(registry.resolve("ghost.play"), address(0), "a rejected registration left a record");
         assertEq(registry.reverseOf(wallet), "", "a rejected registration captured the target's primary name");
 
         // And the name is genuinely free afterwards, to its rightful owner.
         vm.prank(treasury);
-        registry.registerFor("ghost.vee", wallet, wallet);
-        assertEq(registry.resolve("ghost.vee"), wallet);
-        assertEq(registry.reverseOf(wallet), "ghost.vee");
+        registry.registerFor("ghost.play", wallet, wallet);
+        assertEq(registry.resolve("ghost.play"), wallet);
+        assertEq(registry.reverseOf(wallet), "ghost.play");
     }
 
     // --- transfer ------------------------------------------------------
@@ -68,28 +68,28 @@ contract NameRegistryZeroAddressTest is Test {
     /// re-register a name that is still resolving to somebody's wallet.
     function test_TransferToZeroIsRefusedRatherThanSilentlyReleasing() public {
         vm.prank(treasury);
-        registry.registerFor("alpha.vee", wallet, wallet);
+        registry.registerFor("alpha.play", wallet, wallet);
 
         vm.prank(wallet);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.transfer("alpha.vee", address(0));
+        registry.transfer("alpha.play", address(0));
 
-        (address owner,) = registry.records(keccak256(bytes("alpha.vee")));
+        (address owner,) = registry.records(keccak256(bytes("alpha.play")));
         assertEq(owner, wallet, "ownership moved despite the revert");
     }
 
     function test_AReleasedNameCannotBeReclaimed() public {
         vm.prank(treasury);
-        registry.registerFor("alpha.vee", wallet, wallet);
+        registry.registerFor("alpha.play", wallet, wallet);
 
         vm.prank(wallet);
         vm.expectRevert(NameRegistry.ZeroAddress.selector);
-        registry.transfer("alpha.vee", address(0));
+        registry.transfer("alpha.play", address(0));
 
         // The name is still taken, so even the registrar cannot re-take it.
         vm.prank(treasury);
         vm.expectRevert(NameRegistry.NameTaken.selector);
-        registry.register("alpha.vee", attacker);
+        registry.register("alpha.play", attacker);
     }
 
     // --- deployment ----------------------------------------------------
@@ -124,12 +124,12 @@ contract NameRegistryZeroAddressTest is Test {
     /// `_register(name, target, target)` survives a suite that never varies it.
     function test_RegisterMakesTheCallerTheOwnerEvenForAForeignTarget() public {
         vm.prank(treasury);
-        registry.register("pointer.vee", wallet);
+        registry.register("pointer.play", wallet);
 
-        (address owner, address target) = registry.records(keccak256(bytes("pointer.vee")));
+        (address owner, address target) = registry.records(keccak256(bytes("pointer.play")));
         assertEq(owner, treasury, "the caller must be the owner, not the target");
         assertEq(target, wallet);
-        assertEq(registry.resolve("pointer.vee"), wallet);
+        assertEq(registry.resolve("pointer.play"), wallet);
         // Forward-only: see NameRegistryReverseControlTest for the full rule.
         assertEq(registry.reverseOf(wallet), "", "the permissionless path wrote a primary name");
     }

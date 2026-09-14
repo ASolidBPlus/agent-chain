@@ -42,8 +42,8 @@ contract NameRegistryPropertiesTest is Test {
     }
 
     /// Every byte value, checked against an independent statement of the rule.
-    /// Uppercase is in the allowed set deliberately: `aIpha.vee` against
-    /// `alpha.vee` is a game mechanic, and a charset that rejected the capital
+    /// Uppercase is in the allowed set deliberately: `aIpha.play` against
+    /// `alpha.play` is a game mechanic, and a charset that rejected the capital
     /// would make it unregistrable (spec S3.2, ruled).
     function testFuzz_CharsetAcceptsExactlyTheAllowedBytes(uint8 raw) public {
         NameRegistry registry = new NameRegistry(treasury);
@@ -136,6 +136,6 @@ contract NameRegistryPropertiesTest is Test {
 
         vm.prank(caller);
         vm.expectRevert();
-        registry.registerFor("someone.vee", wallet, wallet);
+        registry.registerFor("someone.play", wallet, wallet);
     }
 }
