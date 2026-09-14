@@ -69,20 +69,20 @@ sequenceDiagram
   participant S as chain-svc
   participant C as Chain
   participant H as Event sink
-  A->>W: send(to: "seller", amount: "5", intent_id)
-  W->>S: POST /sign-transfer (wallet token)
-  S->>S: resolve "seller" → address
+  A->>W: send to "seller", amount 5, intent_id
+  W->>S: POST /sign-transfer with the wallet token
+  S->>S: resolve "seller" to an address
   S->>S: policy: frozen? over cap? intent already used?
   alt refused
-    S-->>W: {error: <one of a closed set>}
-    W-->>A: {ok: false, reason}
+    S-->>W: error, one of a closed set of reasons
+    W-->>A: ok false, with the reason
   else allowed
-    S->>S: sign with the agent's own key, fee 0
-    S->>C: transferWithIntent(to, 5, intentId)
-    C-->>S: mined; Transfer + IntentTransfer logs
-    S-->>W: {txHash}
-    W-->>A: {ok: true, txHash}
-    S->>H: event {transfer, from, to, amount, intent_id}
+    S->>S: sign with the agent's own key, fee zero
+    S->>C: transferWithIntent to, 5, intentId
+    C-->>S: mined, with Transfer and IntentTransfer logs
+    S-->>W: txHash
+    W-->>A: ok true, with txHash
+    S->>H: event transfer (from, to, amount, intent_id)
   end
 ```
 
