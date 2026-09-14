@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "modules": [
+    { "kind": "names", "tld": "play" }
+  ]
+}
