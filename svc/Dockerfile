@@ -1,8 +1,8 @@
 # chain-svc: treasury, spawn, resolver and the chain event tail.
 #
 # Bun rather than node, and pinned by digest as well as tag. The build context
-# is the REPO ROOT, not this directory: chain/svc is a bun workspace member and
-# the lockfile lives at the root, so `--frozen-lockfile` is only possible from
+# is the REPO ROOT, not this directory: svc is a bun workspace member and the
+# lockfile lives at the root, so `--frozen-lockfile` is only possible from
 # there. Spec S7 writes `build: ./svc`, which would install unpinned.
 #
 # There is deliberately NO Foundry in this image. S7 had chain-svc run the
@@ -16,11 +16,11 @@ WORKDIR /app
 
 # Dependencies first, so a source-only change does not reinstall them.
 COPY package.json bun.lock ./
-COPY chain/svc/package.json chain/svc/package.json
+COPY svc/package.json svc/package.json
 RUN bun install --frozen-lockfile --ignore-scripts
 
-COPY chain/svc chain/svc
-WORKDIR /app/chain/svc
+COPY svc svc
+WORKDIR /app/svc
 
 # A named volume inherits the ownership of the image directory it is mounted
 # over, so these must exist and belong to the runtime user before the volume is

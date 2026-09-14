@@ -3,7 +3,7 @@
 # deploys, runs chain-svc, and checks /supply, /resolve, /balance and the auth
 # refusals. Needs Docker and Foundry, so it cannot run in the repo's CI - run it
 # by hand and paste the output into the PR:
-#   ./chain/svc/scripts/verify-reads.sh
+#   ./svc/scripts/verify-reads.sh
 set -euo pipefail
 
 IMAGE=${IMAGE:-powerout-anvil:dev}
@@ -41,7 +41,7 @@ done
 echo "health: $(docker inspect -f '{{.State.Health.Status}}' "$NAME")"
 
 step "deploy"
-# The real chain/deployments dir, not a temp one: foundry's fs_permissions
+# The real deployments dir, not a temp one: foundry's fs_permissions
 # deliberately scopes writes to ../deployments, so a temp path is refused.
 # local.json is gitignored, so this leaves no tracked artefact behind.
 DEPLOYMENTS="$CONTRACTS/../deployments"

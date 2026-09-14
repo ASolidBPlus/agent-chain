@@ -2,7 +2,7 @@
 # Runnable evidence for spec S8 criteria 3, 7, 8 and the chain-svc half of 9:
 # spawn, aliases, transfers, memos, retirement. Needs Docker and Foundry, so it
 # cannot run in the repo's CI - run it by hand and paste the output:
-#   ./chain/svc/scripts/verify-money.sh
+#   ./svc/scripts/verify-money.sh
 set -euo pipefail
 
 IMAGE=${IMAGE:-powerout-anvil:dev}

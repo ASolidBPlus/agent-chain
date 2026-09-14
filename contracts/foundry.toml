@@ -7,8 +7,8 @@ libs = ["lib"]
 
 # Dependencies are git submodules pinned in foundry.lock. A plain `git clone`
 # of mesh-agent does NOT fetch them and `forge test` will fail on the imports:
-#   git submodule update --init --recursive chain/contracts/lib
-# Nothing outside chain/ needs them - `bun test` is unaffected either way.
+#   git submodule update --init --recursive contracts/lib
+# Nothing outside contracts/ needs them - `bun test` is unaffected either way.
 
 # Pinned deliberately (spec S3.2): an exact solc and a fixed EVM version so a
 # rebuild months from now produces the same bytecode as the one that was
@@ -19,7 +19,8 @@ optimizer = true
 optimizer_runs = 200
 
 # Deploy.s.sol writes deployments/local.json, which lives outside this package
-# (spec S1 puts it at chain/deployments/). DEPLOYMENTS_DIR overrides the path;
+# (spec S1 puts it at chain/deployments/; here it is deployments/ at the repo
+# root). DEPLOYMENTS_DIR overrides the path;
 # compose points it at /deployments.
 fs_permissions = [{ access = "read-write", path = "../deployments" }]
 

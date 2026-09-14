@@ -73,7 +73,7 @@ export function readPolicy(path: string): WalletPolicy | null {
 /// pattern the boundary reads as a literal.
 ///
 /// The trailing-star form was added with chain-svc's (ruled 06:15). If you
-/// change one of these, change both; `chain/svc/test/policy.test.ts` asserts
+/// change one of these, change both; `svc/test/policy.test.ts` asserts
 /// they agree across allow AND deny.
 ///
 /// Validation of malformed patterns lives in chain-svc, which WRITES this file.
