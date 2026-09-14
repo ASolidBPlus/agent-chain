@@ -734,12 +734,19 @@ export class Store {
     topic: string;
     txHash: string;
     from: string | null;
-    /// Whether the contract that emitted this is the DEFAULT token. Required
-    /// rather than defaulted: this increment issues intents for the default
-    /// token only, so an emission from any other instance quoting one of our
-    /// ids is an anomaly, and a parameter with a default would let a new caller
-    /// silently claim it was the default token.
-    isDefaultToken: boolean;
+    /// Whether the contract that emitted this is the one THIS INTENT WAS ISSUED
+    /// FOR. Required rather than defaulted, so a new caller cannot silently
+    /// claim it was.
+    ///
+    /// RENAMED FROM `isDefaultToken` BY THE CALL INCREMENT, and the rename is
+    /// the whole change - the meaning was always this one, and "the default
+    /// token" was merely the only expected emitter there could be while every
+    /// intent was a transfer. Now an intent may be a CALL, and its expected
+    /// emitter is the contract it was reserved for. The caller computes it
+    /// (events.ts), because only the caller knows the registry; `foreign_token`
+    /// keeps its name because the meaning is unchanged: an emission from a
+    /// contract other than the one this intent was issued for.
+    isExpectedEmitter: boolean;
   }): {
     anomalous: boolean;
     /// `repeat_emission` - two or more for one intent; `foreign_sender` - an
@@ -754,7 +761,7 @@ export class Store {
     emissions: number;
     transfers: Array<{ txHash: string; from: string | null }>;
   } | null {
-    const { topic, txHash, from, isDefaultToken } = args;
+    const { topic, txHash, from, isExpectedEmitter } = args;
     const apply = this.db.transaction(() => {
       const intent = this.db
         .query(`SELECT intent_id, agent_id, emissions, first_tx, first_from, id_source FROM intents WHERE topic = ?`)
@@ -782,12 +789,13 @@ export class Store {
       //
       //   - after `!intent`, so an emission under an id THIS STORE NEVER
       //     RESERVED is not an anomaly. Every ordinary transfer of a second
-      //     token would otherwise be one.
+      //     token - and now every event of every registered contract - would
+      //     otherwise be one.
       //   - after the first-tx and intent_anomalies dedupes, so one foreign
       //     emission is reported ONCE rather than on every poll that sees it.
       //   - before the emissions count, so it is flagged whether or not this is
       //     the first sighting of the id.
-      if (!isDefaultToken) {
+      if (!isExpectedEmitter) {
         this.db
           .query(`INSERT INTO intent_anomalies (topic, tx_hash, from_addr, seen_at) VALUES (?, ?, ?, ?)`)
           .run(topic, txHash, from, Date.now());
@@ -928,6 +936,20 @@ export class Store {
       firstFrom: r.first_from,
       reservedAtBlock: r.reserved_at_block === null ? null : BigInt(r.reserved_at_block),
     }));
+  }
+
+  /// WHICH CONTRACT an intent was reserved for, found by the topic the chain
+  /// logs rather than by the intent id.
+  ///
+  /// The event tail only ever holds a topic - `keccak256(intentId)` is what
+  /// goes into the calldata and comes back in the log - so a lookup by id
+  /// cannot serve it. Null means "a transfer intent, or none of ours", and the
+  /// caller separates those by whether it found an intent at all.
+  callContractForTopic(topic: string): string | null {
+    const row = this.db
+      .query(`SELECT call_contract FROM intents WHERE topic = ?`)
+      .get(topic) as { call_contract: string | null } | null;
+    return row?.call_contract ?? null;
   }
 
   /// Which wallet reserved the intent the chain logged under this topic, for

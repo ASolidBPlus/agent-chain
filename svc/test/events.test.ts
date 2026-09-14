@@ -9,6 +9,32 @@ import { spendVia } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import type { Chain } from '../src/chain.ts';
 import type { Config } from '../src/config.ts';
+import type { Abi } from 'viem';
+
+/// Fills the FLAT REGISTRY VIEW in from the typed slots a fixture declares.
+///
+/// Derived rather than written at each fixture, for the reason the flat view
+/// exists: `buildModules` produces both from one manifest pass, so a fixture
+/// that supplied them independently could describe a deployment that cannot
+/// happen. The generic event pass reads `contracts`; everything above it reads
+/// the typed slots; and a fixture must be able to satisfy both without saying
+/// the same thing twice.
+function withRegistry(modules: Record<string, unknown>): Record<string, unknown> {
+  const entries: Array<Record<string, unknown>> = [];
+  for (const t of (modules.tokens as Array<Record<string, unknown>>) ?? []) {
+    entries.push({ key: t.key, kind: 'token', name: 'Token', address: t.address, abi: [] });
+  }
+  const names = modules.names as Record<string, unknown> | undefined;
+  if (names) {
+    entries.push({ key: 'names', kind: 'names', name: 'NameRegistry', address: names.address, abi: [] });
+  }
+  return {
+    ...modules,
+    contracts: (modules.contracts as unknown[]) ?? entries,
+    byKey: (modules.byKey as Map<string, unknown>) ?? new Map(entries.map((e) => [e.key as string, e])),
+  };
+}
+
 
 async function sink(handler: (body: string) => number): Promise<{ url: string; received: string[]; close: () => void }> {
   const received: string[] = [];
@@ -36,8 +62,17 @@ function chainAt(
   logs: Array<{ args: { intentId: string; from?: string }; transactionHash: string }>,
 ): Chain {
   return {
-    deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
+    deployment: {},
+    modules: withRegistry({
+      tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+      names: { address: '0xreg', tld: 'play' },
+    }),
     publicClient: {
+      // The generic pass (§5) reads every registered address in one query. An
+      // empty answer is what these fixtures mean: they are about the NAMED
+      // passes, and a fixture that omitted this would fail on a call it does
+      // not care about.
+      getLogs: async () => [],
       getBlockNumber: async () => block,
       getContractEvents: async ({ eventName }: { eventName: string }) =>
         eventName === 'IntentTransfer' ? logs : [],
@@ -205,6 +240,11 @@ describe('a hung sink cannot exhaust the service', () => {
     let maxInFlight = 0;
     const slowChain = {
       publicClient: {
+        // The generic pass (§5) reads every registered address in one query. An
+        // empty answer is what these fixtures mean: they are about the NAMED
+        // passes, and a fixture that omitted this would fail on a call it does
+        // not care about.
+        getLogs: async () => [],
         getBlockNumber: async () => {
           inFlight++;
           maxInFlight = Math.max(maxInFlight, inFlight);
@@ -237,8 +277,17 @@ describe('the intent anomaly', () => {
     intentLogs: Array<{ args: { intentId: string; from: string }; transactionHash: string }>,
   ): Chain {
     return {
-      deployment: {}, modules: { tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }], names: { address: '0xreg', tld: 'play' } },
+      deployment: {},
+    modules: withRegistry({
+      tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+      names: { address: '0xreg', tld: 'play' },
+    }),
       publicClient: {
+        // The generic pass (§5) reads every registered address in one query. An
+        // empty answer is what these fixtures mean: they are about the NAMED
+        // passes, and a fixture that omitted this would fail on a call it does
+        // not care about.
+        getLogs: async () => [],
         getBlockNumber: async () => 1n,
         getContractEvents: async ({ eventName }: { eventName: string }) =>
           eventName === 'IntentTransfer' ? intentLogs : [],
@@ -653,7 +702,7 @@ describe('sweepOnce', () => {
   it('confirms an intent whose transfer landed, and KEEPS the hold', async () => {
     const { store, tail } = seeded();
     reserve(store, 'landed', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isExpectedEmitter: true });
     store.setCursor('chain-log-tail', 9n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
@@ -668,7 +717,7 @@ describe('sweepOnce', () => {
   it('does NOT confirm an emission from a foreign sender', async () => {
     const { store, tail } = seeded();
     reserve(store, 'foreign', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE', isDefaultToken: true });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: '0xSOMEONEELSE', isExpectedEmitter: true });
     store.setCursor('chain-log-tail', 9n);
 
     const result = await tail.sweepOnce();
@@ -808,7 +857,7 @@ describe('sweepOnce', () => {
     // so if it were swept it would be confirmed, which is how we can tell the
     // difference between "skipped" and "nothing to do".
     reserve(store, 'old-stage', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isExpectedEmitter: true });
 
     store.setStage('run-2');
 
@@ -817,7 +866,7 @@ describe('sweepOnce', () => {
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
       stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
     });
-    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET, isDefaultToken: true });
+    store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET, isExpectedEmitter: true });
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
 
@@ -856,7 +905,7 @@ describe('sweepOnce', () => {
   it('a terminal intent keeps its id consumed and answers with its outcome', async () => {
     const { store, tail } = seeded();
     reserve(store, 'terminal', 1n);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isExpectedEmitter: true });
     await tail.sweepOnce();
 
     // Terminal status, from the store rather than a chain call.
@@ -888,7 +937,7 @@ describe('sweepOnce', () => {
   it('still COMPLETES a row with no bound when its transfer landed', async () => {
     const { store, tail } = seeded();
     reserve(store, 'unbounded-landed', undefined);
-    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isDefaultToken: true });
+    store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isExpectedEmitter: true });
 
     expect((await tail.sweepOnce()).confirmed).toBe(1);
     expect(store.intentTxHash('unbounded-landed')).toBe('0xaaa');
@@ -974,8 +1023,13 @@ describe('the poll asks exactly what the deployment has', () => {
   function recordingChain(modules: Record<string, unknown>): { chain: Chain; calls: Call[] } {
     const calls: Call[] = [];
     const chain = {
-      modules,
+      modules: withRegistry(modules),
       publicClient: {
+        // The generic pass (§5) reads every registered address in one query. An
+        // empty answer is what these fixtures mean: they are about the NAMED
+        // passes, and a fixture that omitted this would fail on a call it does
+        // not care about.
+        getLogs: async () => [],
         getBlockNumber: async () => 5n,
         getContractEvents: async ({ address, eventName }: Call) => {
           calls.push({ address, eventName });
@@ -1036,8 +1090,13 @@ describe('the poll asks exactly what the deployment has', () => {
 describe('a token event names its token', () => {
   function chainWithTransfer(modules: Record<string, unknown>, from: string, value: bigint): Chain {
     return {
-      modules,
+      modules: withRegistry(modules),
       publicClient: {
+        // The generic pass (§5) reads every registered address in one query. An
+        // empty answer is what these fixtures mean: they are about the NAMED
+        // passes, and a fixture that omitted this would fail on a call it does
+        // not care about.
+        getLogs: async () => [],
         getBlockNumber: async () => 5n,
         getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
           eventName === 'Transfer' && address === '0xplay'
@@ -1077,8 +1136,13 @@ describe('an IntentTransfer from a token we did not issue for', () => {
 
   function chainEmitting(from: string, txHash: string): Chain {
     return {
-      modules: { tokens: [PLAY, GOLD] },
+      modules: withRegistry({ tokens: [PLAY, GOLD] }),
       publicClient: {
+        // The generic pass (§5) reads every registered address in one query. An
+        // empty answer is what these fixtures mean: they are about the NAMED
+        // passes, and a fixture that omitted this would fail on a call it does
+        // not care about.
+        getLogs: async () => [],
         getBlockNumber: async () => 5n,
         getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
           address === '0xgold' && eventName === 'IntentTransfer'
@@ -1145,6 +1209,252 @@ describe('an IntentTransfer from a token we did not issue for', () => {
       .map((e) => JSON.parse(e.payload as unknown as string) as { kind: string })
       .filter((p) => p.kind === 'chain.anomaly');
     expect(anomalies).toHaveLength(0);
+    store.close();
+  });
+});
+
+// §5 / §8.5. GENERIC EVENT DECODING, for every registered contract.
+//
+// The named passes above carry the shapes the game already reads - amounts at
+// the token's decimals, the anomaly detector's joins. This pass carries
+// EVERYTHING ELSE, so a custom contract's events reach the feed without anyone
+// adding a query for them, which is the whole of "a new on-chain feature is a
+// contract, a manifest entry and a policy entry".
+//
+// The two overlap on purpose, and what makes the overlap safe is that it is
+// removed by (address, eventName) rather than by name: a custom contract is
+// entitled to declare its own `Transfer`, and filtering by name alone would
+// swallow it silently.
+describe('generic decoding', () => {
+  const CONVERTER = '0xconv';
+  const CONVERTED_TOPIC = '0x1111111111111111111111111111111111111111111111111111111111111111';
+  const INTENT = `0x${'cd'.repeat(32)}`;
+
+  /// The Converter's `Converted(address,address,uint256,uint256,bytes32)`, in
+  /// the ABI shape viem decodes against.
+  const CONVERTER_ABI = [
+    {
+      type: 'event',
+      name: 'Converted',
+      inputs: [
+        { type: 'address', name: 'source', indexed: false },
+        { type: 'uint256', name: 'amountIn', indexed: false },
+        { type: 'bytes32', name: 'intentId', indexed: false },
+      ],
+    },
+  ];
+
+  /// A chain whose generic getLogs returns `logs`, and whose named passes
+  /// return nothing. The decode is real - viem's parseEventLogs against the
+  /// fixture ABI - so a log this test says is decodable actually is.
+  function chainWithLogs(logs: unknown[], modules?: Record<string, unknown>): Chain {
+    return {
+      deployment: {},
+      modules: withRegistry(
+        modules ?? {
+          tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+          contracts: [
+            { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] },
+            { key: 'converter', kind: 'converter', name: 'Converter', address: CONVERTER, abi: CONVERTER_ABI },
+          ],
+          byKey: new Map<string, unknown>([
+            ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: [] }],
+            [
+              'converter',
+              { key: 'converter', kind: 'converter', name: 'Converter', address: CONVERTER, abi: CONVERTER_ABI },
+            ],
+          ]),
+        },
+      ),
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async () => [],
+        getLogs: async () => logs,
+      },
+    } as unknown as Chain;
+  }
+
+  const payloads = (store: Store) =>
+    store.dueEvents(20).map((e) => JSON.parse(e.payload as unknown as string) as Record<string, unknown>);
+
+  /// One real `Converted` log, encoded the way the chain would.
+  function convertedLog(overrides: Record<string, unknown> = {}) {
+    const { encodeEventTopics, encodeAbiParameters } = require('viem') as typeof import('viem');
+    return {
+      address: CONVERTER,
+      topics: encodeEventTopics({ abi: CONVERTER_ABI as unknown as Abi, eventName: 'Converted' }),
+      data: encodeAbiParameters(
+        [
+          { type: 'address', name: 'source' },
+          { type: 'uint256', name: 'amountIn' },
+          { type: 'bytes32', name: 'intentId' },
+        ],
+        ['0x000000000000000000000000000000000000dEaD', 40n, INTENT as `0x${string}`],
+      ),
+      blockNumber: 3n,
+      transactionHash: '0xtx1',
+      logIndex: 0,
+      ...overrides,
+    };
+  }
+
+  it('enqueues a chain.event for a registered contract log', async () => {
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+
+    const event = payloads(store).find((p) => p.kind === 'chain.event')!;
+    expect(event.contract).toBe('converter');
+    expect(event.event).toBe('Converted');
+    // Stringified, because a bigint has no JSON form and the outbox is JSON.
+    expect((event.args as Record<string, unknown>).amountIn).toBe('40');
+    expect((event.args as Record<string, unknown>).intentId).toBe(INTENT);
+    store.close();
+  });
+
+  it('does not double-report an event the named passes already emit', async () => {
+    // A token's Transfer is carried by the named pass, with its amount
+    // formatted at the token's decimals. The generic pass sees the same log
+    // and must leave it alone - by (address, event), not by event name.
+    const store = new Store(':memory:');
+    const TOKEN_ABI = [
+      {
+        type: 'event',
+        name: 'Transfer',
+        inputs: [
+          { type: 'address', name: 'from', indexed: true },
+          { type: 'address', name: 'to', indexed: true },
+          { type: 'uint256', name: 'value', indexed: false },
+        ],
+      },
+    ];
+    const { encodeEventTopics, encodeAbiParameters } = await import('viem');
+    const transfer = {
+      address: '0xvee',
+      topics: encodeEventTopics({
+        abi: TOKEN_ABI as unknown as Abi,
+        eventName: 'Transfer',
+        args: {
+          from: '0x000000000000000000000000000000000000aaaa',
+          to: '0x000000000000000000000000000000000000BbBB',
+        },
+      }),
+      data: encodeAbiParameters([{ type: 'uint256', name: 'value' }], [1n]),
+      blockNumber: 3n,
+      transactionHash: '0xtx2',
+      logIndex: 0,
+    };
+    const chain = chainWithLogs([transfer], {
+      tokens: [{ key: 'play', address: '0xvee', symbol: 'PLAY', decimals: 18 }],
+      contracts: [{ key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: TOKEN_ABI }],
+      byKey: new Map<string, unknown>([
+        ['play', { key: 'play', kind: 'token', name: 'Token', address: '0xvee', abi: TOKEN_ABI }],
+      ]),
+    });
+    await new EventTail({} as Config, chain, store).pollOnce();
+
+    expect(payloads(store).filter((p) => p.kind === 'chain.event')).toHaveLength(0);
+    store.close();
+  });
+
+  it('reports an undecodable log with event: null and its raw topics', async () => {
+    // `parseEventLogs` DROPS a log matching no event in the ABI it was given -
+    // measured - which is right for "belongs to another contract" and wrong for
+    // "this contract emitted something its ABI does not declare". Only a diff
+    // separates them, so the leftover is reported rather than silently lost.
+    const store = new Store(':memory:');
+    const mystery = {
+      address: CONVERTER,
+      topics: [CONVERTED_TOPIC],
+      data: '0x',
+      blockNumber: 3n,
+      transactionHash: '0xtx3',
+      logIndex: 7,
+    };
+    await new EventTail({} as Config, chainWithLogs([mystery]), store).pollOnce();
+
+    const event = payloads(store).find((p) => p.kind === 'chain.event')!;
+    expect(event.event).toBeNull();
+    expect(event.contract).toBe('converter');
+    expect(event.topics).toEqual([CONVERTED_TOPIC]);
+    store.close();
+  });
+
+  it('resolves a call intent from a Converted emission, and does not call it foreign', async () => {
+    // §5's second feeder for the anomaly detector: an event carrying a bytes32
+    // named `intentId` is recorded exactly as an IntentTransfer is. The
+    // expected emitter for a CALL intent is the contract it was reserved for -
+    // which is what `isDefaultToken` could not express and `isExpectedEmitter`
+    // does.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'call-1',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 0n,
+      capWei: null,
+      call: { contract: 'converter', function: 'convert', argsHash: 'h' },
+    });
+
+    await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+
+    const anomalies = payloads(store).filter((p) => p.kind === 'chain.anomaly');
+    expect(anomalies).toHaveLength(0);
+    store.close();
+  });
+
+  it('calls it foreign when the emission comes from a contract the intent was not issued for', async () => {
+    // The same emission, under an intent reserved for a DIFFERENT contract. The
+    // reason keeps the name `foreign_token` because the meaning is unchanged -
+    // an emission from a contract other than the one this intent was issued
+    // for - and only the parameter that computes it was renamed.
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000aaaa', 'agent');
+    store.reserve({
+      intentId: 'call-2',
+      topic: INTENT,
+      agentId: 'orch:a',
+      stage: store.currentStage(),
+      amount: 0n,
+      capWei: null,
+      call: { contract: 'play', function: 'transfer', argsHash: 'h' },
+    });
+
+    await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+
+    const anomaly = payloads(store).find((p) => p.kind === 'chain.anomaly')!;
+    expect(anomaly.reason).toBe('foreign_token');
+    store.close();
+  });
+
+  it('says nothing about an event under an id this store never reserved', async () => {
+    // Every event of every registered contract passes through the detector now,
+    // so "not ours" must stay silent or the feed becomes noise the moment a
+    // custom contract emits anything.
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chainWithLogs([convertedLog()]), store).pollOnce();
+    expect(payloads(store).filter((p) => p.kind === 'chain.anomaly')).toHaveLength(0);
+    store.close();
+  });
+
+  it('issues no generic query at all on a deployment with nothing registered', async () => {
+    let asked = false;
+    const chain = {
+      deployment: {},
+      modules: { tokens: [], contracts: [], byKey: new Map() },
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async () => [],
+        getLogs: async () => {
+          asked = true;
+          return [];
+        },
+      },
+    } as unknown as Chain;
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chain, store).pollOnce();
+    expect(asked).toBe(false);
     store.close();
   });
 });
