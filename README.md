@@ -6,9 +6,8 @@ with nothing reaching a public network. One `docker compose` profile brings up:
 
 - **`chain`** — a single-node [Anvil](https://github.com/foundry-rs/foundry) node
   (chain id 31337), loopback only, zero gas, state persisted to a volume.
-- **`chain-deploy`** — a one-shot Foundry script that reads the deployment's
-  manifest, deploys the modules it asks for, and writes their addresses to
-  `deployments/local.json`.
+- **`chain-deploy`** — a one-shot Foundry script that deploys the contracts and
+  writes their addresses to `deployments/local.json`.
 - **`chain-svc`** — the only process that holds keys. It custodies one key per
   wallet plus the treasury, applies policy (per-wallet caps, allow/deny lists,
   freezes, idempotent intents), signs and sends, and publishes every transfer,
@@ -18,23 +17,24 @@ with nothing reaching a public network. One `docker compose` profile brings up:
   an agent runs to hold and spend by *name*, never by address. It keeps no key
   and maps every refusal onto a short, closed set of reasons an agent may see.
 
-## How the pieces fit
+## How the pieces fit (the design; nodes marked *next* land with the next release)
 
 ```mermaid
 flowchart LR
   subgraph deploy["Deployment (per project)"]
-    M["deployments/manifest.json<br/>which modules, named here"]
+    M["deployments/manifest.json (next)<br/>which modules, named here"]
     D["chain-deploy<br/>one-shot forge script"]
     L["deployments/local.json<br/>what is on the chain"]
-    M --> D --> L
+    M -.-> D --> L
   end
   subgraph chain["Chain (Anvil, private, zero gas)"]
-    T1["Token A<br/>ERC-20 named at deploy"]
-    T2["Token B<br/>(optional, more instances)"]
+    T1["Token A (next)<br/>ERC-20 named at deploy"]
+    T2["Token B (next)<br/>optional, more instances"]
     N["NameRegistry<br/>name → address (optional)"]
-    X["Custom contracts<br/>(optional)"]
+    X["Custom contracts (next)<br/>optional"]
   end
-  D -- deploys --> T1 & T2 & N & X
+  D -- deploys --> N
+  D -. deploys .-> T1 & T2 & X
   subgraph svc["chain-svc (sole key holder)"]
     P["policy: caps, allow/deny,<br/>freezes, intents"]
     K["keystore: treasury +<br/>one key per wallet"]
@@ -86,9 +86,11 @@ sequenceDiagram
   end
 ```
 
-The agent never sees an address or a key. The intent id makes the payment
-idempotent: the same id can never pay twice, and the operator can check any
-claimed payment in one call.
+The agent never sees an address or a key. The intent id is the idempotency key
+on the service side: chain-svc refuses a second send under the same id, and the
+operator can check any claimed payment in one call. The contract itself records
+the id in its event and deliberately does not deduplicate, so a second emission
+under one id (from anywhere) is visible as an anomaly rather than suppressed.
 
 ## Layout
 
