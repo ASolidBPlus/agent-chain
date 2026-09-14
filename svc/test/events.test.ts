@@ -957,3 +957,110 @@ describe('start() schedules the sweep', () => {
     store.close();
   }, 20_000);
 });
+
+// §8.7. WHICH QUERIES A POLL ISSUES, per deployment shape.
+//
+// The poll used to name two fixed addresses. It now builds its query list from
+// the module view, and the property worth pinning is not "does it find events"
+// but "does it ask the right contracts, and only those" - a names-less
+// deployment issuing a Registered query against a registry that is not there
+// would fail as a chain error with nothing naming the cause.
+describe('the poll asks exactly what the deployment has', () => {
+  interface Call {
+    address: string;
+    eventName: string;
+  }
+
+  function recordingChain(modules: Record<string, unknown>): { chain: Chain; calls: Call[] } {
+    const calls: Call[] = [];
+    const chain = {
+      modules,
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: Call) => {
+          calls.push({ address, eventName });
+          return [];
+        },
+      },
+    } as unknown as Chain;
+    return { chain, calls };
+  }
+
+  const TOKEN_A = { key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 };
+  const TOKEN_B = { key: 'gold', address: '0xgold', symbol: 'GOLD', decimals: 18 };
+  const NAMES = { address: '0xreg', tld: 'play' };
+
+  async function poll(modules: Record<string, unknown>): Promise<Call[]> {
+    const { chain, calls } = recordingChain(modules);
+    const store = new Store(':memory:');
+    await new EventTail({} as Config, chain, store).pollOnce();
+    store.close();
+    return calls;
+  }
+
+  it('token and names: one pair for the token, one Registered', async () => {
+    const calls = await poll({ tokens: [TOKEN_A], names: NAMES });
+    expect(calls).toEqual([
+      { address: '0xplay', eventName: 'Transfer' },
+      { address: '0xplay', eventName: 'IntentTransfer' },
+      { address: '0xreg', eventName: 'Registered' },
+    ]);
+  });
+
+  it('token only: no Registered query at all', async () => {
+    const calls = await poll({ tokens: [TOKEN_A] });
+    expect(calls.map((c) => c.eventName)).toEqual(['Transfer', 'IntentTransfer']);
+    expect(calls.some((c) => c.address === '0xreg')).toBe(false);
+  });
+
+  it('names only: no token queries at all', async () => {
+    const calls = await poll({ tokens: [], names: NAMES });
+    expect(calls).toEqual([{ address: '0xreg', eventName: 'Registered' }]);
+  });
+
+  // A SECOND TOKEN IS POLLED BY THE SAME CODE AS THE FIRST. This is the case
+  // the fixed-address version could not express at all.
+  it('two tokens: a pair each, in manifest order', async () => {
+    const calls = await poll({ tokens: [TOKEN_A, TOKEN_B], names: NAMES });
+    expect(calls).toEqual([
+      { address: '0xplay', eventName: 'Transfer' },
+      { address: '0xplay', eventName: 'IntentTransfer' },
+      { address: '0xgold', eventName: 'Transfer' },
+      { address: '0xgold', eventName: 'IntentTransfer' },
+      { address: '0xreg', eventName: 'Registered' },
+    ]);
+  });
+});
+
+// §4.9's additive field, and the anomaly a second token produces.
+describe('a token event names its token', () => {
+  function chainWithTransfer(modules: Record<string, unknown>, from: string, value: bigint): Chain {
+    return {
+      modules,
+      publicClient: {
+        getBlockNumber: async () => 5n,
+        getContractEvents: async ({ address, eventName }: { address: string; eventName: string }) =>
+          eventName === 'Transfer' && address === '0xplay'
+            ? [{ args: { from, to: '0xdst', value }, transactionHash: '0xtx' }]
+            : [],
+      },
+    } as unknown as Chain;
+  }
+
+  it('carries the symbol of the token that emitted it', async () => {
+    const store = new Store(':memory:');
+    const chain = chainWithTransfer(
+      { tokens: [{ key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 }] },
+      '0xsrc',
+      10n ** 18n,
+    );
+    await new EventTail({} as Config, chain, store).pollOnce();
+
+    const [event] = store.dueEvents(10);
+    const payload = JSON.parse(event?.payload as unknown as string) as { token: string; vee: string };
+    expect(payload.token).toBe('PLAY');
+    // Formatted at the TOKEN'S scale, not at a literal 18.
+    expect(payload.vee).toBe('1');
+    store.close();
+  });
+});
