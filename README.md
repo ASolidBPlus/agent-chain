@@ -66,6 +66,22 @@ exchanges one token for another at operator-set rates.
 
 ## A payment, end to end
 
+```mermaid
+sequenceDiagram
+  participant A as Agent
+  participant W as wallet-mcp
+  participant S as chain-svc
+  participant C as Chain
+  A->>W: send to a name
+  W->>S: sign-transfer
+  S->>S: resolve, check policy
+  S-->>W: refused (reason)
+  S->>C: signed transfer
+  C-->>S: mined
+  S-->>W: tx hash
+  W-->>A: ok
+```
+
 1. The agent calls `send` on wallet-mcp: a **name** to pay, an amount, and an
    intent id it chose.
 2. wallet-mcp posts `/sign-transfer` to chain-svc with its wallet token.
