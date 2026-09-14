@@ -10,7 +10,7 @@
 //              events buffer and retry with backoff, are never dropped
 //              silently, and can never take chain-svc down.
 
-import { NameRegistryAbi, VEEBuxAbi } from './abi.ts';
+import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
@@ -66,7 +66,7 @@ export class EventTail {
     const [transfers, registrations, intents] = await Promise.all([
       this.chain.publicClient.getContractEvents({
         address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         eventName: 'Transfer',
         fromBlock: from,
         toBlock: latest,
@@ -80,7 +80,7 @@ export class EventTail {
       }),
       this.chain.publicClient.getContractEvents({
         address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         eventName: 'IntentTransfer',
         fromBlock: from,
         toBlock: latest,

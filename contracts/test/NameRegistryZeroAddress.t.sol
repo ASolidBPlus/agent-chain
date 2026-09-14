@@ -3,7 +3,7 @@ pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
-import {VEEBux} from "../src/VEEBux.sol";
+import {Token} from "../src/Token.sol";
 
 /// @title The zero-address sentinel paths (sec-reviewer-2, finding 2).
 /// @notice address(0) is not a neutral value in this contract: a record whose
@@ -100,7 +100,7 @@ contract NameRegistryZeroAddressTest is Test {
     /// after balances exist means abandoning them.
     ///
     /// ONE DEPLOYMENT PER TEST, deliberately. The first version asserted both
-    /// in a single test with two vm.expectRevert calls, and the VEEBux guard's
+    /// in a single test with two vm.expectRevert calls, and the Token guard's
     /// mutant SURVIVED it: the second expectation was not enforced, so removing
     /// the token's zero-admin check changed nothing the suite could see, while
     /// forge coverage reported that branch as 0/1 and was right. Two guards in
@@ -112,8 +112,8 @@ contract NameRegistryZeroAddressTest is Test {
     }
 
     function test_TokenDeployedWithNoAdminIsRefused() public {
-        vm.expectRevert(VEEBux.ZeroAddress.selector);
-        new VEEBux(address(0));
+        vm.expectRevert(Token.ZeroAddress.selector);
+        new Token("x", "X", address(0));
     }
 
     // --- the permissionless path with a foreign target -----------------

@@ -3,7 +3,7 @@ pragma solidity ^0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
-import {VEEBux} from "../src/VEEBux.sol";
+import {Token} from "../src/Token.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
 
 /// @title Deploy - brings up VEE Bux and the name registry on the private chain.
@@ -35,7 +35,7 @@ contract Deploy is Script {
 
         // THE OTHER DIRECTION, and the dangerous one. The guard above handles
         // "local.json survived, chain state was wiped". The reverse - local.json
-        // gone, chain intact - reaches here and would deploy a SECOND VEEBux,
+        // gone, chain intact - reaches here and would deploy a SECOND token,
         // orphaning the first along with every balance in the game. It is not a
         // hypothetical: ./deployments is a bind mount and chain-state is a named
         // volume, so they have independent lifetimes and either can outlive the
@@ -67,7 +67,7 @@ contract Deploy is Script {
                 string.concat(
                     "Deploy: refusing to redeploy. No local.json, but the deployer has already ",
                     "transacted on this chain - a fresh deployment would orphan the existing ",
-                    "VEEBux and every balance in it. Restore deployments/local.json, or wipe the ",
+                    "token and every balance in it. Restore deployments/local.json, or wipe the ",
                     "chain-state volume if this chain really is disposable."
                 )
             );
@@ -77,7 +77,7 @@ contract Deploy is Script {
 
         vm.startBroadcast(deployerKey);
 
-        VEEBux vee = new VEEBux(treasury);
+        Token vee = new Token("VEE Bux", "VEE", treasury);
         NameRegistry registry = new NameRegistry(treasury);
 
         vee.mint(treasury, initialSupply);
@@ -86,13 +86,18 @@ contract Deploy is Script {
         vm.stopBroadcast();
 
         require(vee.hasRole(vee.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
+        // BURNER_ROLE is granted to NOBODY at deploy. AccessControl has no
+        // member enumeration, so "nobody" is asserted against the only two
+        // addresses that could plausibly have been granted it here.
+        require(!vee.hasRole(vee.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
+        require(!vee.hasRole(vee.BURNER_ROLE(), address(this)), "Deploy: script must not hold BURNER_ROLE");
         require(registry.hasRole(registry.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
         require(vee.balanceOf(treasury) == initialSupply, "Deploy: treasury was not seeded");
         require(registry.resolve("treasury.vee") == treasury, "Deploy: treasury.vee does not resolve");
 
         _writeDeployment(dir, path, address(vee), address(registry), treasury);
 
-        console.log("Deploy: VEEBux      ", address(vee));
+        console.log("Deploy: Token       ", address(vee));
         console.log("Deploy: NameRegistry", address(registry));
         console.log("Deploy: treasury    ", treasury);
     }

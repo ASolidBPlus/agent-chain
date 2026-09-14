@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { parseEther, type Address } from 'viem';
 import { writeFile, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { NameRegistryAbi, VEEBuxAbi } from './abi.ts';
+import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
@@ -217,7 +217,7 @@ export class Spawner {
     try {
       const balance = (await this.chain.publicClient.readContract({
         address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [address],
       })) as bigint;
@@ -229,7 +229,7 @@ export class Spawner {
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
         address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transfer',
         args: [address, amount - balance],
         ...ZERO_FEES,

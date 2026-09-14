@@ -101,14 +101,18 @@ MUTANTS = [
      "    function register(string calldata name, address target) external onlyRole(REGISTRAR_ROLE) {",
      "    function register(string calldata name, address target) external {",
      "invariant_OnlyTheRegistrarCanTakeAName"),
-    ("M17", "src/VEEBux.sol", "the token may deploy with no admin (and so never mint)",
+    ("M17", "src/Token.sol", "the token may deploy with no admin (and so never mint)",
      "        if (admin == address(0)) revert ZeroAddress();\n        _grantRole(DEFAULT_ADMIN_ROLE, admin);", 
      "        _grantRole(DEFAULT_ADMIN_ROLE, admin);",
      "test_TokenDeployedWithNoAdminIsRefused"),
-    ("M9", "src/VEEBux.sol", "anyone may mint VEE",
+    ("M9", "src/Token.sol", "anyone may mint",
      "    function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {",
      "    function mint(address to, uint256 amount) external {",
      "test_NonMinterCannotMint"),
+    ("M20", "src/Token.sol", "anyone may burn anyone's balance",
+     "    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {",
+     "    function burnFrom(address account, uint256 amount) external {",
+     "test_BurnFromRevertsForACallerWithoutTheRole"),
 ]
 
 

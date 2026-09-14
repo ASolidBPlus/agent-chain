@@ -4,16 +4,26 @@ pragma solidity ^0.8.30;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
-/// @title VEE Bux - the in-game currency.
-/// @notice ERC-20, 18 decimals, symbol VEE. Minting is the treasury's alone:
-/// the deploy script seeds INITIAL_SUPPLY and the facilitator API tops up
+/// @title Token - one instance of the chain's generic ERC-20.
+/// @notice ERC-20, 18 decimals, name and symbol given at deploy. A deployment
+/// may carry several instances; each is this contract with different
+/// constructor arguments. Minting is the treasury's alone: the deploy script
+/// seeds the manifest's initialSupply and the facilitator API tops up
 /// mid-game, both through MINTER_ROLE.
 /// @dev Deliberately has no pause, no burn and no blacklist (spec S3.1).
 /// Freezing a wallet is a POLICY-layer action in chain-svc / wallet-mcp, not a
 /// contract action - so do not add a freeze here when someone asks for one;
 /// the answer is `DELETE /wallets/:agentId`, which never touches this token.
-contract VEEBux is ERC20, AccessControl {
+contract Token is ERC20, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+
+    /// @notice Burning is a role nobody holds at deploy.
+    /// @dev Granted to no address by the constructor and to none by the deploy
+    /// script, which asserts exactly that. It exists so a converter contract
+    /// can be granted it later without a redeploy; until someone is granted it,
+    /// `burnFrom` is unreachable and this contract behaves as it did before the
+    /// role existed. A role with no holder changes no behaviour.
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
     error ZeroAddress();
 
@@ -26,9 +36,12 @@ contract VEEBux is ERC20, AccessControl {
         uint256 amount
     );
 
-    /// @param admin receives DEFAULT_ADMIN_ROLE and MINTER_ROLE. In the game
-    /// this is the treasury key held only by chain-svc (spec S2).
-    constructor(address admin) ERC20("VEE Bux", "VEE") {
+    /// @param name_ the token's ERC-20 name, from the deployment manifest.
+    /// @param symbol_ the token's ERC-20 symbol, from the deployment manifest.
+    /// @param admin receives DEFAULT_ADMIN_ROLE and MINTER_ROLE - and NOT
+    /// BURNER_ROLE, deliberately. In the game this is the treasury key held
+    /// only by chain-svc (spec S2).
+    constructor(string memory name_, string memory symbol_, address admin) ERC20(name_, symbol_) {
         // A token deployed with no admin can never mint: no treasury, no
         // supply, and no way to grant the role afterwards.
         if (admin == address(0)) revert ZeroAddress();
@@ -38,6 +51,16 @@ contract VEEBux is ERC20, AccessControl {
 
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
         _mint(to, amount);
+    }
+
+    /// @notice Destroy `amount` from `account`. BURNER_ROLE only.
+    /// @dev No allowance path and no self-burn shortcut: the only way to reach
+    /// this is to hold the role, which nothing does at deploy. It is here so a
+    /// converter can take one token out of supply as it issues another, and the
+    /// asymmetry with `mint` is deliberate - minting is the treasury's, burning
+    /// is nobody's until a deployment says otherwise.
+    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
+        _burn(account, amount);
     }
 
     /// @notice A transfer that also records WHICH INTENT authorised it.

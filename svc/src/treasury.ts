@@ -8,7 +8,7 @@
 import { createWalletClient, encodeFunctionData, http, keccak256, toBytes, type Address } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { randomUUID } from 'node:crypto';
-import { VEEBuxAbi } from './abi.ts';
+import { TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
 import type { Config } from './config.ts';
@@ -218,7 +218,7 @@ export class Treasury {
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
         address: this.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
         ...ZERO_FEES,
@@ -265,7 +265,7 @@ export class Treasury {
     const wallet = await this.resolver.require(agentId);
     const current = (await this.chain.publicClient.readContract({
       address: this.chain.deployment.VEEBux,
-      abi: VEEBuxAbi,
+      abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
     })) as bigint;
@@ -327,7 +327,7 @@ export class Treasury {
     // nobody observed is the observer reporting its own state as the subject's.
     const settled = (await this.chain.publicClient.readContract({
       address: this.chain.deployment.VEEBux,
-      abi: VEEBuxAbi,
+      abi: TokenAbi,
       functionName: 'balanceOf',
       args: [wallet.address],
     })) as bigint;
@@ -373,7 +373,7 @@ export class Treasury {
       // contract PR, which sequences after this one. The intent is recorded in
       // the store either way, so idempotency here does not wait on it.
       const data = encodeFunctionData({
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transfer',
         args: [this.chain.deployment.treasury, amount],
       });
@@ -647,7 +647,7 @@ export class Treasury {
       const account = privateKeyToAccount(privateKey);
       wallet = this.signerFor(account);
       const data = encodeFunctionData({
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'transferWithIntent',
         args: [target.address, amount, intentTopic(intentId)],
       });
@@ -770,7 +770,7 @@ export class Treasury {
       const [sent, received] = await Promise.all([
         this.chain.publicClient.getContractEvents({
           address: this.chain.deployment.VEEBux,
-          abi: VEEBuxAbi,
+          abi: TokenAbi,
           eventName: 'Transfer',
           args: { from: who.address },
           fromBlock: 0n,
@@ -778,7 +778,7 @@ export class Treasury {
         }),
         this.chain.publicClient.getContractEvents({
           address: this.chain.deployment.VEEBux,
-          abi: VEEBuxAbi,
+          abi: TokenAbi,
           eventName: 'Transfer',
           args: { to: who.address },
           fromBlock: 0n,

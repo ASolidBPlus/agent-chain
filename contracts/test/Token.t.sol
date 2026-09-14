@@ -3,28 +3,74 @@ pragma solidity ^0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
-import {VEEBux} from "../src/VEEBux.sol";
+import {Token} from "../src/Token.sol";
 
-contract VEEBuxTest is Test {
-    VEEBux internal vee;
+contract TokenTest is Test {
+    Token internal vee;
     /// Cached in setUp on purpose: `vee.MINTER_ROLE()` is an external call, so
     /// reading it inside a pranked statement consumes the prank and the call
     /// under test runs as the test contract instead. Cost two failing tests.
     bytes32 internal minterRole;
+    bytes32 internal burnerRole;
 
     address internal treasury = makeAddr("treasury");
     address internal shadowbroker = makeAddr("shadowbroker");
     address internal client = makeAddr("client");
 
     function setUp() public {
-        vee = new VEEBux(treasury);
+        vee = new Token("VEE Bux", "VEE", treasury);
         minterRole = vee.MINTER_ROLE();
+        burnerRole = vee.BURNER_ROLE();
     }
 
-    function test_MetadataIsVEEBux() public view {
+    /// The metadata is now WHATEVER THE CONSTRUCTOR WAS GIVEN, which is the
+    /// whole point of the generic contract: this asserts the arguments came
+    /// through, not that the token is called anything in particular.
+    function test_MetadataIsWhateverTheConstructorWasGiven() public {
         assertEq(vee.name(), "VEE Bux");
         assertEq(vee.symbol(), "VEE");
         assertEq(vee.decimals(), 18);
+
+        Token other = new Token("Gold Pieces", "GOLD", treasury);
+        assertEq(other.name(), "Gold Pieces");
+        assertEq(other.symbol(), "GOLD");
+        assertEq(other.decimals(), 18);
+    }
+
+    // ── BURNER_ROLE: a role nobody holds ────────────────────────────────────
+    //
+    // The contract ships with a burn path and no burner. These three cases pin
+    // that: unreachable by default, reachable once granted, and the grant is
+    // what changes - not the deploy.
+
+    function test_NobodyHoldsBurnerRoleAtDeploy() public view {
+        assertFalse(vee.hasRole(burnerRole, treasury));
+        assertFalse(vee.hasRole(burnerRole, address(this)));
+        assertFalse(vee.hasRole(burnerRole, shadowbroker));
+    }
+
+    function test_BurnFromRevertsForACallerWithoutTheRole() public {
+        vm.prank(treasury);
+        vee.mint(shadowbroker, 100 ether);
+
+        vm.prank(shadowbroker);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, shadowbroker, burnerRole)
+        );
+        vee.burnFrom(shadowbroker, 1 ether);
+    }
+
+    function test_BurnFromReducesSupplyAndBalanceOnceGranted() public {
+        vm.prank(treasury);
+        vee.mint(shadowbroker, 100 ether);
+        vm.prank(treasury);
+        vee.grantRole(burnerRole, client);
+
+        vm.prank(client);
+        vee.burnFrom(shadowbroker, 40 ether);
+
+        assertEq(vee.balanceOf(shadowbroker), 60 ether);
+        assertEq(vee.totalSupply(), 60 ether);
     }
 
     function test_TreasuryCanMint() public {

@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { decodeFunctionData } from 'viem';
-import { VEEBuxAbi } from '../src/abi.ts';
+import { TokenAbi } from '../src/abi.ts';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -950,7 +950,7 @@ describe('POST /wallets/:agentId/balance', () => {
       let pending = 0n;
       return {
         prepareTransactionRequest: async (req: Record<string, unknown>) => {
-          const { args } = decodeFunctionData({ abi: VEEBuxAbi, data: req.data as `0x${string}` });
+          const { args } = decodeFunctionData({ abi: TokenAbi, data: req.data as `0x${string}` });
           pending = (args as readonly [string, bigint])[1];
           return req;
         },

@@ -11,11 +11,22 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { MODULES } from '../src/modules.ts';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const OUT = join(here, '..', '..', 'contracts', 'out');
 const TARGET = join(here, '..', 'src', 'abi.ts');
 
-const CONTRACTS = ['VEEBux', 'NameRegistry'] as const;
+// The contracts to emit, taken from the module registry rather than restated:
+// a module added there without an ABI here would fail at the first call, and a
+// name restated here is a second place to forget.
+//
+// Note for whoever deletes a contract: `forge build` does NOT remove the
+// artefact of a contract that no longer exists, so this script will happily
+// read a stale out/<Gone>.sol/<Gone>.json and the drift gate will pass against
+// a file nobody can compile. Deriving the list from MODULES is what stops that
+// being silent - a deleted module drops out of the list too.
+const CONTRACTS = Object.values(MODULES);
 
 function abiOf(name: string): unknown[] {
   const path = join(OUT, `${name}.sol`, `${name}.json`);

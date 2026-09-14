@@ -5,7 +5,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { formatEther, isAddress, getAddress } from 'viem';
-import { VEEBuxAbi } from './abi.ts';
+import { TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
 import { assertMayRead, authenticate, requirePlatform, type Principal } from './auth.ts';
@@ -76,12 +76,12 @@ async function getSupply({ services, principal }: RouteContext): Promise<unknown
     const [total, treasury] = (await Promise.all([
       chain.publicClient.readContract({
         address: chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'totalSupply',
       }),
       chain.publicClient.readContract({
         address: chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [chain.treasury],
       }),
@@ -227,7 +227,7 @@ async function getBalance({ services, param, principal }: RouteContext): Promise
     const [vee, eth] = await Promise.all([
       services.chain.publicClient.readContract({
         address: services.chain.deployment.VEEBux,
-        abi: VEEBuxAbi,
+        abi: TokenAbi,
         functionName: 'balanceOf',
         args: [found.address],
       }) as Promise<bigint>,
