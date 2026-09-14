@@ -102,7 +102,8 @@ cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
       "addressArgs": { "0": "token", "1": "token" } },
     { "contract": "converter", "function": "pair",  "read": true, "kinds": ["org", "agent", "burner"],
       "addressArgs": { "0": "token", "1": "token" } },
-    { "contract": "converter", "function": "setPair", "admin": true }
+    { "contract": "converter", "function": "setPair", "admin": true },
+    { "contract": "converter", "function": "setPaused", "admin": true }
   ]
 }
 CALLS_JSON
@@ -189,6 +190,20 @@ check "revert" "$(echo "$REV" | jget "['error']")" "revert"
 check "no reason in the reply" "$(echo "$REV" | grep -ci 'loop' || true)" "0"
 check "reason in the log" "$(grep -c 'setPair on converter reverted' "$WORK/svc.log" || true)" "1"
 
+step "a wallet's call on a PAUSED pair is a revert, with no reason"
+# THE BLOCKING DEFECT'S OWN CASE, on the persona-facing op. The rejection
+# happens at GAS ESTIMATION inside prepareTransactionRequest - ZERO_FEES sets
+# fees, not gas - so it never reaches a receipt, and under asChainError it came
+# back as 502 chain_error carrying the revert reason. No unit test reaches it:
+# a fake signer does not simulate.
+body -X POST "$BASE/admin-call" \
+  -d "{\"contract\":\"converter\",\"function\":\"setPaused\",\"args\":[\"$PLAY\",\"$GOLD\",true],\"intentId\":\"smoke-pause\"}" >/dev/null
+PAUSED=$(wbody "$ORG" -X POST "$BASE/call" \
+  -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"smoke-paused"}')
+check "revert, not chain_error" "$(echo "$PAUSED" | jget "['error']")" "revert"
+check "no reason in the reply" "$(echo "$PAUSED" | grep -ci 'paus' || true)" "0"
+check "the balance is untouched" "$(wbody "$ORG" "$BASE/balance/orch:org" | jget "['vee']")" "60"
+
 step "a wallet credential may not admin-call"
 check "wrong_scope" \
   "$(wbody "$ORG" -X POST "$BASE/admin-call" -d "{\"contract\":\"converter\",\"function\":\"setPair\",\"args\":[\"$GOLD\",\"$PLAY\",\"1\"],\"intentId\":\"smoke-x\"}" | jget "['error']")" \
@@ -228,9 +243,10 @@ PYEOF
   "True"
 
 step "hub.call is emitted for the operator's action too"
-# THE SUCCESSFUL one. What is not in question is that the operator's REAL
-# action reaches the feed, which is what this asserts; the refused case is
-# below, once the spec settled what a call that was never mined should say.
+# THE SUCCESSFUL one; the refused case is below. Both are ruled and
+# implemented: a call that was never mined emits status "refused" with a null
+# hash, because a null hash under "reverted" would lie about what happened and
+# silence would hide the operator's refused action.
 check "hub.call recorded" \
   "$(python3 - <<PYEOF
 import json, sqlite3

@@ -1378,7 +1378,20 @@ export class Treasury {
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {
       this.store.release(intentId);
-      throw asChainError(err);
+      // asCallError, NOT asChainError, and this is THE PERSONA-FACING OP.
+      //
+      // `prepareTransactionRequest` ESTIMATES GAS when the request carries none
+      // - and ZERO_FEES sets fees, not gas - so a call the contract would
+      // reject fails HERE, at the estimate, and never reaches a receipt. Under
+      // asChainError that came out as 502 chain_error WITH viem's text in the
+      // detail, because errorBody ships a detail for every code: the primary
+      // path both mis-classified a revert as a dead node AND handed the persona
+      // the revert reason §3.2 step 9 exists to withhold. Measured against a
+      // node answering "execution reverted: pair is paused".
+      //
+      // The release is unaffected and stays above: an estimate is a READ, so a
+      // failure here still provably precedes the broadcast.
+      throw this.asCallError(err, `${entry.function} on ${contract.key} for ${fromAgentId}`);
     }
 
     // --- AT OR AFTER THE BROADCAST ----------------------------------------

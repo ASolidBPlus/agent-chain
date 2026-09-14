@@ -179,10 +179,16 @@ interface Signed {
 class RecordingTreasury extends Treasury {
   readonly signed: Signed[] = [];
   reverted = false;
+  estimateReverts = false;
 
   protected override signerFor(): Signer {
     return {
       prepareTransactionRequest: async (a: Record<string, unknown>) => {
+        if (this.estimateReverts) {
+          throw new Error(
+            'Execution reverted with reason: pair is paused.\n\nEstimate Gas Arguments: …',
+          );
+        }
         this.signed.push({ to: String(a.to), data: a.data as `0x${string}` });
         return a;
       },
@@ -203,6 +209,11 @@ async function harness(
     /// refusal is an exception here rather than a reverted receipt. The message
     /// is viem's own, measured against a live Anvil.
     contractReverts?: boolean;
+    /// Makes the SIGNER's prepareTransactionRequest throw a revert-shaped
+    /// error, which is how a wallet-scope call the contract would reject
+    /// actually fails: viem estimates gas there, so the rejection arrives
+    /// before any receipt and before anything reaches the wire.
+    estimateReverts?: boolean;
     /// Makes the name argument resolve to the SAME address as the deny entry
     /// `treasury.{tld}`, which is how a deny is evaded in the real world: the
     /// policy names one string and the caller uses another for the same wallet.
@@ -265,6 +276,7 @@ async function harness(
     DEFAULTS,
     fixedCallPolicy(entries),
   );
+  t.estimateReverts = opts.estimateReverts === true;
   return { t, store };
 }
 
@@ -642,6 +654,52 @@ describe('replay', () => {
         }),
       ),
     ).toBe('invalid_request');
+  });
+});
+
+describe('a revert the contract rejects BEFORE it is mined', () => {
+  // THE PRIMARY PERSONA-FACING PATH, and the one a unit test with a fake signer
+  // does not reach by accident: `prepareTransactionRequest` ESTIMATES GAS when
+  // the request carries none - ZERO_FEES sets fees, not gas - so a call the
+  // contract would reject fails at the estimate and never reaches a receipt.
+  //
+  // Under asChainError that came out as 502 chain_error WITH viem's text in the
+  // detail, because errorBody ships a detail for every code. Two rules broken
+  // at once on the op a persona actually uses: a revert classified as a dead
+  // node, and the revert REASON handed to the persona.
+  it('answers revert, withholds the reason, and gives everything back', async () => {
+    const { t, store } = await harness(undefined, { estimateReverts: true });
+    let err: HttpError | undefined;
+    try {
+      await t.call(asWallet('orch:a'), convertBody({ args: [{ token: 'gold' }, { token: 'play' }, '1'] }));
+    } catch (e) {
+      err = e as HttpError;
+    }
+
+    expect(err?.code).toBe('revert');
+    expect(err?.status).toBe(409);
+    expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
+    // THE REASON NEVER CROSSES. "pair is paused" is the contract's internal
+    // state, and a persona learning which pair is paused learns the shape of
+    // the game's machinery.
+    expect(JSON.stringify(err)).not.toMatch(/paused/i);
+
+    // PROVABLY PRE-BROADCAST: an estimate is a read, so nothing reached the
+    // wire and the whole reservation comes back - the intent, the stage hold
+    // and the per-entry count.
+    expect(store.callCount('orch:a', store.currentStage(), 'converter', 'convert')).toBe(0);
+    expect(store.intentCall('i-1')).toBeNull();
+    expect(t.signed).toHaveLength(0);
+  });
+
+  it('still answers chain_unreachable when the NODE is the problem', async () => {
+    // asCallError falls through to asChainError for anything that is not a
+    // revert, so classifying reverts did not swallow the case the original
+    // catch was written for.
+    const { t } = await harness(undefined, { keystoreThrows: true });
+    expect(
+      await codeOf(() => t.call(asWallet('orch:a'), convertBody({ args: [{ token: 'gold' }, { token: 'play' }, '1'] }))),
+    ).not.toBe('revert');
   });
 });
 
