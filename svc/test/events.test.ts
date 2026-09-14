@@ -1493,6 +1493,11 @@ describe('generic decoding', () => {
     });
     await new EventTail({} as Config, chain, store).pollOnce();
 
+    // THE EMISSION WAS RECORDED. Identical reasoning to the Converted case one
+    // describe up, and I fixed that one and did not look for this one - the
+    // same assertion, the same file, three hundred lines apart. Zero anomalies
+    // is also what an emission nobody recorded produces.
+    expect(store.intentRecord('gold-1')?.emissions).toBe(1);
     expect(payloads(store).filter((p) => p.kind === 'chain.anomaly')).toHaveLength(0);
     store.close();
   });
