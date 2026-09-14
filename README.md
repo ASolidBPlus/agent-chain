@@ -24,37 +24,34 @@ directly: spawn is the operator's, but balance, history, name lookup and sending
 by name are the same calls for every wallet holder. The platform token is the
 operator's: mint, fund, spawn, freeze, rotate, set a balance, read anything.
 
-## How the pieces fit (the design; nodes marked *next* land with the next release)
+## How the pieces fit
+
+Dashed boxes land with the next release; everything else is on `main` today.
 
 ```mermaid
-flowchart LR
-  subgraph deploy["Deployment (per project)"]
-    M["deployments/manifest.json (next)<br/>which modules, named here"]
-    D["chain-deploy<br/>one-shot forge script"]
-    L["deployments/local.json<br/>what is on the chain"]
-    M -.-> D --> L
+flowchart TB
+  subgraph callers[" "]
+    direction LR
+    A[Agent] -- stdio --> W[wallet-mcp]
+    U[Consumer app]
+    O[Operator]
   end
+  S["chain-svc<br/>keys · policy · intents · events"]
+  W -- wallet token --> S
+  U -- wallet token --> S
+  O -- platform token --> S
   subgraph chain["Chain (Anvil, private, zero gas)"]
-    T1["Token A (next)<br/>ERC-20 named at deploy"]
-    T2["Token B (next)<br/>optional, more instances"]
-    N["NameRegistry<br/>name → address (optional)"]
-    X["Custom contracts (next)<br/>optional"]
+    direction LR
+    T[Tokens]
+    N[NameRegistry]
+    X[Custom contracts]
   end
-  D -- deploys --> N
-  D -. deploys .-> T1 & T2 & X
-  subgraph svc["chain-svc (sole key holder)"]
-    P["policy: caps, allow/deny,<br/>freezes, intents"]
-    K["keystore: treasury +<br/>one key per wallet"]
-    E["event tail → sink"]
-  end
-  L -- read at boot --> svc
-  svc -- signed, zero-fee txs --> chain
-  chain -- logs --> E
-  A["Agent<br/>(any MCP host)"] -- stdio --> W["wallet-mcp<br/>no key, one wallet token"]
-  W -- "HTTP, wallet token" --> svc
-  U["Consumer<br/>(any app or service holding a wallet)"] -- "HTTP, wallet token" --> svc
-  H["Operator<br/>(hub, harness, setup)"] -- "HTTP, platform token" --> svc
-  E -- events --> H
+  S -- signed, zero-fee txs --> chain
+  chain -- logs --> S
+  S -- events --> O
+  M[manifest.json] --> D[chain-deploy] --> chain
+  classDef next stroke-dasharray: 5 5
+  class M,T,X next
 ```
 
 A **manifest** names what a deployment has: token instances (name, symbol,
@@ -76,21 +73,19 @@ sequenceDiagram
   participant W as wallet-mcp
   participant S as chain-svc
   participant C as Chain
-  participant H as Event sink
+  participant O as Operator (event sink)
   A->>W: send to "seller", amount 5, intent_id
   W->>S: POST /sign-transfer with the wallet token
-  S->>S: resolve "seller" to an address
-  S->>S: policy: frozen? over cap? intent already used?
+  S->>S: resolve the name, check policy and the intent id
   alt refused
     S-->>W: error, one of a closed set of reasons
     W-->>A: ok false, with the reason
   else allowed
-    S->>S: sign with the agent's own key, fee zero
-    S->>C: transferWithIntent to, 5, intentId
-    C-->>S: mined, with Transfer and IntentTransfer logs
+    S->>C: transferWithIntent, signed with the agent's own key
+    C-->>S: mined, logs emitted
     S-->>W: txHash
     W-->>A: ok true, with txHash
-    S->>H: event transfer (from, to, amount, intent_id)
+    S->>O: event transfer (from, to, amount, intent_id)
   end
 ```
 
