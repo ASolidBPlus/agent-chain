@@ -190,12 +190,17 @@ export class Spawner {
         'fundVee requires a token module; omit it or deploy one',
       );
     }
-    // `fund` cannot reach here on a tokenless deployment with entries in it -
-    // `resolveToken` refuses first, by name - so this guards the EMPTY-array
-    // case only, where there is nothing to resolve and therefore nothing to
-    // refuse. Left explicit rather than relying on that: a caller who sent
-    // `fund: []` to a names-only deployment asked for something coherent, and
-    // gets a wallet with no balances, which is what that deployment means.
+    // `fund` GETS NO GUARD HERE, and the absence is deliberate. A `fund` with
+    // entries cannot reach this point on a tokenless deployment - `parseFundList`
+    // runs `resolveToken` above and refuses by name - and a `fund: []` asks for
+    // nothing, so there is nothing to refuse: the caller gets a wallet with no
+    // balances, which is what a names-only deployment means.
+    //
+    // This comment previously described a guard that was never written, sitting
+    // above the ALIAS guard as though it introduced it. Nothing compiles a
+    // comment, so a reader would have gone looking for a check that does not
+    // exist and concluded the code was wrong - the same fault as the stale
+    // `perTxCap` header this increment already fixed, made the same way.
     if (alias !== undefined && this.chain.modules.names === undefined) {
       throw new HttpError(
         'module_not_deployed',

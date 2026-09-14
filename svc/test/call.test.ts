@@ -255,6 +255,11 @@ const written: string[] = [];
 /// failure the test's own comment describes.
 const readFrom: string[] = [];
 
+/// The argument list of every contract write, in order. `written` answers WHICH
+/// CONTRACT; this answers WITH WHAT - two facts about one call, and the second
+/// is where an amount's scale lives.
+const adminArgs: unknown[][] = [];
+
 async function harness(
   entries: CallEntry[] = [CONVERT, DONATE, QUOTE, SET_PAIR, SEED],
   opts: {
@@ -324,8 +329,13 @@ async function harness(
     },
     walletClient: {
       account: { address: PLAY },
-      writeContract: async (a: { address?: string }) => {
+      writeContract: async (a: { address?: string; args?: readonly unknown[] }) => {
         written.push(String(a.address));
+        // THE ARGUMENTS THE CHAIN RECEIVES. `written` records which contract was
+        // addressed and says nothing about what was sent to it - so the admin
+        // path's amount scaling had no assertion anywhere and its mutant
+        // survived the whole suite.
+        adminArgs.push([...(a.args ?? [])]);
         if (opts.contractReverts) {
           throw new Error(
             'The contract function "setPair" reverted.\n\nError: LoopMintsValue(0x…, 0x…, 1500000000000000000, 750000000000000000)',
@@ -365,6 +375,7 @@ async function harness(
   t.estimateReverts = opts.estimateReverts === true;
   written.length = 0;
   readFrom.length = 0;
+  adminArgs.length = 0;
   return { t, store };
 }
 
@@ -1013,6 +1024,36 @@ describe('admin-call', () => {
       txHash: null,
       amount: { value: '3', token: 'gold' },
     });
+  });
+
+  // A BEHAVIOUR CHANGE, NOT A FIELD. Carrying the amount on `hub.call` meant
+  // computing it through `callMoney`, and step 6 of the shared path WRITES THE
+  // SCALED VALUE BACK into the argument the chain receives. So an admin call now
+  // signs 3000000n where it signed 3n - the token's smallest unit rather than
+  // the wire's whole units.
+  //
+  // That is the correct reading of the Call spec (§3.3 is "§3.2 with
+  // requirePlatform", and §3.2 step 6 parses at the token's decimals), so the
+  // OLD admin path was the defect: `seed(GOLD, "3")` moved three millionths of
+  // a GOLD. But it is outside Multi-token §4's "informational only" wording,
+  // and it went in with no assertion at all - the mutant `if (money && false)`
+  // survived all 825 tests, because `written` records which contract was
+  // addressed and nothing recorded what was sent to it.
+  it('SCALES the argument the admin call signs, not just the event it emits', async () => {
+    const { t } = await harness();
+    await t.adminCall({ contract: 'converter', function: 'seed', args: [GOLD, '3'], intentId: 'a-9' });
+    // 3 GOLD at 6 dp. Read off the arguments the wallet client received, which
+    // is the only place the calldata's value is visible.
+    expect(adminArgs).toEqual([[GOLD, 3_000000n]]);
+  });
+
+  it('leaves a non-money argument alone', async () => {
+    // setPair's third argument is a RATE, not an amount, and its entry declares
+    // no `amount` - so nothing is rescaled. Without this row a mutant that
+    // scaled every uint256 would pass the test above.
+    const { t } = await harness();
+    await t.adminCall({ contract: 'converter', function: 'setPair', args: [PLAY, GOLD, '1'], intentId: 'a-10' });
+    expect(adminArgs).toEqual([[PLAY, GOLD, 1n]]);
   });
 
   it('omits amount when the admin entry declares none', async () => {
