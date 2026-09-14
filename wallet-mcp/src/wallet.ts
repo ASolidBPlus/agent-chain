@@ -99,6 +99,18 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // Facts about the string the persona just typed.
   invalid_name: 'invalid_name',
   invalid_amount: 'invalid_amount',
+  // ── The generic call op (increment 3). Each passes the membership test
+  //    above for a different one of its clauses, which is why they are not one
+  //    code: the registry is public, the allowlist is this wallet's own policy,
+  //    the arguments are this wallet's own input, and a revert is a fact about
+  //    what its own call did.
+  unknown_contract: 'unknown_contract',
+  function_not_allowed: 'function_not_allowed',
+  bad_args: 'bad_args',
+  // The CODE is persona-facing and the REASON is not. chain-svc decodes the
+  // revert reason with the contract's ABI and puts it in its own log sink; what
+  // crosses to the persona is "it was mined and nothing changed".
+  revert: 'revert',
 
   // ── Generic: `reason: "error"`, no detail, real code logged for the
   //    facilitator.

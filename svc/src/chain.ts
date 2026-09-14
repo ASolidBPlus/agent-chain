@@ -17,7 +17,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.ts';
 import { HttpError } from './errors.ts';
-import { MODULES, type ModuleKind, type Modules } from './modules.ts';
+import { ABIS } from './abi.ts';
+import {
+  CONTRACT_NAME,
+  MANIFEST_KEY,
+  MODULES,
+  type ManifestKind,
+  type ModuleKind,
+  type Modules,
+} from './modules.ts';
 
 /// Bounded so a stalled Anvil cannot hold a poll open indefinitely.
 const RPC_TIMEOUT_MS = 10_000;
@@ -43,8 +51,10 @@ const RPC_TIMEOUT_MS = 10_000;
 const PRIVATE_CHAIN_ID = 31337;
 
 export interface DeployedModule {
-  kind: ModuleKind;
-  /// Token entries only. The manifest's stable label for the instance.
+  kind: ManifestKind;
+  /// Token and custom-contract entries. The manifest's stable label for the
+  /// instance, and what a caller of the generic op names it by. `names` and
+  /// `converter` have no key of their own: they are addressed by their kind.
   key?: string;
   contract: string;
   address: Address;
@@ -105,13 +115,43 @@ export function loadDeployment(deploymentsDir: string): Deployment {
   const keys = new Set<string>();
   let namesSeen = 0;
   for (const entry of declared as Array<Record<string, unknown>>) {
-    const kind = entry.kind as ModuleKind;
-    const expected = MODULES[kind];
-    if (!expected) {
+    const kind = entry.kind as ManifestKind;
+    // `Object.hasOwn` rather than a truthiness test on the lookup: `MODULES` is
+    // a plain object, so `MODULES["constructor"]` and `MODULES["__proto__"]`
+    // both answer with something truthy from the prototype and a manifest kind
+    // of `constructor` would pass a check that only asked whether the lookup
+    // found anything.
+    const isCustom = kind === 'contract';
+    const expected = Object.hasOwn(MODULES, kind) ? MODULES[kind as ModuleKind] : undefined;
+    if (!isCustom && !expected) {
       throw new Error(`chain-svc: ${path} has an unknown module kind "${String(entry.kind)}"`);
     }
     const label = String(entry.key ?? kind);
-    if (entry.contract !== expected) {
+    // TWO RULES, because the kinds differ in what a contract name MEANS.
+    //
+    // A typed kind deploys one known contract, so its name is a fact to check
+    // against MODULES ([[Chain Modules Increment]] §4.2). A custom entry names
+    // its own contract - that is the kind's whole purpose - so there is nothing
+    // to compare it to, and what replaces the comparison is the ABI table: a
+    // contract chain-svc cannot encode a call to is not one it can register.
+    // The shape check comes FIRST and is not decorative: `ABIS` is a plain
+    // object, so `ABIS["constructor"]` is a function and `ABIS["__proto__"]` an
+    // object, and either would pass a bare presence test.
+    if (isCustom) {
+      const name = entry.contract;
+      if (typeof name !== 'string' || !CONTRACT_NAME.test(name)) {
+        throw new Error(
+          `chain-svc: ${path} module "${label}" has an invalid contract name ` +
+            `"${String(name)}"; expected a Solidity contract name`,
+        );
+      }
+      if (!Object.hasOwn(ABIS, name)) {
+        throw new Error(
+          `chain-svc: ${path} module "${label}": no ABI for contract "${name}"; ` +
+            `regenerate abi.ts (cd svc && bun run scripts/generate-abi.ts)`,
+        );
+      }
+    } else if (entry.contract !== expected) {
       throw new Error(
         `chain-svc: ${path} module "${label}" is "${String(entry.contract)}", expected "${expected}"`,
       );
@@ -129,14 +169,38 @@ export function loadDeployment(deploymentsDir: string): Deployment {
     // An unknown kind cannot reach here - MODULES is checked above - so the
     // default is unreachable today and is written anyway, because the next kind
     // should fail loudly here rather than be mistaken for one of these.
-    if (kind === 'token') {
+    // ONE NAMESPACE FOR EVERY KEY, and it is not a tidiness rule.
+    //
+    // Increment 2 checked token keys against token keys, which was complete
+    // while tokens were the only kind that carried one. The generic call op
+    // takes a key and returns ONE contract, and `names`/`converter` are
+    // addressed by their kind because the manifest gives them no key - so those
+    // two strings are taken even though no entry spells them out. Two entries
+    // under one key is not a duplicate row: it is a lookup whose answer depends
+    // on which entry the loop saw last.
+    //
+    // Deploy.s.sol enforces the same rule with the same message, which is the
+    // direction that matters: the deploy refuses a colliding manifest, so
+    // chain-svc never meets one. This mirror exists for the local.json a human
+    // edited.
+    const claim = (key: string): void => {
+      if (keys.has(key)) {
+        throw new Error(`chain-svc: ${path} has duplicate key "${key}"`);
+      }
+      keys.add(key);
+    };
+
+    if (kind === 'token' || isCustom) {
       if (typeof entry.key !== 'string' || entry.key.length === 0) {
-        throw new Error(`chain-svc: ${path} has a token module with no key`);
+        throw new Error(`chain-svc: ${path} has a ${kind} module with no key`);
       }
-      if (keys.has(entry.key)) {
-        throw new Error(`chain-svc: ${path} has duplicate token key "${entry.key}"`);
+      if (!MANIFEST_KEY.test(entry.key)) {
+        throw new Error(
+          `chain-svc: ${path} module key "${entry.key}" is not a manifest key ` +
+            `(${MANIFEST_KEY.source})`,
+        );
       }
-      keys.add(entry.key);
+      claim(entry.key);
     } else if (kind === 'names') {
       namesSeen++;
       if (namesSeen > 1) {
@@ -145,16 +209,22 @@ export function loadDeployment(deploymentsDir: string): Deployment {
       if (typeof entry.tld !== 'string' || entry.tld.length === 0) {
         throw new Error(`chain-svc: ${path} names module has no tld`);
       }
+      claim('names');
     } else if (kind === 'converter') {
       // No key, no tld, and it does not count toward namesSeen: contract and
       // address were checked above, and that is all a converter entry carries.
+      // It claims its implicit key like the names module does.
+      claim('converter');
     } else {
       throw new Error(`chain-svc: ${path} module kind "${String(kind)}" has no validation rule`);
     }
     modules.push({
       kind,
-      key: kind === 'token' ? (entry.key as string) : undefined,
-      contract: expected,
+      key: kind === 'token' || isCustom ? (entry.key as string) : undefined,
+      // For a typed kind this is MODULES[kind], checked equal above; for a
+      // custom entry it is the manifest's own, checked to be a real contract
+      // name with an ABI. Either way it is the key into the ABI table.
+      contract: isCustom ? (entry.contract as string) : (expected as string),
       address: getAddress(entry.address),
       tld: kind === 'names' ? (entry.tld as string) : undefined,
     });

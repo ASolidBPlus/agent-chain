@@ -31,6 +31,26 @@ export type ErrorCode =
   /// say the service cannot do it at all, and not 409, which would say the
   /// request conflicts with some state. A deployment's shape is not a state.
   | 'module_not_deployed'
+  /// No contract with that key in this deployment's registry. A fact about the
+  /// public registry, like `unknown_name`, so a persona sees it: the `contracts`
+  /// tool lists exactly what exists, and refusing to say which keys are real
+  /// would only make a persona guess.
+  | 'unknown_contract'
+  /// The contract exists and this caller may not call this function on it -
+  /// either the allowlist has no entry for the pair, or the entry does not
+  /// include this wallet's kind. ONE CODE FOR BOTH, deliberately: telling a
+  /// persona which of the two it was is telling it what other kinds can do.
+  | 'function_not_allowed'
+  /// The arguments do not match the function's ABI, or a wallet-scope address
+  /// argument was not one of the wire forms its rule allows. Persona-facing
+  /// with the index and the expected type, because it is a fact about the
+  /// caller's own input, like `invalid_amount`.
+  | 'bad_args'
+  /// The call was mined and reverted. 409, not 502: the chain is working and
+  /// the transaction was accepted - the CONTRACT refused. The persona must know
+  /// its call did nothing, so the code is persona-facing; the revert reason is
+  /// not, because it is the contract's internal state talking.
+  | 'revert'
   | 'chain_error'
   | 'chain_unreachable'
   | 'internal_error';
@@ -57,7 +77,14 @@ export const STATUS: Record<ErrorCode, number> = {
   unknown_intent: 404,
   wallet_not_found: 404,
   module_not_deployed: 404,
+  unknown_contract: 404,
+  function_not_allowed: 403,
+  bad_args: 400,
   wallet_frozen: 409,
+  // Mined and reverted. Shares 409 with the policy refusals for the same
+  // reason: the request was well formed and authorised, and something on the
+  // far side said no. Retrying it unchanged cannot help.
+  revert: 409,
   // Policy refusals share 409 with `frozen`: the request was well formed and
   // authorised, and the wallet's own policy is what stopped it (spec S5).
   over_max_per_tx: 409,
