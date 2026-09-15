@@ -3,7 +3,7 @@
 
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
-import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
+import { checkLocally, isUnreadable, normaliseVee, readPolicy, type Refusal } from './policy.ts';
 import { defaultTokenOf, resolveTokenOrRefusal, type ModulesReply, type TokenModule } from './modules.ts';
 // TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
 // erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
@@ -631,7 +631,19 @@ export class Wallet {
       return this.fail(resolved.error, resolved.detail);
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, token);
+    // The DEFAULT TOKEN'S KEY, for a legacy file's top-level cap pair. Read off
+    // the modules reply rather than assumed: a pre-v0.5.0 policy names no token,
+    // and which token it meant is a fact about the deployment.
+    const policy = readPolicy(this.config.policyFile, defaultTokenOf(this.modules)?.key);
+    // THE OPERATOR'S HALF OF THE MARKER. The persona gets the fixed sentence in
+    // the refusal detail; the reason - which may quote the file - goes here and
+    // nowhere else. Logged on the path that refuses, so an operator who broke a
+    // policy learns WHAT broke rather than only that something did, which is
+    // the same split `refusalFor` makes for a withheld chain-svc code.
+    if (isUnreadable(policy)) {
+      this.log(`[wallet-mcp] ${this.config.policyFile}: ${policy.reason}`);
+    }
+    const local = checkLocally(policy, to, amount, token);
     if (local) return this.fail(local.reason, local.detail);
 
     // The wire says `amount` and names its token, on both sides, since the
