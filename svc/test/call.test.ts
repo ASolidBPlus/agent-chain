@@ -1365,6 +1365,42 @@ describe('fund and set-balance, per token', () => {
     expect(written).toEqual([GOLD]);
   });
 
+  // FINDING 1, PART TWO: fund RESERVES now, so it is idempotent like every other
+  // intent path. It emitted a topic and wrote no row, so `recordEmission` hit
+  // its "not an intent this store reserved" branch on every facilitator top-up
+  // and the transfer was invisible to the emission and anomaly path - and two
+  // POST /fund with one intentId both moved money, with the double emission
+  // invisible for the same reason.
+  it('a repeated fund under one intent id moves money ONCE', async () => {
+    const { t, store } = await harness();
+    const first = await t.fund({ to: 'bob.play', amount: '2', intentId: 'dedupe-1' });
+    written.length = 0;
+    const second = await t.fund({ to: 'bob.play', amount: '2', intentId: 'dedupe-1' });
+
+    // THE CONTRACT WAS NOT TOUCHED the second time. Asserting only the txHash
+    // would pass against a second real transfer that happened to be reported
+    // with the first one's hash.
+    expect(written).toEqual([]);
+    expect(second.txHash).toBe(first.txHash);
+    // ...and there is ONE row, under the RECIPIENT, which is who the money is
+    // for and the wallet a reconciliation would be about.
+    expect(store.intentTxHash('orch:bob', 'dedupe-1')).toBe(first.txHash);
+  });
+
+  it('a fund is visible to the emission path, which is what makes absence mean something', async () => {
+    const { t, store } = await harness();
+    await t.fund({ to: 'bob.play', amount: '2', intentId: 'emit-1' });
+
+    // EVERY EMISSION HAS A ROW - the first half of the invariant printed on
+    // sweepToTreasury. Before this, the topic went on chain and no row existed,
+    // so this read null and every fund was another party's traffic as far as
+    // the detector was concerned.
+    const topic = store.intentTopicOf('orch:bob', 'emit-1');
+    expect(topic).not.toBeNull();
+    expect(store.recordEmission({ topic: topic!, txHash: '0xfund', from: '0xtreasury', isExpectedEmitter: true })).toBeNull();
+    expect(store.intentRecord('orch:bob', 'emit-1')?.emissions).toBe(1);
+  });
+
   it('defaults to the default token when none is named', async () => {
     const { t } = await harness();
     await t.fund({ to: 'bob.play', amount: '2', intentId: 'f-2' });

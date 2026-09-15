@@ -1107,6 +1107,26 @@ export class Store {
     };
   }
 
+  /// THE TOPIC THIS INTENT WAS RESERVED WITH, read back rather than re-derived.
+  ///
+  /// Every broadcast takes its bytes32 from here (v8, finding 1). The
+  /// derivation changed at v8 - it is the hash of both coordinates now - so a
+  /// store can hold rows written either side of it, and a broadcast that
+  /// re-derived would put a topic on chain that the row does not carry. The
+  /// emission would then match nothing, `recordEmission` would return null as
+  /// for an intent this store never reserved, and the intent would sit on the
+  /// reconciliation path for ever with a transfer that really happened.
+  ///
+  /// NULL MEANS NO ROW OR NO TOPIC, and the caller decides: an intent reserved
+  /// before topics existed has none, and that is a different thing from a
+  /// reservation that is not there at all.
+  intentTopicOf(agentId: string, intentId: string): string | null {
+    const row = this.db
+      .query(`SELECT topic FROM intents WHERE agent_id = ? AND intent_id = ?`)
+      .get(agentId, intentId) as { topic: string | null } | null;
+    return row?.topic ?? null;
+  }
+
   intentIdSource(agentId: string, intentId: string): string | null {
     const row = this.db
       .query(`SELECT id_source FROM intents WHERE agent_id = ? AND intent_id = ?`)

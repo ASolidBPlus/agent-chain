@@ -6,6 +6,7 @@
 // the file that can move funds.
 
 import {
+  concat,
   createWalletClient,
   encodeFunctionData,
   getAddress,
@@ -126,13 +127,6 @@ export function spendVia(marker?: string): 'mcp' | 'direct' {
 /// The three operations signTransfer needs from a wallet client, named so the
 /// prepare/sign/send split - which is where "provably before the broadcast"
 /// stops being a phrase and becomes a boundary - is visible in the type.
-/// THE ONE DERIVATION of a string intent id to the bytes32 the contract logs.
-///
-/// Used identically in three places - when chain-svc reserves the intent, when
-/// it calls transferWithIntent, and when the sweep scans IntentTransfer for it.
-/// Three derivations would give three answers to "did this land?", which is the
-/// only question the event exists to answer, so this is deliberately the single
-/// function and not an inline keccak at each site.
 /// THE AGENT COORDINATE AN ADMIN-CALL RESERVES UNDER. The hub is not a wallet,
 /// so `intents.agent_id` records this pseudo-id for the calls it makes on its
 /// own behalf. A CONSTANT since v8: the reservation, the duplicate lookup and
@@ -140,8 +134,28 @@ export function spendVia(marker?: string): 'mcp' | 'direct' {
 /// them come to disagree.
 export const PLATFORM_INTENT_AGENT = 'platform';
 
-export function intentTopic(intentId: string): `0x${string}` {
-  return keccak256(toBytes(intentId));
+/// THE ONE DERIVATION of an intent to the bytes32 the contract logs, and since
+/// v8 it takes BOTH coordinates.
+///
+/// `keccak256(intent_id)` alone made two wallets sharing an id string share a
+/// topic - so their emissions merged into one counter, raising a false
+/// double-spend alarm or masking a real one. Which of the two depends only on
+/// the order they sent in.
+///
+/// HASH OF HASHES, NOT A SEPARATOR. A separator collides: admin-call reserves
+/// under the literal `platform`, and `platform` is a valid org label, so
+/// `platform` + `alice:job-1` and `platform:alice` + `job-1` have one preimage.
+/// Hashing each coordinate to a fixed 32 bytes first makes the concatenation
+/// unambiguous whatever either one contains.
+///
+/// CALLED AT RESERVATION AND NOWHERE ELSE. The result is stored on the row and
+/// every broadcast reads it back - see `storedTopic`. It used to be called
+/// again at broadcast, which was harmless only while the derivation could never
+/// change; with rows written either side of v8 in one store, a re-derivation
+/// would put a topic on chain that the row does not carry and strand the intent
+/// on the reconciliation path for ever.
+export function intentTopic(agentId: string, intentId: string): `0x${string}` {
+  return keccak256(concat([keccak256(toBytes(agentId)), keccak256(toBytes(intentId))]));
 }
 
 export interface Signer {
@@ -371,10 +385,69 @@ export class Treasury {
     const tok = resolveToken(this.chain.modules, body.token);
     const amount = parseVee(body.amount, tok.decimals, tok.symbol, 'amount');
     const target = await this.resolver.require(name);
-    const intentId =
-      typeof body.intentId === 'string' && body.intentId !== ''
-        ? body.intentId
-        : `chain-svc:${randomUUID()}`;
+    const suppliedId = typeof body.intentId === 'string' && body.intentId !== '';
+    const intentId = suppliedId ? (body.intentId as string) : `chain-svc:${randomUUID()}`;
+
+    // FUND RESERVES, as of v8, and this is a bug fix wearing a refactor's
+    // clothes rather than tidiness.
+    //
+    // The doc block above has always said this goes through the intent path
+    // "like every other chain-svc transfer", and that the sweep's negative
+    // branch is sound only if EMISSION IS UNIVERSAL. It did not reserve. It
+    // called `transferWithIntent` with a derived topic and wrote no row - so
+    // `recordEmission` hit its `if (!intent) return null` branch on every
+    // facilitator top-up and the transfer was invisible to the emission and
+    // anomaly path entirely. Two POST /fund with one intentId both moved money,
+    // and the double emission was invisible for the same reason.
+    //
+    // UNDER THE RECIPIENT'S ID, because the row records who the money is for
+    // and the recipient is the wallet a reconciliation would be about. The
+    // treasury is the sender and has no wallet row.
+    //
+    // NO CAP HOLD (`stageCap: null`), the shape set-balance already uses: the
+    // treasury has no stage cap and a facilitator top-up refused mid-game as
+    // `over_stage_cap` would be a bad failure. The intent record is taken all
+    // the same, which is the half that makes absence mean something.
+    // THE CANONICAL, NEVER THE NAME THE CALLER TYPED. `agent_id` is a stable
+    // game-assigned label; recording a vanity alias here would give one wallet
+    // two coordinates, and two funds to the same wallet under two of its names
+    // would each look like a fresh reservation.
+    //
+    // Null is unreachable today - `require` resolved a registered NAME, so the
+    // address has a primary one, and a burner (which has none) cannot be
+    // resolved by name in the first place. Refused rather than defaulted
+    // because the alternatives are worse than a refusal: the address would open
+    // a second id space inside `agent_id`, and the typed name would break the
+    // rule in the paragraph above.
+    if (target.canonical === null) {
+      throw new HttpError(
+        'invalid_request',
+        `${name} resolves to an address with no canonical name, so there is no wallet to record ` +
+          `the transfer against`,
+      );
+    }
+    const recipient = target.canonical;
+
+    const reservation = this.store.reserve({
+      intentId,
+      topic: intentTopic(recipient, intentId),
+      idSource: suppliedId ? 'caller' : 'server',
+      agentId: recipient,
+      stage: await this.currentStage(),
+      amount,
+      stageCap: null,
+      token: tok.key,
+    });
+    if (reservation.outcome === 'duplicate') {
+      // A REPLAY MOVES NOTHING AND SAYS SO WITH THE ORIGINAL HASH, which is
+      // what every other intent path does and what fund could not do at all
+      // before it had a row to remember.
+      if (reservation.txHash) return { txHash: reservation.txHash, intentId };
+      throw new HttpError(
+        'intent_unresolved',
+        `${intentId} is already in flight and has no transaction yet; retry once it resolves`,
+      );
+    }
 
     // §1. A SHORT TREASURY IS REFUSED BY NAME, before the transfer.
     //
@@ -422,24 +495,61 @@ export class Treasury {
       throw asChainError(err);
     }
 
+    const result = await this.treasuryTransfer({
+      to: target.address,
+      recipient,
+      amount,
+      token: tok,
+      intentId,
+      memo: typeof body.reason === 'string' ? body.reason : null,
+    });
+    // COMPLETED HERE, as `set-balance` completes its own and the two broadcast
+    // tails complete theirs. Without it the row stays open for ever: the retry
+    // finds a reservation with no hash and answers `intent_unresolved` about a
+    // transfer that landed - which is what the dedupe test caught the moment
+    // `fund` started reserving.
+    this.store.completeIntent(recipient, intentId, result.txHash);
+    return result;
+  }
+
+  /// THE TREASURY'S HALF OF A FUND, WITH THE RESERVATION ALREADY TAKEN.
+  ///
+  /// Split out at v8 because `fund` began reserving and `set-balance` calls it
+  /// for the top-up with the id IT reserved - so both wanted the same row and
+  /// the second attempt answered `intent_unresolved` about its own
+  /// reservation. One intent, one reservation, and whichever entry point took
+  /// it calls this.
+  ///
+  /// The topic comes off the row either way, so this does not care which of
+  /// them reserved.
+  private async treasuryTransfer(args: {
+    to: Address;
+    /// The wallet the row is keyed under - the RECIPIENT for both callers.
+    recipient: string;
+    amount: bigint;
+    token: TokenModule;
+    intentId: string;
+    memo: string | null;
+  }): Promise<{ txHash: string; intentId: string }> {
     try {
       const hash = await this.chain.walletClient.writeContract({
         account: this.chain.walletClient.account!,
         chain: this.chain.viemChain,
-        address: tok.address,
+        address: args.token.address,
         abi: TokenAbi,
         functionName: 'transferWithIntent',
-        args: [target.address, amount, intentTopic(intentId)],
+        // FROM THE ROW, never re-derived.
+        args: [args.to, args.amount, this.storedTopic(args.recipient, args.intentId)],
         ...ZERO_FEES,
       });
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       this.store.recordMemo({
         txHash: hash,
-        memo: typeof body.reason === 'string' ? body.reason : null,
-        intentId,
+        memo: args.memo,
+        intentId: args.intentId,
         fromAgentId: 'treasury',
       });
-      return { txHash: hash, intentId };
+      return { txHash: hash, intentId: args.intentId };
     } catch (err) {
       throw asChainError(err);
     }
@@ -504,16 +614,16 @@ export class Treasury {
     // the treasury has no stage cap. A replay returns the original transaction
     // rather than moving money a second time.
     //
-    // The ON-CHAIN half of the intent story (transferWithIntent /
-    // IntentTransfer) is not on this branch: it is the contract PR, which now
-    // sequences AFTER this one. So these transfers are recorded as intents in
-    // the store and emit the ordinary Transfer, and the contract PR switches
-    // this call site along with fund's and sign-transfer's. Flagged rather than
-    // silently deferred, because "every chain-svc transfer emits an
-    // IntentTransfer" is the premise the sweep's negative branch rests on, and
-    // it is not true until that PR lands.
+    // A TOPIC ON THE ROW, as of v8. The comment that stood here said the
+    // on-chain half "is not on this branch: it is the contract PR, which now
+    // sequences AFTER this one" - and that PR landed at v0.7.0. The token has
+    // `transferWithIntent` and emits `IntentTransfer`; `fund` was already using
+    // it. So this reservation stores a topic and the sweep below emits it,
+    // which is what makes "every chain-svc transfer emits an IntentTransfer"
+    // - the premise the sweep's negative branch rests on - actually true.
     const reservation = this.store.reserve({
       intentId,
+      topic: intentTopic(agentId, intentId),
       agentId,
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
@@ -533,21 +643,28 @@ export class Treasury {
 
     const result =
       current < target
-        // THE INTENT ID GOES THROUGH. `fund` gained the parameter in this PR
-        // and `setBalance` is its only caller here; without this line a top-up
-        // would record `intentId: null` while the sweep recorded the id - so a
-        // top-up would be the one money movement whose intent cannot be joined
-        // from /history, and BOTH SIDES WOULD COMPILE. Review recorded the
-        // asymmetry against the pre-merge trees; this is where it dissolves.
-        ? await this.fund({
-            to: agentId,
-            amount: formatVee(target - current, tok.decimals),
-            // THE SAME TOKEN, passed on rather than defaulted inside `fund`.
-            // Without it a set-balance of GOLD would top up in PLAY and then
-            // re-read GOLD, and the reply would report a number nobody moved.
-            token: tok.key,
-            reason,
+        // THE TRANSFER, NOT THE ENDPOINT, as of v8. This used to call `fund`,
+        // which now reserves - so the top-up asked for a second reservation
+        // under the id this function had already taken and answered
+        // `intent_unresolved` about its own row. One intent, one reservation:
+        // `set-balance` holds it and calls the transfer directly.
+        //
+        // The intent id still goes through, which was the point of the line
+        // this replaces: without it a top-up would record `intentId: null`
+        // while the sweep recorded the id, so a top-up would be the one money
+        // movement whose intent cannot be joined from /history - and both sides
+        // would compile.
+        //
+        // THE SAME TOKEN, carried rather than defaulted. Without it a
+        // set-balance of GOLD would top up in PLAY and then re-read GOLD, and
+        // the reply would report a number nobody moved.
+        ? await this.treasuryTransfer({
+            to: wallet.address,
+            recipient: agentId,
+            amount: target - current,
+            token: tok,
             intentId,
+            memo: reason,
           })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId, tok);
 
@@ -608,13 +725,21 @@ export class Treasury {
     const wallet = this.signerFor(account);
 
     try {
-      // Plain `transfer` for now: `transferWithIntent` arrives with the
-      // contract PR, which sequences after this one. The intent is recorded in
-      // the store either way, so idempotency here does not wait on it.
+      // `transferWithIntent`, as of v8. It said "plain `transfer` for now:
+      // `transferWithIntent` arrives with the contract PR, which sequences
+      // after this one" - and that PR landed at v0.7.0, while this line stayed.
+      // The cost of the gap was not idempotency, which the store row always
+      // covered; it was that the sweep recorded an intent and emitted NO
+      // IntentTransfer, so the invariant printed on this very function -
+      // "`fund` and this and `/sign-transfer` all emit an IntentTransfer and
+      // absence of one keeps meaning something" - was false from the side
+      // nobody checks.
+      //
+      // FROM THE ROW, like every other broadcast; `set-balance` reserved it.
       const data = encodeFunctionData({
         abi: TokenAbi,
-        functionName: 'transfer',
-        args: [this.chain.deployment.treasury, amount],
+        functionName: 'transferWithIntent',
+        args: [this.chain.deployment.treasury, amount, this.storedTopic(agentId, intentId)],
       });
       const request = await wallet.prepareTransactionRequest({
         account,
@@ -862,7 +987,7 @@ export class Treasury {
     // and a second identical transfer is a valid second transfer).
     const reservation = this.store.reserve({
       intentId,
-      topic: intentTopic(intentId),
+      topic: intentTopic(fromAgentId, intentId),
       // NO CURRENT CONSUMER. Stamped here because the reserve-time head is
       // IRRECOVERABLE LATER; the sweep does not read it. See the
       // `reservedAtBlock` comment on Store.reserve for why it is kept.
@@ -926,7 +1051,8 @@ export class Treasury {
       const data = encodeFunctionData({
         abi: TokenAbi,
         functionName: 'transferWithIntent',
-        args: [target.address, amount, intentTopic(intentId)],
+        // FROM THE ROW, never re-derived - see `storedTopic`.
+        args: [target.address, amount, this.storedTopic(fromAgentId, intentId)],
       });
       const request = await wallet.prepareTransactionRequest({
         account,
@@ -1540,7 +1666,7 @@ export class Treasury {
 
     const reservation = this.store.reserve({
       intentId,
-      topic: intentTopic(intentId),
+      topic: intentTopic(fromAgentId, intentId),
       reservedAtBlock: this.store.observedHead() ?? undefined,
       idSource,
       agentId: fromAgentId,
@@ -1600,7 +1726,7 @@ export class Treasury {
     }
 
     // 9. SIGN AND SEND.
-    const finalArgs = Treasury.withIntentArg(entry, resolved, intentId);
+    const finalArgs = Treasury.withIntentArg(entry, resolved, this.storedTopic(fromAgentId, intentId));
 
     // --- PROVABLY BEFORE THE BROADCAST ------------------------------------
     // Loading the key, building the client and preparing the request are local
@@ -1666,14 +1792,18 @@ export class Treasury {
   /// The intent id goes into the slot the entry named, and the caller may not
   /// supply it: a value there is a caller trying to choose the id the chain
   /// will log, which is the join the anomaly detector reads.
+  /// TAKES THE TOPIC, NOT THE ID, as of v8. It used to derive, which made this
+  /// a fourth place the derivation lived; now the caller reads the bytes32 off
+  /// the row it reserved and this only decides WHERE in the argument list it
+  /// goes. A static helper could not read the row in any case.
   private static withIntentArg(
     entry: CallEntry,
     args: EncodableArg[],
-    intentId: string,
+    topic: `0x${string}`,
   ): EncodableArg[] {
     if (entry.intentArg === undefined) return args;
     const out = [...args];
-    out.splice(entry.intentArg, 0, intentTopic(intentId));
+    out.splice(entry.intentArg, 0, topic);
     return out;
   }
 
@@ -1770,6 +1900,26 @@ export class Treasury {
       return new HttpError('revert', 'the call was mined and reverted; nothing changed');
     }
     return asChainError(err);
+  }
+
+  /// THE BYTES32 THIS INTENT WAS RESERVED WITH, for a broadcast to put on chain.
+  ///
+  /// Reads the row and THROWS if there is no topic on it, rather than deriving
+  /// one. A broadcast is always downstream of a reservation that stored one, so
+  /// absence here is a bug in this file - and the tempting fallback (derive it
+  /// again) is exactly what v8 removed: with rows written either side of the
+  /// derivation change, a re-derivation puts a topic on chain that the row does
+  /// not carry, the emission matches nothing, and the intent sits unresolved
+  /// for ever with a transfer that really happened.
+  private storedTopic(agentId: string, intentId: string): `0x${string}` {
+    const topic = this.store.intentTopicOf(agentId, intentId);
+    if (topic === null) {
+      throw new Error(
+        `chain-svc: no stored topic for intent ${intentId} of ${agentId}; a broadcast must ` +
+          `follow a reservation that stored one`,
+      );
+    }
+    return topic as `0x${string}`;
   }
 
   /// §3.3. The hub calls a contract with the treasury's key.
@@ -1883,7 +2033,7 @@ export class Treasury {
     // `intents.agent_id` records WHO reserved it and the hub is not a wallet.
     const reservation = this.store.reserve({
       intentId,
-      topic: intentTopic(intentId),
+      topic: intentTopic(PLATFORM_INTENT_AGENT, intentId),
       idSource: suppliedId ? 'caller' : 'server',
       agentId: PLATFORM_INTENT_AGENT,
       stage,
@@ -1914,7 +2064,9 @@ export class Treasury {
 
     // WITH AN ENTRY the server fills the intent slot; WITHOUT one the platform
     // passed every argument itself, including any bytes32 intent it wanted.
-    const finalArgs = entry ? Treasury.withIntentArg(entry, shaped, intentId) : shaped;
+    const finalArgs = entry
+      ? Treasury.withIntentArg(entry, shaped, this.storedTopic(PLATFORM_INTENT_AGENT, intentId))
+      : shaped;
     let hash: `0x${string}`;
     try {
       hash = await this.chain.walletClient.writeContract({

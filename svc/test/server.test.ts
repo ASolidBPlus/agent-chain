@@ -607,6 +607,43 @@ describe('an intent is not an existence oracle', () => {
     const res = await fetch(`${base}/intents/belongs-to-beta`, { headers: auth });
     expect(res.status).toBe(200);
   });
+
+  // FINDING 1: intents are per wallet now, so a platform lookup without a
+  // wallet is underdetermined by construction. `?wallet=` is the coordinate the
+  // route lacked rather than a new power - an operator reconciling a specific
+  // wallet's stuck intent needs a way to name it that is not a guess.
+  it('platform scope may name the wallet, and gets THAT wallet\'s row', async () => {
+    store.reserve({
+      token: 'play', intentId: 'shared-string', agentId: 'beta:someoneelse',
+      stage: store.currentStage(), amount: 1n, stageCap: { cap: 10n ** 21n },
+    });
+    store.reserve({
+      token: 'play', intentId: 'shared-string', agentId: 'alpha:client',
+      stage: store.currentStage(), amount: 1n, stageCap: { cap: 10n ** 21n },
+    });
+
+    const named = await fetch(`${base}/intents/shared-string?wallet=beta%3Asomeoneelse`, { headers: auth });
+    expect(named.status).toBe(200);
+
+    // WITHOUT IT, two wallets on one id answers exactly as an id nobody used.
+    // Returning either row would pick one wallet's intent to stand for both,
+    // and refusing DIFFERENTLY would make the reply an oracle for the
+    // collision - the same reason the rows above exist.
+    const bare = await fetch(`${base}/intents/shared-string`, { headers: auth });
+    const absent = await fetch(`${base}/intents/nobody-used-this`, { headers: auth });
+    expect(bare.status).toBe(404);
+    expect(absent.status).toBe(404);
+    expect(await bare.text()).toBe((await absent.text()).replace('nobody-used-this', 'shared-string'));
+  });
+
+  it('refuses the wallet parameter from wallet scope, rather than ignoring it', async () => {
+    // A wallet can only ask under its own id, so the parameter is either
+    // redundant or an attempt to read somebody else's. An IGNORED parameter is
+    // one a caller believes worked.
+    const res = await fetch(`${base}/intents/mine-alpha?wallet=beta%3Asomeoneelse`, { headers: walletAuth });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error?: string }).error).toBe('invalid_request');
+  });
 });
 
 // §1. THE WIRE RENAME, `vee` -> `amount`, with one release of overlap.

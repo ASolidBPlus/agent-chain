@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import { SCHEMA_VERSION } from '../src/migrate.ts';
+import { intentTopic } from '../src/treasury.ts';
 
 const cap = { cap: 10n ** 24n };
 const ALICE = 'orch:alice';
@@ -351,5 +352,99 @@ describe('the v7 -> v8 rekey', () => {
     db.close();
     expect(v).toBe(SCHEMA_VERSION);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── PART TWO: the topic, and the paths that emit one ────────────────────────
+
+describe('the topic is namespaced by the wallet too', () => {
+  // A SEPARATOR WOULD COLLIDE, and the collision is reachable rather than
+  // theoretical: admin-call reserves under the literal `platform`, and
+  // `platform` is a valid org label. With `agent + ':' + id`, the pair
+  // (`platform`, `alice:job-1`) and the pair (`platform:alice`, `job-1`) have
+  // ONE preimage and therefore one topic - so an operator's admin-call and a
+  // wallet's send would merge emissions and raise a false double-spend alarm,
+  // or mask a real one. Hashing each coordinate to a fixed 32 bytes first makes
+  // the concatenation unambiguous whatever either one contains.
+  it('the construction that a separator would collide on gives two topics', () => {
+    expect(intentTopic('platform', 'alice:job-1')).not.toBe(intentTopic('platform:alice', 'job-1'));
+  });
+
+  it('two wallets with one id string get two topics', () => {
+    expect(intentTopic(ALICE, ID)).not.toBe(intentTopic(BOB, ID));
+  });
+
+  it('is stable for one pair, because the store joins emissions on it', () => {
+    expect(intentTopic(ALICE, ID)).toBe(intentTopic(ALICE, ID));
+  });
+
+  // Two wallets, one id string, one emission each: two intents, one emission
+  // apiece, and no anomaly. Under a shared topic the second emission counted
+  // against the first intent and raised one.
+  // `recordEmission` answers whether THIS emission makes the intent ANOMALOUS,
+  // so null is the healthy answer and the counts are read off the rows. Written
+  // the other way round first, asserting the returned record - which would have
+  // been a test of a contract this function does not have.
+  it('an emission lands on the wallet that reserved it, and raises no anomaly', () => {
+    const s = new Store(':memory:');
+    put(s, ALICE, ID, 5n, { topic: intentTopic(ALICE, ID) });
+    put(s, BOB, ID, 99n, { topic: intentTopic(BOB, ID) });
+
+    expect(
+      s.recordEmission({ topic: intentTopic(ALICE, ID), txHash: '0xa', from: '0xaaa', isExpectedEmitter: true }),
+    ).toBeNull();
+    expect(
+      s.recordEmission({ topic: intentTopic(BOB, ID), txHash: '0xb', from: '0xbbb', isExpectedEmitter: true }),
+    ).toBeNull();
+
+    // ONE EACH, which is the fact a shared topic destroyed: both emissions
+    // counted against whichever intent the topic found, so one intent read two
+    // and raised a false double-spend while the other read none.
+    expect(s.intentRecord(ALICE, ID)?.emissions).toBe(1);
+    expect(s.intentRecord(BOB, ID)?.emissions).toBe(1);
+    expect(s.intentRecord(ALICE, ID)?.firstTx).toBe('0xa');
+    expect(s.intentRecord(BOB, ID)?.firstTx).toBe('0xb');
+    s.close();
+  });
+
+  // THE CONTROL ON THAT ROW. Both wallets under ONE topic - which is what the
+  // old derivation produced - and the second emission is an anomaly against the
+  // first wallet's intent while the second's stays at zero.
+  it('control: sharing a topic is exactly the failure, so the row above can fail', () => {
+    const s = new Store(':memory:');
+    const shared = intentTopic(ALICE, ID);
+    put(s, ALICE, ID, 5n, { topic: shared });
+    put(s, BOB, ID, 99n, { topic: shared });
+
+    expect(s.recordEmission({ topic: shared, txHash: '0xa', from: '0xaaa', isExpectedEmitter: true })).toBeNull();
+    const second = s.recordEmission({ topic: shared, txHash: '0xb', from: '0xbbb', isExpectedEmitter: true });
+    expect(second).not.toBeNull();
+    expect(second?.emissions).toBe(2);
+    s.close();
+  });
+});
+
+describe('a broadcast puts the row\'s topic on chain, never a fresh derivation', () => {
+  // THE MIXED STORE IS THE POINT. Rows written before v8 carry
+  // keccak256(intent_id); rows written after carry the hash of both. A
+  // broadcast that re-derived would emit the NEW form for an OLD row, the
+  // emission would match nothing, `recordEmission` would answer as for an
+  // intent this store never reserved, and the transfer would really have
+  // happened while the intent sat unresolved for ever.
+  it('reads a pre-v8 topic back unchanged', () => {
+    const s = new Store(':memory:');
+    const legacy = ('0x' + '11'.repeat(32)) as `0x${string}`;
+    put(s, ALICE, ID, 5n, { topic: legacy });
+    expect(s.intentTopicOf(ALICE, ID)).toBe(legacy);
+    // ...and it is NOT what today's derivation would produce, so the row is
+    // doing the work rather than the two happening to agree.
+    expect(s.intentTopicOf(ALICE, ID)).not.toBe(intentTopic(ALICE, ID));
+    s.close();
+  });
+
+  it('answers null for a reservation that is not there, rather than a derivation', () => {
+    const s = new Store(':memory:');
+    expect(s.intentTopicOf(ALICE, 'never-reserved')).toBeNull();
+    s.close();
   });
 });

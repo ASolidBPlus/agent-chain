@@ -202,7 +202,7 @@ async function getReverse({ services, param }: RouteContext): Promise<unknown> {
 ///   broadcast - a hash exists; the chain has not confirmed it yet.
 ///   confirmed - the receipt says success.
 ///   failed    - the receipt says reverted. The money did NOT move.
-async function getIntent({ services, param, principal }: RouteContext): Promise<unknown> {
+async function getIntent({ services, param, principal, url }: RouteContext): Promise<unknown> {
   const intentId = decodeURIComponent(param ?? '');
   if (intentId === '') throw new HttpError('invalid_request', 'intent id is required');
 
@@ -220,12 +220,25 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
   // comparison below would then fail and answer `unknown_intent` about an
   // intent the caller really has.
   //
-  // Platform scope has no wallet coordinate to ask with, so it takes the
-  // unambiguous-or-nothing read; see the store for why ambiguity answers the
-  // same way absence does.
+  // `?wallet=` IS THE COORDINATE THE ROUTE LACKED, not a new power. Intents are
+  // per wallet now, so a platform lookup without one is underdetermined by
+  // construction, and an operator reconciling a specific wallet's stuck intent
+  // needs a way to name it that is not a guess. Without it, platform scope
+  // still gets the unambiguous-or-nothing read.
+  //
+  // A WALLET MAY NOT USE IT. Its own id is the only one it can ask under, so a
+  // `wallet` parameter from wallet scope is either redundant or an attempt to
+  // read somebody else's - refused either way rather than ignored, because an
+  // ignored parameter is one a caller believes worked.
+  const wanted = url.searchParams.get('wallet');
+  if (wanted !== null && principal.scope !== 'platform') {
+    throw new HttpError('invalid_request', 'wallet is platform scope; your own intents need no wallet');
+  }
   const record =
     principal.scope === 'platform'
-      ? services.store.intentRecordUnambiguous(intentId)
+      ? wanted !== null
+        ? services.store.intentRecord(wanted, intentId)
+        : services.store.intentRecordUnambiguous(intentId)
       : services.store.intentRecord(principal.agentId, intentId);
   if (record === null) throw new HttpError('unknown_intent', `no intent ${intentId}`);
 
