@@ -130,7 +130,12 @@ jobs:
           base="${{ github.event.pull_request.base.sha }}"
           if [ -z "$base" ]; then echo "not a pull request; nothing to compare"; exit 0; fi
           git fetch --no-tags --depth=1 origin "$base"
-          changed=$(git diff --name-only "$base"...HEAD)
+          # TWO DOTS, NOT THREE. `a...b` asks git for the MERGE BASE of a and b,
+          # and a shallow checkout has no common ancestor to find - the step
+          # failed with "no merge base" and exit 128 the first time it ran.
+          # Two dots compares the two commits directly, which is what is wanted:
+          # `base` is already the merge base GitHub computed for the PR.
+          changed=$(git diff --name-only "$base" HEAD)
           gen=$(echo "$changed" | grep -c '^svc/scripts/generate-abi\.ts$' || true)
           src=$(echo "$changed" | grep -c '^contracts/src/' || true)
           if [ "$gen" -gt 0 ] && [ "$src" -gt 0 ]; then
