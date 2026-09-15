@@ -256,8 +256,8 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
 /// The wallet row, platform scope (spec S4).
 ///
 /// EVERY FIELD HERE IS PRODUCED BY A WRITE PATH AND WAS READABLE BY NONE.
-/// `kind` is recorded at spawn, `frozen` is set by retirement and cleared only
-/// by `PATCH /policy {frozen:false}`, and `bareIdCount` is incremented by the
+/// `kind` is recorded at spawn, `retired` is set by `DELETE /wallets` and by
+/// nothing else, and `bareIdCount` is incremented by the
 /// §5 detector - and until this endpoint the only way to see any of them was to
 /// open the sqlite file. The harness's Wallets panel synthesises this row today
 /// from several calls and cannot get the last two at all.
@@ -405,8 +405,9 @@ async function postBalance({ services, body, param, principal }: RouteContext): 
   return services.treasury.setBalance(assertCanonicalAgentId(param), body);
 }
 
-/// Partial policy update, and the only way back from frozen. DELETE /wallets
-/// still means retirement and stays irreversible.
+/// Partial policy update. It is NOT a way back from retirement: `frozen` left
+/// this body at v0.8.0 and is refused, `DELETE /wallets` stays irreversible,
+/// and freezing a LIVE wallet is the Token contract's, through admin-call.
 async function patchPolicy({ services, body, param, principal }: RouteContext): Promise<unknown> {
   requirePlatform(principal, 'PATCH /wallets/:agentId/policy');
   return services.spawner.patchPolicy(assertCanonicalAgentId(param), body);

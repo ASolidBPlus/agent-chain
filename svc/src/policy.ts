@@ -774,15 +774,6 @@ export function isAllowed(policy: AgentPolicy | null, name: string): boolean {
   return policy?.allow === undefined || policy.allow.some((p) => matchesPattern(p, name));
 }
 
-/// Throws the S5 refusal that applies, in the order S5 lists them, so the
-/// reason a persona sees is stable rather than dependent on check ordering.
-///
-/// `over_stage_cap` is NOT raised here - it belongs to the atomic reservation
-/// in the store, because a cap tested separately from the record it guards is
-/// a check-then-act that every concurrent caller passes.
-/// The stage cap in wei. Deliberately NOT checked by enforcePolicy: the check
-/// and the spend record have to be one atomic step, or concurrent sends all
-/// read the same pre-spend total and all pass. See Store.reserveStageSpend.
 /// §1b. The stage bound for a reservation, or `'unlimited'`.
 ///
 /// NEVER NULL. Null is `reserve`'s third state and means "no stage at all"
@@ -806,6 +797,15 @@ export function stageCapWei(policy: AgentPolicy | null, tokenKey: string, decima
   return { cap: capToWei(cap, decimals) };
 }
 
+/// Throws the S5 refusal that applies, in the order S5 lists them, so the
+/// reason a persona sees is stable rather than dependent on check ordering.
+///
+/// `over_stage_cap` is NOT raised here - it belongs to the atomic reservation
+/// in the store, because a cap tested separately from the record it guards is
+/// a check-then-act that every concurrent caller passes. See
+/// `Store.reserveStageSpend`. (These two paragraphs sat on `stageCapWei`,
+/// whose doc block had collected three headers; they describe this function.)
+///
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
 ///
 /// A wallet holds MORE THAN ONE name by design - that is not an edge case, it

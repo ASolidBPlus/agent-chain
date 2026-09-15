@@ -3,10 +3,13 @@
 //
 //   memos   - ERC-20 `transfer` carries no memo field, but /history must return
 //             one, so the memo is joined on by txHash after the fact.
-//   frozen  - the single source of truth for whether a wallet may spend.
+//   frozen  - RETIREMENT, under the name the table was created with. It is the
+//             single source of truth for whether a wallet may spend, and
 //             /sign-transfer checks ONLY this. The per-agent POLICY_FILE that
 //             wallet-mcp reads is a local fast-path copy; if the two ever
-//             disagree, this table wins (spec S4).
+//             disagree, this table wins (spec S4). The NAME is kept because
+//             renaming a column is a migration and the table's meaning did not
+//             change - what changed at v0.8.0 is that nothing else writes it.
 //   outbox  - hub-core does not exist until C5, so chain events are buffered
 //             here and retried rather than dropped.
 //
@@ -451,13 +454,19 @@ export class Store {
       .run(agentId, Date.now());
   }
 
-  /// The ONLY way back from frozen (spec S3). `DELETE /wallets` still means
-  /// retirement and is not reversible by this - retirement also clears the
-  /// wallet's aliases, so un-freezing a retired wallet would give back the
-  /// ability to spend without giving back the ability to be paid.
-  unfreeze(agentId: string): void {
-    this.db.query(`DELETE FROM frozen WHERE agent_id = ?`).run(agentId);
-  }
+  /// THERE IS NO `unfreeze`, AND THE ABSENCE IS THE POINT AT v0.8.0.
+  ///
+  /// There was one, and its own comment said `DELETE /wallets` "is not
+  /// reversible by this". That stopped being true when retirement and the
+  /// service-side freeze collapsed onto this one table: `unfreeze` deleted the
+  /// row that `isRetired` reads, so it un-retired the wallet - while retirement
+  /// also clears the wallet's aliases, which it could not give back. A wallet
+  /// able to spend and unable to be paid.
+  ///
+  /// It was unreachable: no route and no caller, in src or in test. Deleted
+  /// rather than documented, because a one-line un-retire in the store API of a
+  /// release whose lock IS retirement is worth more than a true comment about
+  /// it. The way back from retirement is a fresh spawn under a new id.
 
   isRetired(agentId: string): boolean {
     return this.db.query(`SELECT 1 AS present FROM frozen WHERE agent_id = ?`).get(agentId) != null;

@@ -466,10 +466,10 @@ export class Spawner {
 
   /// Partial update of a wallet's policy (harness spec S3). Platform scope.
   ///
-  /// `frozen: false` is the ONLY way back from frozen. `DELETE /wallets` keeps
-  /// meaning retirement and stays irreversible: it also clears the wallet's
-  /// aliases, so un-retiring by un-freezing would return the ability to spend
-  /// without the ability to be paid.
+  /// NOT A WAY BACK FROM RETIREMENT. `frozen` left this body at v0.8.0 (§3)
+  /// and a body carrying it is refused by name; `DELETE /wallets` stays
+  /// irreversible, and it also clears the wallet's aliases, so un-retiring
+  /// would return the ability to spend without the ability to be paid.
   async patchPolicy(
     agentId: string,
     body: {

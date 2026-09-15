@@ -102,7 +102,14 @@ function required(name: string): string {
   return value;
 }
 
-function optional(name: string, fallback: string): string {
+/// AN ABSENT FALLBACK IS A FALLBACK. The overload exists so an optional
+/// setting with no default reads the same way as one with a default: `||
+/// undefined` looked equivalent and was not, because it treats `"   "` as a
+/// value while every neighbour treats it as unset - so a whitespace
+/// POLICY_DEFAULTS_FILE became a path of spaces and failed at load.
+function optional(name: string, fallback: string): string;
+function optional(name: string, fallback?: undefined): string | undefined;
+function optional(name: string, fallback?: string): string | undefined {
   const value = process.env[name];
   return value === undefined || value.trim() === '' ? fallback : value;
 }
@@ -136,7 +143,7 @@ export function loadConfig(env = process.env): Config {
       keystoreDir: optional('KEYSTORE_DIR', '/keystore'),
       policyDir: optional('POLICY_DIR', '/policies'),
       storePath: optional('STORE_PATH', '/store/chain-svc.sqlite'),
-      policyDefaultsPath: process.env.POLICY_DEFAULTS_FILE || undefined,
+      policyDefaultsPath: optional('POLICY_DEFAULTS_FILE'),
       deploymentsDir: optional('DEPLOYMENTS_DIR', '/deployments'),
       hubCoreUrl: hubCoreUrl(process.env.HUB_CORE_URL),
     };

@@ -121,7 +121,12 @@ const WHOLE_UNITS = /^\d{1,30}$/;
 /// platform exactly as they hold for a persona:
 ///
 ///   - an OVERLOADED name does not identify one function, and the two differ in
-///     argument types, which is what every validator and rule reads.
+///     argument types, which is what every validator and rule reads. THE CHECK
+///     IS NOT HERE: this function is handed ONE resolved `abiFunction`, so by
+///     the time it runs the ambiguity is already gone. It is `requireFunction`
+///     in modules.ts that counts the matches and refuses more than one - which
+///     is why an overload is refused identically on the entry path and on the
+///     entry-less admin-call path, without either of them saying so.
 ///   - a PAYABLE function cannot be called: there is no ETH economy.
 ///   - an APPROVAL grants an allowance, and money here is push-only. Refused by
 ///     NAME on every contract, because a custom contract is free to declare one.

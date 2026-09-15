@@ -1762,10 +1762,16 @@ export class Treasury {
 
   /// §3.3. The hub calls a contract with the treasury's key.
   ///
-  /// NO KIND, FROZEN, CAP, COUNT OR ADDRESS RULE: platform scope is the
+  /// NO KIND, RETIREMENT, CAP, COUNT OR ADDRESS RULE: platform scope is the
   /// operator, and per-stage counting is a persona budget rather than an
-  /// operator one. What DOES apply is the entry: `admin: true` must be written
-  /// in calls.json, so the hub's powers are on the record beside the personas'.
+  /// operator one.
+  ///
+  /// NO ENTRY IS REQUIRED EITHER, as of v0.8.0. This said `admin: true` must be
+  /// written in calls.json "so the hub's powers are on the record" - but
+  /// `admin` was removed (§2) and is now refused at load by name, and this path
+  /// reaches any function of any registered contract with or without an entry.
+  /// What still applies is `assertRailAllows`: the four properties of the rail
+  /// itself, which hold for the platform exactly as for a persona.
   async adminCall(body: {
     contract?: unknown;
     function?: unknown;

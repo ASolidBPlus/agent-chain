@@ -122,9 +122,13 @@ export interface WalletPolicy {
   deny?: string[];
 }
 
-/// Read fresh on every send rather than cached: chain-svc rewrites this file to
-/// `frozen: true` when a wallet is retired, and a cached copy would keep
-/// spending for as long as the process lived.
+/// Read fresh on every send rather than cached. It USED to be that retirement
+/// rewrote this file with `frozen: true`, so a cached copy would keep spending
+/// for as long as the process lived; at chain-svc v0.8.0 `retire()` writes only
+/// its own table and never a policy file, and `frozen` left the document
+/// entirely. The reason to re-read survives the reason that prompted it: this
+/// file is chain-svc's to rewrite at any time (a platform PATCH, a clear), and
+/// it is a FAST PATH over an authority that is checked again on every send.
 export function readPolicy(path: string): WalletPolicy | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as WalletPolicy;
