@@ -214,10 +214,20 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
   // make the error an existence oracle: guess ids until one answers 403 and you
   // have confirmed another wallet's intent. This is why the ownership check
   // does not get to throw its own error.
-  const record = services.store.intentRecord(intentId);
-  const mine =
-    record !== null && (principal.scope === 'platform' || principal.agentId === record.agentId);
-  if (!mine) throw new HttpError('unknown_intent', `no intent ${intentId}`);
+  // ASKED UNDER THE PRINCIPAL'S OWN ID (v8, finding 1), so ownership is the
+  // lookup rather than a comparison after one. Keyed on the id alone, a wallet
+  // asking about its OWN intent could be handed somebody else's row - the
+  // comparison below would then fail and answer `unknown_intent` about an
+  // intent the caller really has.
+  //
+  // Platform scope has no wallet coordinate to ask with, so it takes the
+  // unambiguous-or-nothing read; see the store for why ambiguity answers the
+  // same way absence does.
+  const record =
+    principal.scope === 'platform'
+      ? services.store.intentRecordUnambiguous(intentId)
+      : services.store.intentRecord(principal.agentId, intentId);
+  if (record === null) throw new HttpError('unknown_intent', `no intent ${intentId}`);
 
   // ANSWERED FROM THE STORE, not by a chain call. The tail already records
   // every IntentTransfer against the intent that authorised it, so the question

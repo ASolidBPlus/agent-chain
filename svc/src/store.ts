@@ -107,13 +107,24 @@ export class Store {
       -- stage rather than being zeroed on transition: a late-arriving transfer
       -- from the previous stage cannot then overdraw the new one.
       -- An intent is RESERVED before the money moves and is never deleted.
-      -- intent_id is the PRIMARY KEY, so a second attempt under the same id
-      -- cannot insert: that is the idempotency guarantee, and it lives on the
-      -- side that cannot forget rather than in the persona's JSON ledger, which
-      -- is only written after a successful response and so is empty in exactly
-      -- the case it exists for.
+      -- A second attempt under the same id BY THE SAME WALLET cannot insert:
+      -- that is the idempotency guarantee, and it lives on the side that cannot
+      -- forget rather than in the persona's JSON ledger, which is only written
+      -- after a successful response and so is empty in exactly the case it
+      -- exists for.
+      -- THE KEY IS (agent_id, intent_id), NOT intent_id (v8, finding 1). An
+      -- intent id is a string the CALLER chooses, so a globally unique key made
+      -- one wallet's choice of the string collide with another's: bob reserving
+      -- "payment-1" after alice got back alice's txHash and alice's money moved
+      -- nothing. Measured on a live stack before the fix - bob's send answered
+      -- 200 with alice's hash and bob's own canonical, and bob's balance did
+      -- not change.
+      --
+      -- Another wallet's id is simply a different row. No new refusal word and
+      -- no oracle: nothing tells bob that alice used the string, because
+      -- nothing should.
       CREATE TABLE IF NOT EXISTS intents (
-        intent_id  TEXT PRIMARY KEY,
+        intent_id  TEXT NOT NULL,
         agent_id   TEXT NOT NULL,
         stage      TEXT NOT NULL,
         amount     TEXT NOT NULL,
@@ -171,7 +182,8 @@ export class Store {
         call_contract  TEXT,
         call_function  TEXT,
         call_args_hash TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, intent_id)
       );
       -- Only ever holds the SECOND and later emissions for one intent, so it is
       -- small by construction rather than by pruning.
@@ -613,9 +625,13 @@ export class Store {
     // one decision: "may this send happen". Two transactions would admit a
     // window where the intent is taken and the budget is not, or the reverse.
     const attempt = this.db.transaction((): Reservation => {
+      // BOTH COORDINATES (v8, finding 1). Keyed on the id alone, bob's reserve
+      // of a string alice had used found ALICE's row and answered `duplicate`
+      // with her txHash - bob's send reported success, moved nothing, and
+      // handed him a hash of somebody else's transfer.
       const existing = this.db
-        .query(`SELECT tx_hash FROM intents WHERE intent_id = ?`)
-        .get(intentId) as { tx_hash: string | null } | null;
+        .query(`SELECT tx_hash FROM intents WHERE agent_id = ? AND intent_id = ?`)
+        .get(agentId, intentId) as { tx_hash: string | null } | null;
       if (existing) return { outcome: 'duplicate', txHash: existing.tx_hash };
 
       // Re-read INSIDE the transaction: a value read before it began is the
@@ -709,8 +725,10 @@ export class Store {
   /// Records the result of a send against the intent that authorised it, so a
   /// retry can be answered with the original transaction rather than a second
   /// one.
-  completeIntent(intentId: string, txHash: string): void {
-    this.db.query(`UPDATE intents SET tx_hash = ? WHERE intent_id = ?`).run(txHash, intentId);
+  completeIntent(agentId: string, intentId: string, txHash: string): void {
+    this.db
+      .query(`UPDATE intents SET tx_hash = ? WHERE agent_id = ? AND intent_id = ?`)
+      .run(txHash, agentId, intentId);
   }
 
   /// THERE IS DELIBERATELY NO TIMED SWEEP OF STALE HOLDS, and this is the
@@ -743,7 +761,15 @@ export class Store {
   /// UTC; the contract change rides the post-#14 PR.
 
   /// The whole reservation row, for reconciliation (spec S4 "Intents").
-  intentRecord(intentId: string): {
+  /// One wallet's intent, by BOTH coordinates.
+  ///
+  /// The ownership question stops being a comparison and becomes the lookup:
+  /// asking under your own id can only ever return your own row. Before v8 the
+  /// row came back by id alone and `getIntent` compared its `agent_id` to the
+  /// principal - which, once two wallets can use one string, answers
+  /// `unknown_intent` for a caller's OWN intent whenever somebody else's row is
+  /// the one the id happens to find.
+  intentRecord(agentId: string, intentId: string): {
     agentId: string;
     txHash: string | null;
     emissions: number;
@@ -751,8 +777,11 @@ export class Store {
     firstFrom: string | null;
   } | null {
     const row = this.db
-      .query(`SELECT agent_id, tx_hash, emissions, first_tx, first_from FROM intents WHERE intent_id = ?`)
-      .get(intentId) as
+      .query(
+        `SELECT agent_id, tx_hash, emissions, first_tx, first_from
+         FROM intents WHERE agent_id = ? AND intent_id = ?`,
+      )
+      .get(agentId, intentId) as
       | { agent_id: string; tx_hash: string | null; emissions: number; first_tx: string | null; first_from: string | null }
       | null;
     return row
@@ -913,8 +942,10 @@ export class Store {
   /// rather than on stage. Test-only: every row a test creates is seconds old,
   /// so a wall-clock TTL is the one variant of "emission rows are immortal"
   /// that no ordinary fixture can reach.
-  backdateIntentForTest(intentId: string, createdAt: number): void {
-    this.db.query(`UPDATE intents SET created_at = ? WHERE intent_id = ?`).run(createdAt, intentId);
+  backdateIntentForTest(agentId: string, intentId: string, createdAt: number): void {
+    this.db
+      .query(`UPDATE intents SET created_at = ? WHERE agent_id = ? AND intent_id = ?`)
+      .run(createdAt, agentId, intentId);
   }
 
   /// Intents this store reserved that have no recorded transaction, with the
@@ -1030,8 +1061,56 @@ export class Store {
   /// from a chain-svc uuid being quoted, which are different stories about how
   /// somebody learned it. A test that can see the column is what keeps the two
   /// from silently becoming one.
-  intentIdSource(intentId: string): string | null {
-    const row = this.db.query(`SELECT id_source FROM intents WHERE intent_id = ?`).get(intentId) as
+  /// The same row for a PLATFORM caller, which has no wallet coordinate to ask
+  /// with - the route takes an id and nothing else.
+  ///
+  /// EXACTLY ONE OR NOTHING. If two wallets have used the string, this answers
+  /// null and the operator gets the same `unknown_intent` as for an id nobody
+  /// used. That is deliberate: returning either row would be picking one
+  /// wallet's intent to represent both, and refusing differently would make the
+  /// reply an existence oracle for the collision. Absence and ambiguity are one
+  /// answer here for the same reason absence and not-yours already were.
+  ///
+  /// The consequence, stated rather than buried: an operator asking about an id
+  /// two wallets used is told there is no such intent. Nothing calls this path
+  /// today - wallet-mcp is the only caller of GET /intents/:id and it is always
+  /// wallet scope - so this is a shape decision, not a behaviour change anybody
+  /// is relying on. If the operator needs to name the wallet, that is a route
+  /// parameter and a separate decision.
+  intentRecordUnambiguous(intentId: string): {
+    agentId: string;
+    txHash: string | null;
+    emissions: number;
+    firstTx: string | null;
+    firstFrom: string | null;
+  } | null {
+    const rows = this.db
+      .query(
+        `SELECT agent_id, tx_hash, emissions, first_tx, first_from
+         FROM intents WHERE intent_id = ? LIMIT 2`,
+      )
+      .all(intentId) as Array<{
+      agent_id: string;
+      tx_hash: string | null;
+      emissions: number;
+      first_tx: string | null;
+      first_from: string | null;
+    }>;
+    if (rows.length !== 1) return null;
+    const row = rows[0]!;
+    return {
+      agentId: row.agent_id,
+      txHash: row.tx_hash,
+      emissions: row.emissions,
+      firstTx: row.first_tx,
+      firstFrom: row.first_from,
+    };
+  }
+
+  intentIdSource(agentId: string, intentId: string): string | null {
+    const row = this.db
+      .query(`SELECT id_source FROM intents WHERE agent_id = ? AND intent_id = ?`)
+      .get(agentId, intentId) as
       | { id_source: string | null }
       | null;
     return row?.id_source ?? null;
@@ -1043,15 +1122,19 @@ export class Store {
   /// intent's OWN token, not the deployment's default - which is what makes a
   /// second token's IntentTransfer an ordinary emission and a cross-token one
   /// an anomaly.
-  intentToken(intentId: string): string | null {
-    const row = this.db.query(`SELECT token FROM intents WHERE intent_id = ?`).get(intentId) as
+  intentToken(agentId: string, intentId: string): string | null {
+    const row = this.db
+      .query(`SELECT token FROM intents WHERE agent_id = ? AND intent_id = ?`)
+      .get(agentId, intentId) as
       | { token: string | null }
       | null;
     return row?.token ?? null;
   }
 
-  intentTxHash(intentId: string): string | null {
-    const row = this.db.query(`SELECT tx_hash FROM intents WHERE intent_id = ?`).get(intentId) as
+  intentTxHash(agentId: string, intentId: string): string | null {
+    const row = this.db
+      .query(`SELECT tx_hash FROM intents WHERE agent_id = ? AND intent_id = ?`)
+      .get(agentId, intentId) as
       | { tx_hash: string | null }
       | null;
     return row?.tx_hash ?? null;
@@ -1089,14 +1172,14 @@ export class Store {
   /// caller whose stage moves mid-request (`currentStage()` can change once
   /// hub-core is configured), and for the scan-gated sweep, which by
   /// construction RECONSTRUCTS these coordinates instead of remembering them.
-  release(intentId: string): void {
+  release(agentId: string, intentId: string): void {
     const undo = this.db.transaction((): void => {
       const row = this.db
         .query(
           `SELECT agent_id, stage, held_wei, token, call_contract, call_function
-           FROM intents WHERE intent_id = ? AND tx_hash IS NULL`,
+           FROM intents WHERE agent_id = ? AND intent_id = ? AND tx_hash IS NULL`,
         )
-        .get(intentId) as {
+        .get(agentId, intentId) as {
         agent_id: string;
         stage: string;
         held_wei: string;
@@ -1112,7 +1195,9 @@ export class Store {
       // or changed shape. A mutation that removes it survives, and that is
       // correct rather than a coverage gap: it describes a change the code
       // cannot express while the early return stands.
-      this.db.query(`DELETE FROM intents WHERE intent_id = ? AND tx_hash IS NULL`).run(intentId);
+      this.db
+        .query(`DELETE FROM intents WHERE agent_id = ? AND intent_id = ? AND tx_hash IS NULL`)
+        .run(agentId, intentId);
 
       const held = BigInt(row.held_wei);
       // THE TOKEN COMES FROM THE ROW, like every other coordinate `release`
@@ -1162,10 +1247,16 @@ export class Store {
   /// same call. A repeat under the same id with different arguments is a
   /// different call wearing a used id, and returning the first call's hash
   /// would tell the caller their second call had succeeded.
-  intentCall(intentId: string): { contract: string; function: string; argsHash: string } | null {
+  intentCall(
+    agentId: string,
+    intentId: string,
+  ): { contract: string; function: string; argsHash: string } | null {
     const row = this.db
-      .query(`SELECT call_contract, call_function, call_args_hash FROM intents WHERE intent_id = ?`)
-      .get(intentId) as
+      .query(
+        `SELECT call_contract, call_function, call_args_hash
+         FROM intents WHERE agent_id = ? AND intent_id = ?`,
+      )
+      .get(agentId, intentId) as
       | { call_contract: string | null; call_function: string | null; call_args_hash: string | null }
       | null;
     if (!row || row.call_contract === null || row.call_function === null) return null;

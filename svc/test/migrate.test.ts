@@ -707,7 +707,15 @@ describe('the v4 -> v5 deployment reshape', () => {
     // fixtures still describe the migration they think they do. Bumped to 7 by
     // the multi-token increment, which rekeys stage_spend by token - a NUMBERED
     // step, like the v4 -> v5 reshape below, which it leaves untouched.
-    expect(SCHEMA_VERSION).toBe(7);
+    //
+    // Bumped to 8 by finding 1, which rekeys `intents` on (agent_id, intent_id).
+    // It fired, it was read, and the answer is that the v4 and v5 fixtures are
+    // unaffected: they reshape `deployment`, a table v8 does not touch. The two
+    // `toBe(7)` assertions below DID have to move - they asserted the version a
+    // v6 store lands on, which is now 8 because both steps run - and they are
+    // SCHEMA_VERSION now, because what they were ever about is "the store ends
+    // up current", not "the store ends up at seven".
+    expect(SCHEMA_VERSION).toBe(8);
     expect(() => new Store(dbPath())).toThrow(/newer/i);
   });
 
@@ -795,7 +803,7 @@ describe('the v6 -> v7 per-token rekey', () => {
     const key = db.query(`SELECT * FROM pragma_index_list('stage_spend')`).all();
     db.close();
 
-    expect(userVersion(dbPath())).toBe(7);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
     expect(columns(dbPath(), 'stage_spend').sort()).toEqual(['agent_id', 'spent', 'stage', 'token']);
     expect(key.length).toBeGreaterThan(0);
   });
@@ -840,7 +848,7 @@ describe('the v6 -> v7 per-token rekey', () => {
     const after = columns(dbPath(), 'stage_spend').sort();
     new Store(dbPath()).close();
     expect(columns(dbPath(), 'stage_spend').sort()).toEqual(after);
-    expect(userVersion(dbPath())).toBe(7);
+    expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
 
   it('does not run against a FRESH store, which never had the old key', () => {

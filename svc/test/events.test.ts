@@ -719,7 +719,7 @@ describe('sweepOnce', () => {
     store.setCursor('chain-log-tail', 9n);
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
-    expect(store.intentTxHash('landed')).toBe('0xaaa');
+    expect(store.intentTxHash('orch:mark', 'landed')).toBe('0xaaa');
     // The money moved, so the budget stays spent.
     expect(store.spentThisStage('orch:mark', store.currentStage(), 'play')).toBe(10n ** 18n);
     store.close();
@@ -736,7 +736,7 @@ describe('sweepOnce', () => {
     const result = await tail.sweepOnce();
     expect(result.confirmed).toBe(0);
     expect(result.held).toBe(1); // and NOT released either - an emission exists
-    expect(store.intentTxHash('foreign')).toBeNull();
+    expect(store.intentTxHash('orch:mark', 'foreign')).toBeNull();
     store.close();
   });
 
@@ -819,7 +819,7 @@ describe('sweepOnce', () => {
 
     // Backdate the reservation a week. A retention rule keyed on age - the one
     // mechanism the stage tests cannot express - would have removed it.
-    store.backdateIntentForTest('ancient-by-clock', Date.now() - 7 * 86_400_000);
+    store.backdateIntentForTest('orch:mark', 'ancient-by-clock', Date.now() - 7 * 86_400_000);
 
     await new EventTail({ token: 'tok' } as Config,
       chainAt(1n, [{ args: { intentId: TOPIC2, from: WALLET }, transactionHash: '0xaaa' }]), store).pollOnce();
@@ -886,8 +886,8 @@ describe('sweepOnce', () => {
 
     expect(await tail.sweepOnce()).toEqual({ confirmed: 1, held: 0 });
 
-    expect(store.intentTxHash('new-stage')).toBe('0xbbb'); // swept
-    expect(store.intentTxHash('old-stage')).toBeNull();    // skipped, not resolved
+    expect(store.intentTxHash('orch:mark', 'new-stage')).toBe('0xbbb'); // swept
+    expect(store.intentTxHash('orch:mark', 'old-stage')).toBeNull();    // skipped, not resolved
     store.close();
   });
 
@@ -926,7 +926,7 @@ describe('sweepOnce', () => {
     await tail.sweepOnce();
 
     // Terminal status, from the store rather than a chain call.
-    expect(store.intentTxHash('terminal')).toBe('0xaaa');
+    expect(store.intentTxHash('orch:mark', 'terminal')).toBe('0xaaa');
     // And the id is spent: a retry is refused WITH the original transaction,
     // never admitted as a fresh reservation.
     expect(
@@ -958,7 +958,7 @@ describe('sweepOnce', () => {
     store.recordEmission({ topic: TOPIC2, txHash: '0xaaa', from: WALLET, isExpectedEmitter: true });
 
     expect((await tail.sweepOnce()).confirmed).toBe(1);
-    expect(store.intentTxHash('unbounded-landed')).toBe('0xaaa');
+    expect(store.intentTxHash('orch:mark', 'unbounded-landed')).toBe('0xaaa');
     store.close();
   });
 
@@ -1444,7 +1444,7 @@ describe('generic decoding', () => {
     // RESOLVED - the first half of this test's own name. Siblings do kill the
     // "record nothing" mutant, so this closed no hole; it stops this test
     // passing for a reason it does not claim.
-    expect(store.intentRecord('call-1')?.emissions).toBe(1);
+    expect(store.intentRecord('orch:a', 'call-1')?.emissions).toBe(1);
     const anomalies = payloads(store).filter((p) => p.kind === 'chain.anomaly');
     expect(anomalies).toHaveLength(0);
     store.close();
@@ -1513,7 +1513,7 @@ describe('generic decoding', () => {
     // describe up, and I fixed that one and did not look for this one - the
     // same assertion, the same file, three hundred lines apart. Zero anomalies
     // is also what an emission nobody recorded produces.
-    expect(store.intentRecord('gold-1')?.emissions).toBe(1);
+    expect(store.intentRecord('orch:a', 'gold-1')?.emissions).toBe(1);
     expect(payloads(store).filter((p) => p.kind === 'chain.anomaly')).toHaveLength(0);
     store.close();
   });

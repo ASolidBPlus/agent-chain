@@ -133,6 +133,13 @@ export function spendVia(marker?: string): 'mcp' | 'direct' {
 /// Three derivations would give three answers to "did this land?", which is the
 /// only question the event exists to answer, so this is deliberately the single
 /// function and not an inline keccak at each site.
+/// THE AGENT COORDINATE AN ADMIN-CALL RESERVES UNDER. The hub is not a wallet,
+/// so `intents.agent_id` records this pseudo-id for the calls it makes on its
+/// own behalf. A CONSTANT since v8: the reservation, the duplicate lookup and
+/// the completion all name it, and three copies of one string is how two of
+/// them come to disagree.
+export const PLATFORM_INTENT_AGENT = 'platform';
+
 export function intentTopic(intentId: string): `0x${string}` {
   return keccak256(toBytes(intentId));
 }
@@ -544,7 +551,7 @@ export class Treasury {
           })
         : await this.sweepToTreasury(agentId, current - target, reason, intentId, tok);
 
-    this.store.completeIntent(intentId, result.txHash);
+    this.store.completeIntent(agentId, intentId, result.txHash);
 
     // RE-READ. The reply reported `target` at both exits, which is the
     // INTENTION and not the OUTCOME: `current` was read several awaits before
@@ -933,7 +940,7 @@ export class Treasury {
       });
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {
-      this.store.release(intentId);
+      this.store.release(fromAgentId, intentId);
       // asCallError, NOT asChainError - THE THIRD PATH WITH THIS DEFECT and the
       // first that could not be reached until the token had a freeze.
       //
@@ -1016,7 +1023,7 @@ export class Treasury {
       });
       // Recorded as soon as there IS a hash, before the receipt: a crash while
       // waiting must still leave the retry able to find the original send.
-      this.store.completeIntent(args.intentId, hash);
+      this.store.completeIntent(args.fromAgentId, args.intentId, hash);
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
 
       // The memo has no on-chain home - ERC-20 transfer carries none - so it is
@@ -1573,7 +1580,7 @@ export class Treasury {
       // repeated intent id with the original transaction hash, which is right
       // for a retry and wrong for a DIFFERENT call wearing a used id - that
       // caller would be told their second call had succeeded.
-      const first = this.store.intentCall(intentId);
+      const first = this.store.intentCall(fromAgentId, intentId);
       if (first && (first.contract !== contract.key || first.function !== entry.function || first.argsHash !== argsHash)) {
         throw new HttpError(
           'invalid_request',
@@ -1620,7 +1627,7 @@ export class Treasury {
       });
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {
-      this.store.release(intentId);
+      this.store.release(fromAgentId, intentId);
       // asCallError, NOT asChainError, and this is THE PERSONA-FACING OP.
       //
       // `prepareTransactionRequest` ESTIMATES GAS when the request carries none
@@ -1644,6 +1651,7 @@ export class Treasury {
       wallet,
       serializedTransaction,
       intentId,
+      fromAgentId,
       contract,
       entry,
       wireArgs: supplied,
@@ -1676,6 +1684,10 @@ export class Treasury {
     wallet: Pick<Signer, 'sendRawTransaction'>;
     serializedTransaction: `0x${string}`;
     intentId: string;
+    /// WHO RESERVED IT. Needed since v8: the intent row is keyed on
+    /// (agent_id, intent_id), so stamping the hash without it would find
+    /// whichever wallet's row the id happened to match.
+    fromAgentId: string;
     contract: RegisteredContract;
     entry: CallEntry;
     wireArgs: unknown[];
@@ -1689,7 +1701,7 @@ export class Treasury {
     });
     // Recorded as soon as there IS a hash, before the receipt: a crash while
     // waiting must still leave the retry able to find the original call.
-    this.store.completeIntent(args.intentId, hash);
+    this.store.completeIntent(args.fromAgentId, args.intentId, hash);
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
     const reverted = receipt.status === 'reverted';
 
@@ -1873,7 +1885,7 @@ export class Treasury {
       intentId,
       topic: intentTopic(intentId),
       idSource: suppliedId ? 'caller' : 'server',
-      agentId: 'platform',
+      agentId: PLATFORM_INTENT_AGENT,
       stage,
       amount: 0n,
       stageCap: null,
@@ -1884,7 +1896,7 @@ export class Treasury {
       call: { contract: contract.key, function: fnName, argsHash },
     });
     if (reservation.outcome === 'duplicate') {
-      const first = this.store.intentCall(intentId);
+      const first = this.store.intentCall(PLATFORM_INTENT_AGENT, intentId);
       if (first && (first.contract !== contract.key || first.function !== fnName || first.argsHash !== argsHash)) {
         throw new HttpError(
           'invalid_request',
@@ -1948,7 +1960,7 @@ export class Treasury {
       }
       throw classified;
     }
-    this.store.completeIntent(intentId, hash);
+    this.store.completeIntent(PLATFORM_INTENT_AGENT, intentId, hash);
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
     const reverted = receipt.status === 'reverted';
 

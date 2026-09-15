@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { decodeFunctionData, type Abi } from 'viem';
-import { Treasury, serialiseResult, type Signer } from '../src/treasury.ts';
+import { Treasury, serialiseResult, PLATFORM_INTENT_AGENT, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
 import { fixedCallPolicy, type CallEntry } from '../src/calls.ts';
@@ -726,7 +726,7 @@ describe('per-entry counting', () => {
       ),
     ).not.toBe('no-error');
     expect(store.callCount('orch:a', store.currentStage(), 'converter', 'convert')).toBe(0);
-    expect(store.intentCall('i-1')).toBeNull();
+    expect(store.intentCall('orch:a', 'i-1')).toBeNull();
     store.close();
   });
 });
@@ -800,7 +800,7 @@ describe('a revert the contract rejects BEFORE it is mined', () => {
     // wire and the whole reservation comes back - the intent, the stage hold
     // and the per-entry count.
     expect(store.callCount('orch:a', store.currentStage(), 'converter', 'convert')).toBe(0);
-    expect(store.intentCall('i-1')).toBeNull();
+    expect(store.intentCall('orch:a', 'i-1')).toBeNull();
     expect(t.signed).toHaveLength(0);
   });
 
@@ -831,7 +831,7 @@ describe('a mined revert', () => {
     // IT WAS MINED, so the slot stays spent. A persona can lose stage budget to
     // a paused pair, and `read` is free for anyone unsure.
     expect(store.callCount('orch:a', store.currentStage(), 'converter', 'convert')).toBe(1);
-    expect(store.intentTxHash('i-1')).toBe('0xhash');
+    expect(store.intentTxHash('orch:a', 'i-1')).toBe('0xhash');
   });
 
   it('still emits the event, marked reverted', async () => {
@@ -1011,7 +1011,7 @@ describe('admin-call', () => {
       intentId: '',
     });
     expect(out.intentId).toMatch(/^chain-svc:/);
-    expect(store.intentIdSource(out.intentId)).toBe('server');
+    expect(store.intentIdSource(PLATFORM_INTENT_AGENT, out.intentId)).toBe('server');
   });
 
   it('emits hub.call', async () => {
@@ -1259,7 +1259,7 @@ describe('a transfer in a second token', () => {
     expect((decoded.args as unknown[])[1]).toBe(3_000000n);
 
     // THE BOOKKEEPING COORDINATE, which is the KEY and never the symbol.
-    expect(store.intentToken('g-1')).toBe('gold');
+    expect(store.intentToken('orch:a', 'g-1')).toBe('gold');
     expect(store.spentThisStage('orch:a', store.currentStage(), 'gold')).toBe(3_000000n);
     // AND THE DEFAULT TOKEN'S BUDGET IS UNTOUCHED, which is the whole point of
     // per-token caps: spending gold must not consume a persona's play budget.

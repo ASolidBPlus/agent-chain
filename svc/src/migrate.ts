@@ -31,7 +31,7 @@ import type { Database } from 'bun:sqlite';
 
 /// Bumped whenever the schema changes. A store stamped HIGHER than this was
 /// written by a newer binary and is refused - see `migrate`.
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export class SchemaError extends Error {
   constructor(
@@ -212,6 +212,21 @@ function columnsOf(db: Database, table: string): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
+/// The PRIMARY KEY columns of a table, in key order.
+///
+/// `pk` in `table_info` is 0 for a non-key column and 1..n for the position
+/// within a composite key, so this distinguishes `PRIMARY KEY (intent_id)` from
+/// `PRIMARY KEY (agent_id, intent_id)` - which `columnsOf` cannot, both having
+/// exactly the same columns. The v8 step turns on the KEY and not on a column,
+/// so it needs a guard that can see one.
+function primaryKeyOf(db: Database, table: string): string[] {
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as { name: string; pk: number }[];
+  return rows
+    .filter((r) => r.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((r) => r.name);
+}
+
 /// Applied AFTER the `CREATE TABLE IF NOT EXISTS` block, so a wholly-missing
 /// table is already created at its current shape and only PRE-EXISTING tables
 /// need reconciling.
@@ -320,6 +335,81 @@ const NUMBERED: ReadonlyArray<{
       `);
     },
   },
+  {
+    to: 8,
+    // GUARDED ON THE KEY, not on a column and not on the version: the columns
+    // are identical either side of this step, so `columnsOf` cannot tell them
+    // apart, and a fresh store is created at the CURRENT shape and stamped 0
+    // until the end of `migrate`.
+    applies: (db) =>
+      tableExists(db, 'intents') && primaryKeyOf(db, 'intents').join(',') === 'intent_id',
+    up: (db) => {
+      // THE KEY GAINS THE WALLET (finding 1). An intent id is a string the
+      // CALLER chooses, so a globally unique key made one wallet's choice
+      // collide with another's: bob reserving an id alice had used got back
+      // ALICE's txHash, moved no money, and was told he had succeeded.
+      //
+      // A REBUILD rather than an ALTER, because sqlite cannot change a primary
+      // key in place. Every column is carried across by name - no `SELECT *`,
+      // which would silently reorder if the table's column order ever differs
+      // from this list, and pair each value with the wrong column.
+      //
+      // NO DEDUPLICATION AND NONE POSSIBLE. Under the old key an id was unique
+      // across the store, so there are no colliding rows to resolve: every
+      // existing row moves unchanged and keeps its meaning. This migration
+      // cannot lose an intent, and that is a property of the OLD key rather
+      // than of the copy.
+      //
+      // The rows' `topic` is carried as it stands - keccak256(intent_id) for
+      // everything written before v8. Broadcast reads the topic FROM THE ROW,
+      // so a pre-v8 intent keeps working with no special case, and only intents
+      // reserved from here on get the wallet-namespaced form.
+      db.exec(`
+        CREATE TABLE intents_v8 (
+          intent_id  TEXT NOT NULL,
+          agent_id   TEXT NOT NULL,
+          stage      TEXT NOT NULL,
+          amount     TEXT NOT NULL,
+          tx_hash    TEXT,
+          held_wei   TEXT NOT NULL DEFAULT '0',
+          topic      TEXT,
+          emissions  INTEGER NOT NULL DEFAULT 0,
+          first_tx   TEXT,
+          first_from TEXT,
+          reserved_at_block TEXT,
+          id_source  TEXT,
+          call_contract  TEXT,
+          call_function  TEXT,
+          call_args_hash TEXT,
+          created_at INTEGER NOT NULL,
+          -- LAST, because that is where a FRESH store has it: token is not in
+          -- the declared DDL at all, it is an ADDITIVE column (v7), appended by
+          -- the reconciliation that runs before this loop. Declaring it here in
+          -- its alphabetical or logical place would give a migrated store a
+          -- different column ORDER from a fresh one - invisible to every query,
+          -- and exactly the drift the schema-equality test exists to catch.
+          -- reserved_at_block is TEXT for the same reason: measured off a live
+          -- table, not inferred from the name.
+          token      TEXT,
+          PRIMARY KEY (agent_id, intent_id)
+        );
+        INSERT INTO intents_v8 (intent_id, agent_id, stage, amount, tx_hash, held_wei, topic,
+                                emissions, first_tx, first_from, reserved_at_block, id_source,
+                                call_contract, call_function, call_args_hash, created_at, token)
+          SELECT intent_id, agent_id, stage, amount, tx_hash, held_wei, topic,
+                 emissions, first_tx, first_from, reserved_at_block, id_source,
+                 call_contract, call_function, call_args_hash, created_at, token
+            FROM intents;
+        DROP TABLE intents;
+        ALTER TABLE intents_v8 RENAME TO intents;
+        PRAGMA user_version = 8;
+      `);
+      // `intents_topic` WENT WITH THE DROP, and this step does not rebuild it:
+      // `createIndexes()` does, and it is called AFTER this loop for exactly
+      // this reason (see `migrate`). Recreating it here would be a second place
+      // that has to agree with the index list.
+    },
+  },
 ];
 
 export function migrate(
@@ -373,15 +463,6 @@ export function migrate(
     }
   }
 
-  // AFTER the reconciliation, and this is why the indexes are a separate thunk
-  // rather than the tail of one DDL block: `intents_topic` indexes `topic`, a
-  // column the baseline above may have just added. Creating it alongside the
-  // tables made the migration die on the very store it exists to repair, with
-  // `no such column: topic` - the original failure, moved four lines. An index
-  // can depend on a migrated column, so it is built once the columns are
-  // settled and never before.
-  createIndexes();
-
   // NUMBERED MIGRATIONS, applied in order for a store stamped BELOW each
   // entry's `to`. They run after createTables() and after the additive
   // reconciliation, so an entry can assume every table exists and every
@@ -395,6 +476,24 @@ export function migrate(
     if (!step.applies(db)) continue;
     db.transaction(() => step.up(db))();
   }
+
+  // AFTER EVERYTHING, and the position moved at v8 rather than being tidied.
+  //
+  // It has always had to run after the additive reconciliation: `intents_topic`
+  // indexes `topic`, a column the baseline may have just added, and creating it
+  // alongside the tables made the migration die on the very store it exists to
+  // repair with `no such column: topic`. That reason still holds.
+  //
+  // What v8 adds is the other end. A numbered step that REBUILDS a table drops
+  // every index on it - `DROP TABLE intents` takes `intents_topic` with it - so
+  // an index built before the loop is gone by the time the loop finishes, and
+  // the store runs unindexed until some later boot happens to rebuild it. Here
+  // that is a topic lookup on every emission.
+  //
+  // So: after the columns are settled AND after the tables are their final
+  // shape. The thunk is `CREATE INDEX IF NOT EXISTS`, so it is a no-op on the
+  // stores that never entered the loop.
+  createIndexes();
 
   if (version !== SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
