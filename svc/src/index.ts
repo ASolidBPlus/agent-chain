@@ -82,24 +82,31 @@ async function main(): Promise<void> {
     }),
   );
   const resolver = new Resolver(chain, store);
+  // KIND DEFAULTS ARE OPT-IN as of v0.8.0: unset means NONE, not the shipped
+  // example, which nothing loads. Built ONCE and shared, so the spawner's rules
+  // and the allowlist loader's warnings are about the same object rather than
+  // two copies of it.
+  const defaults = config.policyDefaultsPath
+    ? loadPolicyDefaults(
+        config.policyDefaultsPath,
+        chain.modules.names?.tld,
+        chain.modules.tokens.map((t) => t.key),
+      )
+    : null;
   const services = {
     config,
     chain,
     resolver,
     store,
     keystore,
-    spawner: new Spawner(config, chain, keystore, store, resolver),
+    spawner: new Spawner(config, chain, keystore, store, resolver, defaults),
     treasury: new Treasury(
       config,
       chain,
       keystore,
       store,
       resolver,
-      loadPolicyDefaults(
-        config.policyDefaultsPath,
-        chain.modules.names?.tld,
-        chain.modules.tokens.map((t) => t.key),
-      ),
+      defaults,
       // The generic call op's allowlist, constructed here so the boot line is
       // written where an operator is looking. It reads the file per request; a
       // deployment with no calls.json boots with the op closed and says so.
@@ -111,11 +118,7 @@ async function main(): Promise<void> {
         // no kind in its `kinds` can pay through. Same object the spawner
         // writes wallets from, so the warning is about the rules that will
         // actually apply rather than about a second copy of them.
-        loadPolicyDefaults(
-          config.policyDefaultsPath,
-          chain.modules.names?.tld,
-          chain.modules.tokens.map((t) => t.key),
-        ),
+        defaults,
       ),
     ),
   };

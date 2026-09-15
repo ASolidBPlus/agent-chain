@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertPrivateRpcUrl } from '../src/chain.ts';
-import { hubCoreUrl } from '../src/config.ts';
+import { hubCoreUrl, loadConfig } from '../src/config.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -257,4 +257,44 @@ describe('HUB_CORE_URL is validated as strictly as RPC_URL', () => {
     expect(() => hubCoreUrl('ftp://hub-core/')).toThrow(/must be http or https/);
     expect(() => hubCoreUrl('file:///etc/passwd')).toThrow(/must be http or https/);
     }, 30_000);
+});
+
+// The doc-debt sweep's one behaviour change. `POLICY_DEFAULTS_FILE` was read as
+// `process.env.X || undefined` while every neighbour went through `optional()`,
+// and the two are not the same function: `||` treats a whitespace value as SET.
+//
+// The pairs are the point. Asserting the new reading alone would say nothing
+// about "like its neighbours" - the claim is that one setting and the next now
+// answer the same way to the same input, so each row asks both.
+describe('POLICY_DEFAULTS_FILE is read like every other optional setting', () => {
+  const base = {
+    CHAIN_SVC_TOKEN: 't', KEYSTORE_SECRET: 'k', ANVIL_MNEMONIC: 'm',
+  } as unknown as NodeJS.ProcessEnv;
+
+  it('unset means no kind defaults, and the neighbour takes its default', () => {
+    const c = loadConfig({ ...base });
+    expect(c.policyDefaultsPath).toBeUndefined();
+    expect(c.policyDir).toBe('/policies');
+  });
+
+  it('empty is unset, on both', () => {
+    const c = loadConfig({ ...base, POLICY_DEFAULTS_FILE: '', POLICY_DIR: '' });
+    expect(c.policyDefaultsPath).toBeUndefined();
+    expect(c.policyDir).toBe('/policies');
+  });
+
+  // THE ROW THAT WAS RED BEFORE THE FIX. `'   ' || undefined` is `'   '`, so
+  // this answered a path of three spaces and `loadPolicyDefaults` failed at
+  // boot on a file name nobody could see in a compose file.
+  it('whitespace is unset, on both', () => {
+    const c = loadConfig({ ...base, POLICY_DEFAULTS_FILE: '   ', POLICY_DIR: '\t' });
+    expect(c.policyDefaultsPath).toBeUndefined();
+    expect(c.policyDir).toBe('/policies');
+  });
+
+  it('a real value is kept verbatim, on both', () => {
+    const c = loadConfig({ ...base, POLICY_DEFAULTS_FILE: '/mnt/defaults.json', POLICY_DIR: '/mnt/p' });
+    expect(c.policyDefaultsPath).toBe('/mnt/defaults.json');
+    expect(c.policyDir).toBe('/mnt/p');
+  });
 });

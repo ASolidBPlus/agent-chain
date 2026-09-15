@@ -70,6 +70,34 @@ describe('the pattern dialect', () => {
     );
   });
 
+  // THE THREE STATES OF `allow`, NAMED. The mutant that made this worth writing
+  // is "an absent allow list is read as deny-all" - it was killed, but only by
+  // tests about null kinds, replayed intents and a missing intent id, which
+  // happened to use fixtures with no allow list. Red that says nothing about
+  // allow lists is red that stops being red the day someone adds one to those
+  // fixtures. So the property is stated, and stated on both sides: absent
+  // allows everything, `[]` allows nothing, and a written list allows what it
+  // names. Absent and empty diverging is the point - an operator who wrote an
+  // empty list said "this wallet pays no one".
+  const ALLOW_STATES: Array<[string, string[] | undefined, string, boolean]> = [
+    ['absent allows a stranger', undefined, 'orch:stranger', true],
+    ['empty allows no one', [], 'orch:stranger', false],
+    ['written allows what it names', ['orch:friend'], 'orch:friend', true],
+    ['written refuses what it does not', ['orch:friend'], 'orch:stranger', false],
+  ];
+
+  it.each(ALLOW_STATES)('chain-svc: %s', (_what, allow, to, allowed) => {
+    const policy: AgentPolicy = { caps: POLICY.caps, deny: [], ...(allow === undefined ? {} : { allow }) };
+    expect(codeOf(() => enforcePolicy({ policy, to, amount: 1n, decimals: 18, symbol: 'PLAY', tokenKey: 'play' })))
+      .toBe(allowed ? 'no-error' : 'counterparty_denied');
+  });
+
+  it.each(ALLOW_STATES)('wallet-mcp agrees: %s', (_what, allow, to, allowed) => {
+    const policy = { caps: POLICY.caps, deny: [], ...(allow === undefined ? {} : { allow }) } as never;
+    expect(checkLocally(policy, to, '1', { key: 'play', decimals: 18 })?.reason ?? 'no-refusal')
+      .toBe(allowed ? 'no-refusal' : 'counterparty_denied');
+  });
+
   // A star this dialect does not implement is refused AT LOAD, with a name,
   // rather than silently becoming a literal that matches nothing.
   it('refuses a star in an unsupported position, in both lists', () => {
@@ -97,12 +125,12 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
     // Fell to the kind defaults, per TOKEN now: a harness policy that names
     // only allow/deny is saying nothing about caps, so the kind's whole caps
     // map survives rather than one pair of numbers.
-    expect(p.caps.play).toEqual({ max_per_tx: 100, max_per_stage: 500 });
+    expect(p.caps!.play).toEqual({ max_per_tx: 100, max_per_stage: 500 });
   });
 
   it('accepts a complete numeric policy, as before', () => {
     const p = mergePolicy({ caps: { play: { max_per_tx: 25, max_per_stage: 100 } }, allow: ['*'], deny: [] }, DEF);
-    expect(p.caps.play).toEqual({ max_per_tx: 25, max_per_stage: 100 });
+    expect(p.caps!.play).toEqual({ max_per_tx: 25, max_per_stage: 100 });
   });
 
   // A cap IS an amount, and every other amount on these wires is a decimal
@@ -112,7 +140,7 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
     // default token - a caller writing the old shape is saying something about
     // the default token, not about every token.
     const p = mergePolicy({ max_per_tx: '25', max_per_stage: '100', allow: ['*'], deny: [] }, DEF, 'play');
-    expect(capToWei(p.caps.play!.max_per_tx, 18)).toBe(25n * 10n ** 18n);
+    expect(capToWei(p.caps!.play!.max_per_tx!, 18)).toBe(25n * 10n ** 18n);
   });
 
   it('accepts no policy at all', () => {
@@ -246,7 +274,7 @@ describe('the caps refusal, on both sides', () => {
     frozen: false,
   };
 
-  it('agrees that a token with no entry cannot be spent, in the same words', () => {
+  it('agrees that a token with no entry is UNBOUNDED, on both sides', () => {
     const chainSvc = (() => {
       try {
         capsFor(policy as never, 'au');
@@ -256,11 +284,12 @@ describe('the caps refusal, on both sides', () => {
       }
     })();
 
-    expect(chainSvc).toEqual({ reason: 'no_cap_set', detail: 'no cap set for au' });
-    expect(capsRefusal(policy as never, 'au')).toEqual({
-      reason: 'no_cap_set',
-      detail: 'no cap set for au',
-    });
+    // FLIPPED at v0.8.0, and still an AGREEMENT test: what matters is that the
+    // two layers answer the SAME thing, not which thing. Both now answer
+    // nothing, and the row below keeps that from being vacuous by showing they
+    // both still refuse something.
+    expect(chainSvc).toBeNull();
+    expect(capsRefusal(policy as never, 'au')).toBeNull();
   });
 
   it('agrees that a token WITH an entry is spendable, so the test can fail either way', () => {
@@ -270,10 +299,15 @@ describe('the caps refusal, on both sides', () => {
     expect(capsRefusal(policy as never, 'play')).toBeNull();
   });
 
-  it('agrees that a HALF-WRITTEN entry is not an entry', () => {
+  it('agrees that a HALF-WRITTEN entry bounds the half that is written', () => {
+    // FLIPPED at v0.8.0. "Half-written" was a category only while `isTokenCaps`
+    // required both fields, so a shape defect and a value defect were the same
+    // thing. Each field now stands alone: this document bounds each
+    // transaction at 1 and says nothing about the stage, which is a coherent
+    // thing to write and no longer garbage.
     const half = { ...policy, caps: { au: { max_per_tx: '1' } } };
-    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no_cap_set');
-    expect(capsRefusal(half as never, 'au')).not.toBeNull();
+    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no-error');
+    expect(capsRefusal(half as never, 'au')).toBeNull();
   });
 
   // §1b, AT THE POINT OF USE. `capsFor` tested only `=== undefined`, so a
@@ -290,7 +324,7 @@ describe('the caps refusal, on both sides', () => {
       expect(codeOf(() => capsFor(p as never, 'play'))).toBe('no_cap_set');
       expect(capsRefusal(p as never, 'play')).toEqual({
         reason: 'no_cap_set',
-        detail: 'no cap set for play',
+        detail: 'max_per_tx for play is not a usable amount',
       });
     }
   });
@@ -327,12 +361,21 @@ describe('the caps refusal, on both sides', () => {
     expect(UNLIMITED_MCP).toBe(UNLIMITED);
   });
 
-  it('agrees that an ABSENT cap is still refused, however unlimited another is', () => {
-    // The fail-closed direction, beside the row above so neither can be read as
-    // licence for the other: `"unlimited"` is a decision someone wrote down and
-    // silence is not.
+  it('agrees that ABSENT and "unlimited" reach the same answer by different routes', () => {
+    // FLIPPED at v0.8.0. This row asserted that silence and a written
+    // "unlimited" must NOT collapse into each other; they now reach the same
+    // BEHAVIOUR, and the thing that must not collapse is what the DOCUMENT
+    // says - which `GET /wallets/:id` reports and this function does not see.
+    //
+    // Kept rather than deleted because the agreement is still the point: both
+    // layers must treat absence the same way, and before this release one of
+    // them would have refused.
     const unl = { ...policy, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: UNLIMITED } } };
-    expect(codeOf(() => capsFor(unl as never, 'au'))).toBe('no_cap_set');
-    expect(capsRefusal(unl as never, 'au')?.reason).toBe('no_cap_set');
+    expect(codeOf(() => capsFor(unl as never, 'au'))).toBe('no-error');
+    expect(capsRefusal(unl as never, 'au')).toBeNull();
+    // ...and the written-unlimited token is equally unrefused, which is what
+    // makes "the same answer" a claim about both rather than about neither.
+    expect(codeOf(() => capsFor(unl as never, 'play'))).toBe('no-error');
+    expect(capsRefusal(unl as never, 'play')).toBeNull();
   });
 });

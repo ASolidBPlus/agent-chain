@@ -172,7 +172,7 @@ import { join } from 'node:path';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = new URL('..', import.meta.url).pathname;
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play']);
 
 function detector(entries: Record<string, string | null>) {
   const dir = mkdtempSync(join(tmpdir(), 'bareid-'));
@@ -187,7 +187,7 @@ function detector(entries: Record<string, string | null>) {
   store.markSpawned('acme:dana', addr('9'), null);
   const lookup = registry(entries);
   const t = new Treasury(
-    { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json') } as Config,
+    { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.example.json') } as Config,
     {
       viemChain: {},
       deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },

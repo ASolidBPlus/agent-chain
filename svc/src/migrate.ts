@@ -406,12 +406,18 @@ export function migrate(
 ///
 /// IT NAMES BOTH COSTS, and that is load-bearing rather than thorough. It said
 /// only the idempotency half first, on the reasoning that an acknowledged reset
-/// is the fresh-game case where releasing freezes is intended. That reasoning
-/// was wrong: the acknowledged reset is ALSO the path a
-/// facilitator takes to recover from a failure mid-game - which is exactly when
-/// a freeze is load-bearing, since freezing is the prescribed response to a
-/// chain.anomaly and S3 made unfreezing deliberately hard. AN ACKNOWLEDGEMENT
-/// THAT NAMES HALF THE DESTRUCTION IS NOT INFORMED CONSENT.
+/// is the fresh-game case where releasing the locks is intended. That reasoning
+/// was wrong: the acknowledged reset is ALSO the path a facilitator takes to
+/// recover from a failure mid-game - which is exactly when the lock is
+/// load-bearing. AN ACKNOWLEDGEMENT THAT NAMES HALF THE DESTRUCTION IS NOT
+/// INFORMED CONSENT.
+///
+/// SAYS RETIRED, NOT FROZEN, as of v0.8.0. The table is the same table and this
+/// wipe destroys the same rows; what changed is that only `retire()` writes it
+/// now, so "every frozen wallet may spend again" named a state nothing sets.
+/// Freezing a LIVE wallet is the Token contract's and is not in this store at
+/// all - a wipe cannot release one, and prose that implied it could would
+/// overstate the damage in the same breath as understating it.
 ///
 /// It names CONSEQUENCES, never actions. "Resets the ledger" reads as
 /// housekeeping; "becomes reservable again" is the thing an operator has to
@@ -425,8 +431,9 @@ export function migrate(
 /// second half of the consent, so it lives in FREEZE_RECOVERY_ADVICE below -
 /// additive, and its absence understates nothing.
 export const LEDGER_RESET_NOTICE =
-  'this deletes the idempotency ledger and every freeze: every consumed intent id ' +
-  'becomes reservable again, and every frozen wallet may spend again';
+  'this deletes the idempotency ledger and every retirement: every consumed intent id ' +
+  'becomes reservable again, and every retired wallet may spend again. An on-chain ' +
+  'freeze is not in this store and survives the wipe';
 
 /// The state of the three volumes that share one lifetime, as observed at
 /// startup. Taken as plain facts rather than read in here, so the decision is
@@ -564,11 +571,12 @@ export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
       `Those wallets still exist and still hold their balances, and ${LEDGER_RESET_NOTICE}. ` +
       `An intent id that has already paid can pay a second time.\n` +
       `\n` +
-      `The freeze half is the one to act on first: the frozen table is in this store, so ` +
-      `every freeze was released WITH NO RECORD THAT ONE EXISTED. Freezing is the prescribed ` +
-      `response to a chain.anomaly - a second chain-svc writing to this chain, or somebody ` +
-      `holding a wallet's key - which makes an incident exactly when a service gets restarted ` +
-      `and a store gets deleted. ${FREEZE_RECOVERY_ADVICE}.\n` +
+      `The retirement half is the one to act on first: that table is in this store, so ` +
+      `every retirement was released WITH NO RECORD THAT ONE EXISTED. Retiring is what ends ` +
+      `a wallet's life in the game, and it is done in response to incidents - a second ` +
+      `chain-svc writing to this chain, or somebody holding a wallet's key - which happens ` +
+      `exactly when a service gets restarted and a store gets deleted. ` +
+      `${FREEZE_RECOVERY_ADVICE}.\n` +
       `\n` +
       `If a transfer was already made under an id a persona may retry, RESTORE THE STORE ` +
       `rather than starting without it. If you meant to end this game, say so explicitly ` +
@@ -584,4 +592,6 @@ export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
 /// ignore; omitting it costs a recovering one the fact they needed.
 export const FREEZE_RECOVERY_ADVICE =
   'if you are recovering from a failure mid-game rather than starting a fresh one, ' +
-  're-freeze anything that was frozen: the release leaves no record of what it was';
+  're-retire anything that was retired: the release leaves no record of what it was. ' +
+  'To stop a LIVE wallet spending, freeze it on chain with admin-call - that is in the ' +
+  'token, not in this store, and a wipe cannot touch it';

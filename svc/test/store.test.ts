@@ -25,14 +25,14 @@ describe('frozen', () => {
   // POLICY_FILE is a fast-path copy that loses any disagreement.
   it('records and reports a freeze, and is idempotent', () => {
     const store = new Store(':memory:');
-    expect(store.isFrozen('orch:scammer')).toBe(false);
+    expect(store.isRetired('orch:scammer')).toBe(false);
 
     store.freeze('orch:scammer');
-    expect(store.isFrozen('orch:scammer')).toBe(true);
+    expect(store.isRetired('orch:scammer')).toBe(true);
 
     store.freeze('orch:scammer');
-    expect(store.isFrozen('orch:scammer')).toBe(true);
-    expect(store.isFrozen('orch:vendor')).toBe(false);
+    expect(store.isRetired('orch:scammer')).toBe(true);
+    expect(store.isRetired('orch:vendor')).toBe(false);
     store.close();
   });
 });

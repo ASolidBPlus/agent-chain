@@ -50,22 +50,51 @@ export function isWalletKind(value: unknown): value is WalletKind {
 export type VeeCap = number | string;
 
 /// What one wallet may spend of ONE token.
+///
+/// BOTH FIELDS OPTIONAL as of v0.8.0. Absence is not a hole to fail closed on -
+/// it is the answer "nobody wrote a bound", and chain-svc enforces only rules
+/// someone has written. The two bounds are independent: a written `max_per_tx`
+/// with no `max_per_stage` bounds each transaction and nothing per stage.
+///
+/// FAIL CLOSED ON GARBAGE, OPEN ON SILENCE. A field that is PRESENT and
+/// unreadable still refuses at the point of use - see `capsFor`. The two are
+/// different facts and the previous release conflated them, because when
+/// absence already refused there was nothing for garbage to be distinguished
+/// from.
 export interface TokenCaps {
-  max_per_tx: VeeCap;
-  max_per_stage: VeeCap;
+  max_per_tx?: VeeCap;
+  max_per_stage?: VeeCap;
 }
 
+/// The rules someone has WRITTEN for one wallet. Every field is optional, and
+/// absence means no rule.
+///
+/// THIS REVERSES v0.5.0's RULE, deliberately and at the owner's decision.
+/// "A token with no entry cannot be spent" was the fail-closed reading of
+/// silence, and the argument for it was that an absent cap read as "no limit"
+/// is the reading that costs money. What changed is not the risk calculus but
+/// what this service IS: a tool surface that enforces only what someone wrote,
+/// with the rules that must survive a bypass living in the contracts. A service
+/// that refuses on silence is acting on its own initiative, which is the thing
+/// v0.8.0 removes.
+///
+/// WHAT SURVIVES OF THE OLD RULE, and it is the half that was actually load
+/// bearing: a cap that is WRITTEN and unusable still refuses. Fail closed on
+/// garbage, open on silence. The previous release could not tell those apart
+/// because absence already refused, so garbage had nothing to be distinguished
+/// FROM.
+///
+/// A WRITTEN EMPTY LIST KEEPS ITS WRITTEN MEANING. `allow: []` denies every
+/// counterparty, as it always has; `deny: []` denies none. Absent and empty are
+/// different documents and stay different answers - which is the same rule
+/// `kinds` gets in the allowlist, for the same reason.
 export interface AgentPolicy {
   /// KEYED BY TOKEN KEY, not by symbol: this is chain-svc's own bookkeeping,
   /// and `stage_spend` and `intents` store the key. A symbol is what a persona
   /// reads and writes; `resolveToken` is where the two meet, once.
-  ///
-  /// A TOKEN WITH NO ENTRY CANNOT BE SPENT. Silence fails closed in money
-  /// policy - an absent cap read as "no limit" is the one reading that costs
-  /// money, and it is the reading a careless caller reaches for first.
-  caps: Record<string, TokenCaps>;
-  allow: string[];
-  deny: string[];
+  caps?: Record<string, TokenCaps>;
+  allow?: string[];
+  deny?: string[];
 }
 
 /// The caps for one token, or the refusal that says there are none.
@@ -78,8 +107,8 @@ export interface AgentPolicy {
 ///
 /// The DETAIL is unchanged and says which token, because a persona holding two
 /// currencies cannot otherwise tell which of its spends is impossible.
-export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
-  const caps = policy.caps?.[tokenKey];
+export function capsFor(policy: AgentPolicy | null, tokenKey: string): TokenCaps {
+  const caps = policy?.caps?.[tokenKey];
   // §1b, AT THE POINT OF USE. `isCap` on both fields, not `=== undefined`: a
   // value this code cannot read is treated as ABSENT, which is the same answer
   // silence gets and is what `capsRefusal` already does on the wallet side.
@@ -92,12 +121,30 @@ export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
   // and disagree in the permissive direction here. Checking at the point of use
   // makes the answer the same whichever route the policy arrived by.
   //
+  // THREE OUTCOMES PER FIELD, and they are not two:
+  //
+  //   absent        -> unlimited. Nobody wrote a bound.
+  //   "unlimited"   -> unlimited. Somebody wrote that there is none.
+  //   a valid amount-> that bound.
+  //   anything else -> `no_cap_set`. Written and unusable.
+  //
+  // The first two reach the same behaviour by different routes and must stay
+  // distinguishable in the DOCUMENT even though they agree here: `policySource`
+  // and the reads report what was written, and an operator who wrote
+  // "unlimited" said something an operator who wrote nothing did not.
+  //
   // `isCap`'s default 18 places is deliberate and must stay permissive: a cap
   // the loader accepted at SIX places has at most six fraction digits, so it
-  // satisfies eighteen. This must never refuse what validation allowed - that
-  // would be a new divergence in place of the one it closes.
-  if (!caps || !isCap(caps.max_per_tx) || !isCap(caps.max_per_stage)) {
-    throw new HttpError('no_cap_set', `no cap set for ${tokenKey}`);
+  // satisfies eighteen. This must never refuse what validation allowed.
+  if (!caps) return {};
+  for (const field of ['max_per_tx', 'max_per_stage'] as const) {
+    const value = caps[field];
+    if (value !== undefined && !isCap(value)) {
+      // FAIL CLOSED ON GARBAGE. The detail names the FIELD, because a wallet
+      // holding two currencies with one typo between them cannot otherwise
+      // tell which of its spends is impossible.
+      throw new HttpError('no_cap_set', `${field} for ${tokenKey} is not a usable amount`);
+    }
   }
   return caps;
 }
@@ -110,10 +157,48 @@ export type PolicyDefaults = Record<WalletKind, AgentPolicy>;
 /// it has needed a rule about what a pattern matching nothing means.
 const CAPS_WILDCARD = '*';
 
-function isTokenCaps(value: unknown): value is TokenCaps {
-  if (typeof value !== 'object' || value === null) return false;
+/// Is this an entry someone could have written? BOTH FIELDS OPTIONAL as of
+/// v0.8.0, and a PRESENT field must still be usable.
+///
+/// It used to require both, which made "a shape defect" and "a value defect"
+/// one category - so an entry bounding only the per-transaction amount was
+/// refused as malformed rather than read as what it plainly says. Each field
+/// stands alone now; `{}` is an entry with no bounds, and `{max_per_tx: 'lots'}`
+/// is still refused because the field is there and unreadable.
+/// SHAPE ONLY. Is this an OBJECT that could be an entry? The VALUES are
+/// `capsFor`'s business - its fourth outcome, `no_cap_set` at the point of use.
+///
+/// It used to validate values too, and that made one typo'd cap fail the whole
+/// DOCUMENT: `isPolicy` runs this over every entry, so a wallet holding two
+/// tokens lost both because one was mistyped. wallet-mcp validated per cap and
+/// bounded only the affected token, and the divergence was found by reading the
+/// two file READS side by side - which nothing compared, because every
+/// agreement test we had compares a function to a function.
+///
+/// Ruled per-FIELD: a present-but-unusable value is garbage for its own field
+/// and no more. The blast radius is the whole of the difference - one mistyped
+/// cap either bricks a two-token wallet or bounds one token and leaves the
+/// other alone - and the narrower answer is also the more informative one,
+/// because `capsFor`'s detail names the field.
+/// SHAPE *AND* VALUES, for the two places an OPERATOR is looking when it runs:
+/// the kind-defaults file at boot, and a platform-scope PATCH body.
+///
+/// The FILE path deliberately does not use this. A per-wallet file is read on
+/// every send, long after whoever wrote it has gone, and a bad value there is
+/// scoped to its own field by `capsFor`. Here the author is present and the
+/// refusal is the fastest way to tell them - the same reason `calls.json`
+/// refuses at load rather than at call time.
+function isUsableCaps(value: unknown): value is TokenCaps {
+  if (!isTokenCaps(value)) return false;
   const c = value as Record<string, unknown>;
-  return isCap(c.max_per_tx) && isCap(c.max_per_stage);
+  return (
+    (c.max_per_tx === undefined || isCap(c.max_per_tx)) &&
+    (c.max_per_stage === undefined || isCap(c.max_per_stage))
+  );
+}
+
+function isTokenCaps(value: unknown): value is TokenCaps {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /// Turns the defaults file's `caps` into one entry per DEPLOYED token.
@@ -143,7 +228,7 @@ function expandCaps(raw: unknown, tokenKeys: string[], kind: string, path: strin
   const out: Record<string, TokenCaps> = {};
   let wildcard: TokenCaps | undefined;
   for (const [key, value] of entries) {
-    if (!isTokenCaps(value)) {
+    if (!isUsableCaps(value)) {
       throw new Error(
         `chain-svc: policy defaults at ${path}: "${kind}" caps "${key}" is not ` +
           `{max_per_tx, max_per_stage} of usable amounts`,
@@ -183,14 +268,36 @@ function expandCaps(raw: unknown, tokenKeys: string[], kind: string, path: strin
 /// an old example - keeps the NEW one: it is the shape that can express what
 /// the old cannot, and preferring the legacy pair would discard every token but
 /// the default.
+/// A policy DOCUMENT as read from disk, in whichever shape it was written.
+///
+/// EVERY SHAPE `isPolicy` ACCEPTS MUST COME OUT OF HERE. The two were allowed
+/// to disagree while a document this function threw on became "no policy" and
+/// fell back to the kind defaults - wrong, but bounded. At v0.8.0 the throw
+/// lands in `readPolicyFile`'s catch and becomes the UNREADABLE MARKER, so a
+/// disagreement turns a valid permissive document into a wallet that refuses
+/// every spend. Measured on 60da6e4: FIVE of the six shapes the gate accepts
+/// threw here, including `{}` and the half-written entry §5.3 requires.
+///
+/// The property is asserted rather than the instances - see the pair test in
+/// caps.test.ts, the same shape as isCap/capToWei one level up. A test naming
+/// today's shapes says nothing about the next one somebody writes.
 export function normalisePolicy(value: unknown, defaultTokenKey: string | undefined): AgentPolicy {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new HttpError('invalid_request', 'policy must be an object');
   }
   const p = value as Record<string, unknown>;
-  if (!isNameList(p.allow) || !isNameList(p.deny)) {
-    throw new HttpError('invalid_request', 'policy must carry allow and deny lists');
+  // ABSENT LISTS ARE NOT MISSING LISTS. `allow` absent allows everything,
+  // `deny` absent denies nothing; a PRESENT one must still be a list of names.
+  if (p.allow !== undefined && !isNameList(p.allow)) {
+    throw new HttpError('invalid_request', 'allow must be an array of non-empty strings');
   }
+  if (p.deny !== undefined && !isNameList(p.deny)) {
+    throw new HttpError('invalid_request', 'deny must be an array of non-empty strings');
+  }
+  const lists: AgentPolicy = {
+    ...(p.allow === undefined ? {} : { allow: p.allow as string[] }),
+    ...(p.deny === undefined ? {} : { deny: p.deny as string[] }),
+  };
 
   if (p.caps !== undefined) {
     if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
@@ -201,10 +308,20 @@ export function normalisePolicy(value: unknown, defaultTokenKey: string | undefi
         throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
       }
     }
-    return { caps: p.caps as Record<string, TokenCaps>, allow: p.allow, deny: p.deny };
+    return { caps: p.caps as Record<string, TokenCaps>, ...lists };
   }
 
-  if (isCap(p.max_per_tx) && isCap(p.max_per_stage)) {
+  // THE LEGACY PAIR, TAKING EITHER HALF. It required both, so a file bounding
+  // only the per-transaction amount threw - while the SAME intent in the new
+  // shape (`caps: {play: {max_per_tx}}`) is read as "bound each transaction, no
+  // stage bound". One operator intent, two answers, decided by which spelling
+  // they happened to use.
+  if (p.max_per_tx !== undefined || p.max_per_stage !== undefined) {
+    for (const field of ['max_per_tx', 'max_per_stage'] as const) {
+      if (p[field] !== undefined && !isCap(p[field])) {
+        throw new HttpError('invalid_request', `${field} must be a usable amount`);
+      }
+    }
     if (defaultTokenKey === undefined) {
       throw new HttpError(
         'invalid_request',
@@ -212,13 +329,20 @@ export function normalisePolicy(value: unknown, defaultTokenKey: string | undefi
       );
     }
     return {
-      caps: { [defaultTokenKey]: { max_per_tx: p.max_per_tx, max_per_stage: p.max_per_stage } },
-      allow: p.allow,
-      deny: p.deny,
+      caps: {
+        [defaultTokenKey]: {
+          ...(p.max_per_tx === undefined ? {} : { max_per_tx: p.max_per_tx as VeeCap }),
+          ...(p.max_per_stage === undefined ? {} : { max_per_stage: p.max_per_stage as VeeCap }),
+        },
+      },
+      ...lists,
     };
   }
 
-  throw new HttpError('invalid_request', 'policy must carry caps, or max_per_tx and max_per_stage');
+  // NO CAPS AT ALL is a document, not a defect: allow/deny rules and no bounds
+  // is exactly what §1 invites an operator to write, and so is `{}`. This used
+  // to be the final throw.
+  return lists;
 }
 
 /// Loaded from policy-defaults.json rather than held as a constant here, so the
@@ -375,13 +499,16 @@ const isNameList = (a: unknown): a is string[] =>
 /// reading it.
 export function mergePolicy(
   value: unknown,
-  defaults: AgentPolicy,
+  /// The base to merge onto, or NULL when there is none - no file and no kind
+  /// default. A null base means the written fields stand alone, which is what
+  /// a PATCH against a wallet with no rules produces.
+  defaults: AgentPolicy | null,
   /// The default token's KEY, for reading a caller's legacy `max_per_tx` pair.
   /// Optional because a deployment may have no token at all, in which case a
   /// legacy pair has nothing to be about and is refused rather than guessed at.
   defaultTokenKey?: string,
 ): AgentPolicy {
-  if (value === undefined || value === null) return defaults;
+  if (value === undefined || value === null) return defaults ?? {};
   if (typeof value !== 'object') {
     throw new HttpError('invalid_request', 'policy must be an object');
   }
@@ -414,13 +541,13 @@ export function mergePolicy(
   // default token, leaving the other tokens' defaults in place: a caller
   // writing the old shape is saying something about the default token, not
   // about every token.
-  let caps = defaults.caps;
+  let caps = defaults?.caps;
   if (p.caps !== undefined) {
     if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
       throw new HttpError('invalid_request', 'caps must be an object keyed by token');
     }
     for (const [key, value] of Object.entries(p.caps as Record<string, unknown>)) {
-      if (!isTokenCaps(value)) {
+      if (!isUsableCaps(value)) {
         throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
       }
     }
@@ -432,51 +559,96 @@ export function mergePolicy(
         'max_per_tx and max_per_stage name no token and this deployment has none to read them against',
       );
     }
-    const existing = defaults.caps[defaultTokenKey];
+    const existing = defaults?.caps?.[defaultTokenKey];
     caps = {
-      ...defaults.caps,
+      ...defaults?.caps,
       [defaultTokenKey]: {
         max_per_tx: (p.max_per_tx as VeeCap) ?? existing?.max_per_tx,
         max_per_stage: (p.max_per_stage as VeeCap) ?? existing?.max_per_stage,
       },
     };
-    if (!isTokenCaps(caps[defaultTokenKey])) {
+    if (!isUsableCaps(caps[defaultTokenKey])) {
       throw new HttpError('invalid_request', 'max_per_tx and max_per_stage must be usable amounts');
     }
   }
 
+  // A WRITTEN FIELD REPLACES; AN UNWRITTEN ONE KEEPS THE BASE. With every field
+  // optional, "unwritten" and "written as absent" are the same JSON, so a PATCH
+  // cannot remove a field the base has - `clear: true` deletes the whole file,
+  // which is the operation that means "no rules of my own".
   const merged: AgentPolicy = {
-    caps,
-    allow: (p.allow as string[]) ?? defaults.allow,
-    deny: (p.deny as string[]) ?? defaults.deny,
+    ...(caps === undefined ? {} : { caps }),
+    ...(p.allow !== undefined || defaults?.allow !== undefined
+      ? { allow: (p.allow as string[]) ?? defaults!.allow }
+      : {}),
+    ...(p.deny !== undefined || defaults?.deny !== undefined
+      ? { deny: (p.deny as string[]) ?? defaults!.deny }
+      : {}),
   };
-  assertPatternsUsable(merged.allow, 'allow');
-  assertPatternsUsable(merged.deny, 'deny');
+  if (merged.allow) assertPatternsUsable(merged.allow, 'allow');
+  if (merged.deny) assertPatternsUsable(merged.deny, 'deny');
   return merged;
 }
 
 /// Still used to validate a policy FILE read back from disk, where a complete
 /// document is what was written.
+/// Is this a policy DOCUMENT? Every field optional as of v0.8.0, and a PRESENT
+/// field must be usable.
+///
+/// It used to require `allow` AND `deny` AND either a caps map or the legacy
+/// pair - a complete document or nothing. That mattered when a document this
+/// predicate rejected became "no policy" and fell back to the kind defaults:
+/// the gate had to be strict because its failure mode was permissive. At
+/// v0.8.0 a file that exists and does not satisfy this is UNREADABLE and every
+/// spend refuses, so the gate can say what a document actually is.
+///
+/// `{}` IS A VALID DOCUMENT: a wallet whose operator wrote no rules. That is
+/// the shape `PATCH { clear: true }` is an alternative to, and the shape a
+/// caller can PATCH one field onto.
 export function isPolicy(value: unknown): value is AgentPolicy {
-  if (typeof value !== 'object' || value === null) return false;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
-  if (!isNameList(p.allow) || !isNameList(p.deny)) return false;
+  if (p.allow !== undefined && !isNameList(p.allow)) return false;
+  if (p.deny !== undefined && !isNameList(p.deny)) return false;
   // EITHER SHAPE IS A VALID DOCUMENT ON DISK. A store full of v0.4.0 policy
   // files is the ordinary upgrade, and a predicate that recognised only the new
-  // shape would make every one of them unreadable - which `readPolicyFile`
-  // turns into "no policy", which falls back to the KIND DEFAULTS. A wallet
-  // whose operator had narrowed its caps would silently get the wider ones.
+  // shape would make every one of them unreadable - which now REFUSES rather
+  // than widening, so the cost of missing one moved but did not vanish.
   if (p.caps !== undefined) {
     if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) return false;
     return Object.values(p.caps as Record<string, unknown>).every(isTokenCaps);
   }
-  return isCap(p.max_per_tx) && isCap(p.max_per_stage);
+  // The legacy pair, when either half is written. Absent both, this is a
+  // document with no caps in it, which is now a thing someone can write.
+  if (p.max_per_tx === undefined && p.max_per_stage === undefined) return true;
+  return (
+    (p.max_per_tx === undefined || isCap(p.max_per_tx)) &&
+    (p.max_per_stage === undefined || isCap(p.max_per_stage))
+  );
 }
 
 
 /// The policy chain-svc enforces for an agent is the SAME file it writes for
 /// wallet-mcp to read, so the boundary and the fast path cannot drift into
 /// disagreeing about what the caps are.
+/// What a policy file read can say. THREE OUTCOMES, not two:
+///
+///   an AgentPolicy   the file exists and parses - these are the rules
+///   null             no file - nobody wrote rules for this wallet
+///   { unreadable }   a file exists and does not parse - written garbage
+///
+/// The third used to collapse into the second, which was safe only while an
+/// absent cap refused downstream.
+/// `unreadable` is the PERSONA-facing string and is always the same words.
+/// `reason` is the operator's, and goes to the log and to the platform-scope
+/// PATCH refusal - never to a wallet-scope caller.
+export type PolicyRead = AgentPolicy | null | { unreadable: string; reason: string };
+
+/// Is this read a marker rather than a policy?
+export function isUnreadable(r: PolicyRead): r is { unreadable: string; reason: string } {
+  return r !== null && 'unreadable' in r;
+}
+
 export async function readPolicyFile(
   policyDir: string,
   agentId: string,
@@ -484,25 +656,53 @@ export async function readPolicyFile(
   /// deployment with no token has nothing for a legacy pair to be about, and a
   /// file in the new shape needs no default at all.
   defaultTokenKey?: string,
-): Promise<AgentPolicy | null> {
+): Promise<PolicyRead> {
+  let raw: string;
   try {
-    const raw = await readFile(join(policyDir, keyFileName(agentId)), 'utf8');
+    raw = await readFile(join(policyDir, keyFileName(agentId)), 'utf8');
+  } catch {
+    // ABSENT IS ABSENT. No file means nobody wrote rules for this wallet, and
+    // the caller falls through to the kind default or to nothing. This is the
+    // only branch that returns null, and it is the only one that should.
+    return null;
+  }
+  try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!isPolicy(parsed)) return null;
+    if (!isPolicy(parsed)) {
+      return { unreadable: 'policy file unreadable', reason: 'not a policy document' };
+    }
     // MIGRATED IN MEMORY, NOT REWRITTEN HERE. A read is a read; the file is
     // rewritten in the new shape by the next `writePolicyFile`, which is a
     // write somebody asked for. Migrating on read would have every send
     // rewriting a file, and a read path that writes is a read path that can
     // fail for reasons the caller never asked about.
     return normalisePolicy(parsed, defaultTokenKey);
-  } catch {
-    // UNREADABLE IS NOT DENIED. Missing, corrupt, or caught mid-rewrite: this
-    // defers to the caller's fallback rather than refusing, because a transient
-    // read error must not freeze a wallet in a running game. That is the
-    // opposite silence from an absent CAP, which does refuse - one is "we could
-    // not read the rules", the other is "the rules say nothing about this
-    // token", and only the second is a decision the file made.
-    return null;
+  } catch (err) {
+    // A FILE THAT EXISTS AND DOES NOT PARSE IS WRITTEN GARBAGE AT FILE LEVEL,
+    // and this is the one case v0.8.0 reverses in the OTHER direction from
+    // everything else in the release.
+    //
+    // It used to return null - "we could not read the rules, defer to the
+    // fallback" - which was defensible while an absent CAP refused: the
+    // permissive answer here was bounded by a fail-closed answer downstream.
+    // With absence meaning no limit, deferring would make an unreadable file
+    // the WIDEST policy a wallet can have, and a corrupt byte would unbound a
+    // wallet silently.
+    //
+    // So: absent -> null (no rules written), unreadable -> a marker every
+    // spend refuses on. Fail closed on garbage, open on silence, at file level
+    // exactly as at field level.
+    // ONE FIXED STRING, and the reason never travels with it. This marker
+    // becomes a PERSONA-facing detail: `no_cap_set` is persona-facing and its
+    // detail crosses with it. Measured on both sides - bun answers
+    // `JSON Parse error: Unexpected identifier "treasuryOnly"`, quoting an
+    // operator's unquoted value verbatim, so a counterparty name or an amount
+    // reaches a model through a refusal.
+    //
+    // Naming the failing FIELD would report the document back the same way, so
+    // shape failures use the same string. The reason goes to the log sink,
+    // which is the split `revert` already makes.
+    return { unreadable: 'policy file unreadable', reason: err instanceof Error ? err.message.split('\n')[0] : 'unparseable' };
   }
 }
 
@@ -557,23 +757,23 @@ export function assertPatternsUsable(patterns: string[], field: 'allow' | 'deny'
   }
 }
 
-export function isDenied(policy: AgentPolicy, name: string): boolean {
-  return policy.deny.some((p) => matchesPattern(p, name));
+export function isDenied(policy: AgentPolicy | null, name: string): boolean {
+  // ABSENT DENIES NOTHING; a WRITTEN empty list also denies nothing, and the
+  // two agree here by accident rather than by design - `deny: []` is the
+  // written statement "deny no one", which is what absence means too. They
+  // differ only in what `GET /wallets/:id` reports back.
+  return (policy?.deny ?? []).some((p) => matchesPattern(p, name));
 }
 
-export function isAllowed(policy: AgentPolicy, name: string): boolean {
-  return policy.allow.some((p) => matchesPattern(p, name));
+export function isAllowed(policy: AgentPolicy | null, name: string): boolean {
+  // ABSENT ALLOWS EVERYTHING; a WRITTEN `allow: []` allows NOTHING. This is the
+  // one place absent and empty diverge, and the divergence is the point: an
+  // operator who wrote an empty allow list said "this wallet pays no one", and
+  // reading that as "no rule" would silently unbound the most restrictive
+  // policy anyone can write.
+  return policy?.allow === undefined || policy.allow.some((p) => matchesPattern(p, name));
 }
 
-/// Throws the S5 refusal that applies, in the order S5 lists them, so the
-/// reason a persona sees is stable rather than dependent on check ordering.
-///
-/// `over_stage_cap` is NOT raised here - it belongs to the atomic reservation
-/// in the store, because a cap tested separately from the record it guards is
-/// a check-then-act that every concurrent caller passes.
-/// The stage cap in wei. Deliberately NOT checked by enforcePolicy: the check
-/// and the spend record have to be one atomic step, or concurrent sends all
-/// read the same pre-spend total and all pass. See Store.reserveStageSpend.
 /// §1b. The stage bound for a reservation, or `'unlimited'`.
 ///
 /// NEVER NULL. Null is `reserve`'s third state and means "no stage at all"
@@ -582,15 +782,30 @@ export function isAllowed(policy: AgentPolicy, name: string): boolean {
 /// and lose the audit fact - measured: `store.reserve` guarded the
 /// `stage_spend` write on the cap itself, so `capWei: null` skipped the
 /// recording along with the bound.
-export function stageCapWei(policy: AgentPolicy, tokenKey: string, decimals: number): StageCap {
+export function stageCapWei(policy: AgentPolicy | null, tokenKey: string, decimals: number): StageCap {
   // Through capsFor, so a token with no entry refuses HERE rather than
   // defaulting to an unbounded stage. The reservation would otherwise take a
   // hold against a cap nobody set.
   const cap = capsFor(policy, tokenKey).max_per_stage;
-  // `capToWei` never sees the string (§1b).
-  return { cap: cap === UNLIMITED ? UNLIMITED : capToWei(cap, decimals) };
+  // ABSENT AND "unlimited" REACH THE SAME STATE, and the state is still
+  // `{ cap: 'unlimited' }` rather than `null` - the spend is RECORDED whether
+  // or not it is bounded. `null` stays platform-only, which is the distinction
+  // the three-state argument exists to keep.
+  //
+  // `capToWei` never sees the string.
+  if (cap === undefined || cap === UNLIMITED) return { cap: UNLIMITED };
+  return { cap: capToWei(cap, decimals) };
 }
 
+/// Throws the S5 refusal that applies, in the order S5 lists them, so the
+/// reason a persona sees is stable rather than dependent on check ordering.
+///
+/// `over_stage_cap` is NOT raised here - it belongs to the atomic reservation
+/// in the store, because a cap tested separately from the record it guards is
+/// a check-then-act that every concurrent caller passes. See
+/// `Store.reserveStageSpend`. (These two paragraphs sat on `stageCapWei`,
+/// whose doc block had collected three headers; they describe this function.)
+///
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
 ///
 /// A wallet holds MORE THAN ONE name by design - that is not an edge case, it
@@ -617,7 +832,10 @@ export function stageCapWei(policy: AgentPolicy, tokenKey: string, decimals: num
 /// CANONICAL id, never a vanity alias - an alias-named deny relies on the
 /// identity pass, which fails open if the registry read fails.
 export function enforcePolicy(args: {
-  policy: AgentPolicy;
+  /// NULL means nobody wrote rules for this wallet: no bound, nothing denied,
+  /// everything allowed. The zero-amount floor below is NOT policy and applies
+  /// either way - it is a property of the rail, not a rule someone wrote.
+  policy: AgentPolicy | null;
   to: string;
   /// The registry's primary name for the resolved address. Pass it: matching
   /// only `to` is the alias bypass this function used to have.
@@ -634,6 +852,21 @@ export function enforcePolicy(args: {
   tokenKey: string;
 }): void {
   const { policy, to, canonical, amount, decimals, symbol, tokenKey } = args;
+
+  // THE ZERO FLOOR IS NOT POLICY, and it runs ahead of everything that reads
+  // one. A property of the rail: `parseVee` accepts "0" deliberately - it is a
+  // parser and zero is a valid number - and a zero-amount sign-transfer burns
+  // an intent id and emits a zero Transfer for nothing. That is true whether or
+  // not an operator wrote any rules, and a direct caller with a wallet token
+  // bypasses wallet-mcp's own refusal entirely.
+  //
+  // MOVED AHEAD AT v0.8.0. It sat below the cap checks, which was harmless
+  // while every wallet had a policy - and would have become unreachable the
+  // moment a null policy short-circuited them. A guard deleted by accident
+  // rather than by decision, and nothing would have failed.
+  if (amount <= 0n) {
+    throw new HttpError('invalid_amount', 'the amount must be greater than zero');
+  }
   // capsFor, not policy.max_per_tx: a wallet with no entry for this token
   // cannot spend it, and that refusal has to come from the same place every
   // other cap does.
@@ -641,19 +874,11 @@ export function enforcePolicy(args: {
   // §1b. `"unlimited"` skips the per-transaction bound, INDEPENDENTLY of the
   // stage bound - each field takes the value on its own. `capToWei` never sees
   // the string.
-  const perTx = caps.max_per_tx === UNLIMITED ? null : capToWei(caps.max_per_tx, decimals);
+  const perTx =
+    caps.max_per_tx === undefined || caps.max_per_tx === UNLIMITED
+      ? null
+      : capToWei(caps.max_per_tx, decimals);
 
-  // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
-  // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
-  // number - and wallet-mcp refuses `vee <= 0` for the model. But a direct
-  // caller with a wallet token bypasses wallet-mcp entirely, and a zero-VEE
-  // sign-transfer burns an intent id and emits a zero Transfer for nothing.
-  // Harmless in itself; the reason to refuse it here is that the rule "the
-  // policy layer is a courtesy, the boundary is the boundary" has to hold for
-  // every check, not the ones that happened to be duplicated.
-  if (amount <= 0n) {
-    throw new HttpError('invalid_amount', 'vee must be greater than zero');
-  }
   if (perTx !== null && amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${caps.max_per_tx} ${symbol}`);
   }

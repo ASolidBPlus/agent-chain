@@ -5,12 +5,12 @@
 import { describe, it, expect } from 'bun:test';
 import { decodeFunctionData } from 'viem';
 import { TokenAbi } from '../src/abi.ts';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
+import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS, type AgentPolicy } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
@@ -23,12 +23,12 @@ import type { Resolver } from '../src/resolver.ts';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play']);
 
 const config = {
   policyDir: '/tmp/does-not-exist',
   rpcUrl: 'http://chain:8545',
-  policyDefaultsPath: join(PKG, 'policy-defaults.json'),
+  policyDefaultsPath: join(PKG, 'policy-defaults.example.json'),
 } as Config;
 
 /// Throws on any access EXCEPT the module view.
@@ -430,14 +430,14 @@ describe('POST /wallets fund: [{token, amount}]', () => {
 });
 
 describe('POST /sign-transfer validation', () => {
-  it('refuses a frozen wallet before loading its key', async () => {
+  it('refuses a RETIRED wallet before loading its key', async () => {
     const store = new Store(':memory:');
     store.freeze('orch:scammer');
     const t = treasury(store);
 
     expect(
       await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', amount: 1 })),
-    ).toBe('wallet_frozen');
+    ).toBe('wallet_retired');
     store.close();
   });
 
@@ -469,7 +469,7 @@ describe('POST /sign-transfer validation', () => {
 
 
 // The caps are game balance the owner tunes (ledger D8), so they live in
-// policy-defaults.json and NOT in a constant here. These tests assert the
+// policy-defaults.example.json and NOT in a constant here. These tests assert the
 // wiring - that the right entry is picked and a caller can override it - and
 // deliberately do not assert the numbers, which are the spec's to move
 // without breaking a build.
@@ -487,11 +487,15 @@ describe('policy defaults', () => {
       // PER TOKEN now, and asserted for EVERY token the defaults expanded to
       // rather than for one: the `*` entry is copied to each deployed key, so a
       // check of one key would pass while another carried nothing.
-      const caps = DEFAULTS[kind].caps;
+      // THE SHIPPED FILE writes both bounds for every kind, so these are
+      // asserted non-null rather than skipped: the fields are optional in the
+      // TYPE as of v0.8.0 and present in THIS document, and a test that
+      // tolerated their absence would stop noticing the file losing one.
+      const caps = DEFAULTS[kind].caps!;
       expect(Object.keys(caps).length).toBeGreaterThan(0);
       for (const pair of Object.values(caps)) {
-        expect(capToWei(pair.max_per_tx, 18)).toBeGreaterThan(0n);
-        expect(capToWei(pair.max_per_stage, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx, 18));
+        expect(capToWei(pair.max_per_tx!, 18)).toBeGreaterThan(0n);
+        expect(capToWei(pair.max_per_stage!, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx!, 18));
       }
       // The file ships `treasury.{tld}`; this is the substitution having
       // happened, asserted through the value a wallet actually gets.
@@ -502,7 +506,7 @@ describe('policy defaults', () => {
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.example.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
   });
 
   // §4.7. A pattern naming a TLD can match nothing on a deployment that
@@ -513,7 +517,7 @@ describe('policy defaults', () => {
     // whatever another file left in it.
     droppedPatternsLogged.clear();
     const lines: string[] = [];
-    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), undefined, ['play'], (m) => lines.push(m));
 
     expect(defaults.agent.deny).toEqual([]);
     // `converter` SURVIVES and `*.{tld}` does not, which is the rule working
@@ -528,7 +532,7 @@ describe('policy defaults', () => {
 
     // Nothing anywhere contains an unfilled placeholder.
     for (const kind of ['org', 'agent', 'burner'] as const) {
-      for (const p of [...defaults[kind].allow, ...defaults[kind].deny]) {
+      for (const p of [...(defaults[kind].allow ?? []), ...(defaults[kind].deny ?? [])]) {
         expect(p).not.toContain('{tld}');
       }
     }
@@ -542,7 +546,7 @@ describe('policy defaults', () => {
 
   it('does not repeat the dropped-pattern line on a second load in the same process', () => {
     const lines: string[] = [];
-    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
+    loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), undefined, ['play'], (m) => lines.push(m));
     expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
@@ -1504,7 +1508,13 @@ describe('PATCH /wallets/:agentId/policy', () => {
   function spawnerWith(canonicalOf: Record<string, string> = {}): { s: Spawner; store: Store; dir: string } {
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const store = new Store(':memory:');
-    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', null);
+    // KINDED, as of v0.8.0. The merge base for a PATCH is the wallet's OWN
+    // kind's default, read from this row - so a row with a NULL kind has no
+    // kind default to merge onto and every test here would be patching against
+    // nothing. The row was `null` because until now `policyFor` took the
+    // `agent` defaults for every wallet regardless of kind, and the fixture
+    // never had to say which kind it was.
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', 'agent');
     const s = new Spawner(
       { ...config, policyDir: dir } as Config,
       exploding('chain') as Chain,
@@ -1540,7 +1550,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const p = read(dir);
     expect(p.caps.play).toEqual({
       max_per_stage: 4242,
-      max_per_tx: DEFAULTS.agent.caps.play!.max_per_tx,
+      max_per_tx: DEFAULTS.agent.caps!.play!.max_per_tx,
     });
     expect(p.allow).toEqual(DEFAULTS.agent.allow);
     expect(p.deny).toEqual(DEFAULTS.agent.deny);
@@ -1558,26 +1568,37 @@ describe('PATCH /wallets/:agentId/policy', () => {
     expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 999 });
   }, 20_000);
 
-  it('flips frozen both ways, and the store agrees with the file', async () => {
-    const { s, store, dir } = spawnerWith();
-
-    await s.patchPolicy('orch:a', { frozen: true });
-    expect(store.isFrozen('orch:a')).toBe(true);
-    expect(read(dir).frozen).toBe(true);
-
-    await s.patchPolicy('orch:a', { frozen: false });
-    expect(store.isFrozen('orch:a')).toBe(false);
-    expect(read(dir).frozen).toBe(false);
+  // §3. `frozen` LEFT THE PATCH BODY. These two rows asserted that a PATCH
+  // flipped the freeze both ways and that the STORE was the authority; the
+  // service-side lock is retirement now, written by `retire()` alone, and
+  // freezing a LIVE wallet is the Token contract's job through admin-call.
+  //
+  // REFUSED, NOT IGNORED. An ignored field is one somebody wires up later, and
+  // an operator who sends `{frozen: true}` expecting a wallet to stop spending
+  // must not get a 200 and a wallet that keeps spending.
+  it('refuses `frozen` rather than ignoring it, and names both replacements', async () => {
+    const { s, store } = spawnerWith();
+    let err: unknown;
+    try {
+      await s.patchPolicy('orch:a', { frozen: true });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as HttpError).code).toBe('invalid_request');
+    expect((err as HttpError).detail).toContain('DELETE');
+    expect((err as HttpError).detail).toContain('admin-call');
+    // AND NOTHING HAPPENED. A refusal that had already frozen the wallet would
+    // be the worst of both.
+    expect(store.isRetired('orch:a')).toBe(false);
   }, 20_000);
 
-  // The store is what /sign-transfer consults, so this is the property that
-  // actually stops and restarts spending - the file is wallet-mcp's copy.
-  it('the freeze the next /sign-transfer honours is the STORE, not the file', async () => {
-    const { s, store } = spawnerWith();
-    await s.patchPolicy('orch:a', { frozen: true });
-    expect(store.isFrozen('orch:a')).toBe(true);
-    await s.patchPolicy('orch:a', { frozen: false });
-    expect(store.isFrozen('orch:a')).toBe(false);
+  it('does not write `frozen` into the document it stores', async () => {
+    // The field is gone from the written shape, not merely from the body -
+    // wallet-mcp stopped reading it, and a value nothing writes and nothing
+    // reads is the comment-contradicts-code defect in data form.
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { max_per_stage: 99 });
+    expect('frozen' in read(dir)).toBe(false);
   }, 20_000);
 
   // §5's durable rule: a deny entry names a canonical id or a platform name.
@@ -1639,8 +1660,147 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }, 20_000);
 
   it('refuses to patch a wallet that does not exist', async () => {
+    // A VALID FIELD, so this tests what its name says. It used to send
+    // `{frozen: true}` as an arbitrary payload; `frozen` is now refused in its
+    // own right, and the row would have passed on whichever refusal came first
+    // - a test that cannot tell which of two guards answered it.
     const { s } = spawnerWith();
-    expect(await codeOf(() => s.patchPolicy('orch:nobody', { frozen: true }))).toBe('wallet_not_found');
+    expect(await codeOf(() => s.patchPolicy('orch:nobody', { max_per_tx: 5 }))).toBe('wallet_not_found');
+  }, 20_000);
+
+  // THE WRITE PATH AND THE READ PATH AGREE ABOUT ONE DOCUMENT, which is the
+  // property the gate/parse fix restores and the one the security review found
+  // broken end to end.
+  //
+  // At 60da6e4 a spawn carrying a caps-only policy, on a deployment with no
+  // defaults file, WROTE a document `normalisePolicy` then threw on - so the
+  // read turned it into the unreadable marker and every spend refused. The
+  // service bricked the wallet at birth, with its own file.
+  //
+  // Driven through spawn and policyFor rather than through the two functions,
+  // because that is where the two halves meet: a unit test of either alone
+  // passed throughout.
+  it('reads back a caps-only policy it wrote at spawn, with no defaults loaded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    const store = new Store(':memory:');
+    const chain = {
+      viemChain: {},
+      deployment: {},
+      modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },
+      publicClient: { getBalance: async () => 10n ** 18n, waitForTransactionReceipt: async () => ({}) },
+      walletClient: { account: {}, sendTransaction: async () => '0xdead' },
+    } as unknown as Chain;
+    // NO KIND DEFAULTS, which is the condition: with defaults loaded the
+    // written document carries allow/deny from them and the old gate passed.
+    //
+    // This `null` did not mean that when the test was written. The constructor
+    // took the argument as optional and fell back with `??`, so null and absent
+    // were the same thing and the example defaults were loaded anyway - the
+    // document under test carried `allow: ["converter"]` and the mutant it was
+    // built to catch survived it. The parameter is now required and null is an
+    // answer; if that ever regresses, this test goes quiet again rather than
+    // failing - so what proves it is a mutant, not a reading: restore the old
+    // allow+deny gate in normalisePolicy and this test must go red.
+    const s = new Spawner(
+      { ...config, policyDir: dir } as Config,
+      chain,
+      { has: async () => false, create: async () => ({ address: '0x000000000000000000000000000000000000bEEF' }) } as unknown as Keystore,
+      store,
+      { lookup: async () => null } as unknown as Resolver,
+      null,
+    );
+
+    await s.spawn({ agentId: 'orch:capsonly', kind: 'agent', policy: { caps: { play: { max_per_tx: '500' } } } });
+
+    // The file exists, and what it says is what comes back.
+    const t = new Treasury(
+      { ...config, policyDir: dir } as Config,
+      chain,
+      exploding('keystore') as Keystore,
+      store,
+      exploding('resolver') as Resolver,
+      null,
+      closedCallPolicy(),
+    );
+    const read = await (t as unknown as { policyFor(a: string): Promise<AgentPolicy | null> }).policyFor('orch:capsonly');
+    expect(read?.caps?.play).toEqual({ max_per_tx: '500' });
+  }, 20_000);
+
+  // §1 + the security review's finding 23. `clear` DELETES A FILE, and the four
+  // states it can be asked to delete in are not the same operation.
+  describe('PATCH { clear: true }', () => {
+    it('refuses a wallet that was never spawned, rather than reporting success', () => {
+      // FOUND BY THE SECURITY REVIEW, and it was mine: the clear branch sat
+      // ABOVE the exists check, so clearing a typo'd id answered
+      // `{cleared: true}`. `rm --force` is silent by design, so nothing else
+      // could have said otherwise - and "done" is the one answer a clear must
+      // never give when it looked at nothing.
+      const { s } = spawnerWith();
+      return expect(codeOf(() => s.patchPolicy('orch:nobody', { clear: true }))).resolves.toBe(
+        'wallet_not_found',
+      );
+    });
+
+    it('deletes a file that is there', async () => {
+      const { s, dir } = spawnerWith();
+      await s.patchPolicy('orch:a', { max_per_tx: 100 });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(true);
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(false);
+    });
+
+    it('is not an error when there is no file', async () => {
+      // IDEMPOTENT. "This wallet has no rules of its own" is the state being
+      // asked for, and it is already true - refusing would make an operator
+      // check before every clear.
+      const { s } = spawnerWith();
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+    });
+
+    it('WORKS on an unreadable file, which is the way out of one', async () => {
+      // The row that matters: a PATCH over an unreadable file is refused, so
+      // clear is the only way back. It reads nothing, so there is nothing for a
+      // bad document to break.
+      const { s, dir } = spawnerWith();
+      writeFileSync(join(dir, 'orch%3Aa.json'), '{ this is not json');
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(false);
+    });
+
+    it('refuses any other field alongside it', async () => {
+      // "Delete the file and also set this" has two readings that differ in
+      // what the wallet ends up with, and neither is worth guessing.
+      const { s } = spawnerWith();
+      expect(await codeOf(() => s.patchPolicy('orch:a', { clear: true, max_per_tx: 5 }))).toBe(
+        'invalid_request',
+      );
+    });
+
+    it('refuses `clear: false` rather than treating it as absent', async () => {
+      const { s } = spawnerWith();
+      expect(await codeOf(() => s.patchPolicy('orch:a', { clear: false }))).toBe('invalid_request');
+    });
+  });
+
+  // §3. THE REPLY SHAPE, which nothing in this suite asserted. Changing
+  // `{frozen: true}` to `{retired: true}` broke no test - the only thing that
+  // reads it is the compose smoke, which needs Docker and so says nothing in
+  // CI. A reply shape a consumer parses deserves a test that runs everywhere.
+  it('replies { retired: true }, not { frozen: true }', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', 'agent');
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    const s = new Spawner(
+      { ...config, policyDir: dir } as Config,
+      { modules: { tokens: [], names: undefined } } as unknown as Chain,
+      exploding('keystore') as Keystore,
+      store,
+      { aliasesOf: async () => [], clearAliases: async () => undefined } as unknown as Resolver,
+      DEFAULTS,
+    );
+    expect(await s.retire('orch:a')).toEqual({ retired: true });
+    expect(store.isRetired('orch:a')).toBe(true);
+    store.close();
   }, 20_000);
 });
 

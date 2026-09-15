@@ -153,7 +153,7 @@ const CONVERT = {
   addressArgs: { '0': 'token', '1': 'token' },
 };
 const QUOTE = { contract: 'converter', function: 'quote', read: true, kinds: ['org', 'agent', 'burner'] };
-const SET_PAIR = { contract: 'converter', function: 'setPair', admin: true };
+const SET_PAIR = { contract: 'converter', function: 'setPair' };
 const BUY = {
   contract: 'shop',
   function: 'buy',
@@ -222,10 +222,9 @@ describe('a valid file', () => {
     expect(convert.maxPerStage).toBe(20);
     expect(convert.addressArgs).toEqual({ 0: 'token', 1: 'token' });
     expect(convert.read).toBe(false);
-    expect(convert.admin).toBe(false);
+
 
     expect(list.find('converter', 'quote')!.read).toBe(true);
-    expect(list.find('converter', 'setPair')!.admin).toBe(true);
     // `buy` carries an amount in a NON-DEFAULT token and no bound of its own,
     // which is the shape this file refused one release ago and accepts now: the
     // bound lives on the wallet, per token.
@@ -335,7 +334,68 @@ describe('state mutability', () => {
   });
 });
 
-describe('kinds and admin', () => {
+describe('kinds', () => {
+  // §2. `admin` IS REFUSED AT LOAD, not ignored, and one bad entry refuses the
+  // whole file. Tolerating it would be a WIDENING rather than a compatibility
+  // measure: with the concept gone, an entry that used to be admin-only becomes
+  // persona-callable the moment its `admin` is ignored.
+  it('refuses an entry carrying the retired `admin` field, naming the release', async () => {
+    write(only({ contract: 'converter', function: 'setPair', admin: true }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/"admin" was removed at v0.8.0/);
+  });
+
+  // THE TYPO THAT WIDENS. v0.8.0 made an absent `kinds` mean ANY kind, so a
+  // misspelled one stops being a no-op and becomes a grant: the entry its author
+  // restricted to orgs is callable by every wallet kind, the file loads clean and
+  // the boot line says "1 entry". Before v0.8.0 the same typo was harmless.
+  it('refuses an entry key the loader has never had, naming it', async () => {
+    write(only({ ...CONVERT, kindz: ['org'] }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/unknown key "kindz"/);
+  });
+
+  it('names every unknown key, not the first', async () => {
+    write(only({ ...CONVERT, kindz: ['org'], reed: true }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/unknown keys "kindz", "reed"/);
+  });
+
+  // THE CONTROL ON THE CATCH-ALL. A removed key must keep its OWN message -
+  // "admin was removed at v0.8.0, here is what replaced it" is worth more to
+  // the operator holding a stale file than "unknown key". If the generic check
+  // ever floats above the named ones, this row says so.
+  it('a REMOVED key still gets its own message, not the generic one', async () => {
+    for (const [field, pattern] of [
+      ['admin', /"admin" was removed at v0.8.0/],
+      ['perTxCap', /"perTxCap" is retired/],
+      ['uncapped', /"uncapped" is retired/],
+    ] as Array<[string, RegExp]>) {
+      logged = [];
+      write(only({ ...CONVERT, [field]: field === 'admin' ? true : 1 }));
+      const p = await policy();
+      expect(p.snapshot().entries).toHaveLength(0);
+      expect(logged.join('\n')).toMatch(pattern);
+      expect(logged.join('\n')).not.toMatch(/unknown key/);
+    }
+  });
+
+  // ...and the control on THAT control: the known eight all load together, so
+  // the rows above cannot be passing because the loader refuses everything.
+  it('accepts an entry carrying every key it may carry', async () => {
+    write(only({
+      contract: 'converter', function: 'convert', kinds: ['org'], read: false,
+      amount: { arg: 2, token: { arg: 0 } }, maxPerStage: 20, intentArg: 3,
+      addressArgs: { 0: 'token', 1: 'token' },
+    }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(1);
+    expect(logged.join('\n')).not.toMatch(/unknown/);
+  });
+
   it('refuses a kind that is not a wallet kind', async () => {
     write(only({ ...CONVERT, kinds: ['org', 'wizard'] }));
     const p = await policy();
@@ -343,26 +403,27 @@ describe('kinds and admin', () => {
     expect(logged.join('\n')).toMatch(/"wizard" is not a wallet kind/);
   });
 
-  it('refuses an empty kinds list on an entry that is not admin-only', async () => {
-    // An entry no kind may call and the hub may not call either is not a
-    // narrow permission, it is a line that does nothing - and a file whose
-    // author believed it did something.
+  it('refuses a WRITTEN empty kinds list', async () => {
+    // Absent and empty must never collapse: one says "any kind", the other
+    // says "no kind". An entry no kind may call describes nothing.
     write(only({ ...CONVERT, kinds: [] }));
     const p = await policy();
     expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/an entry no kind may call describes nothing/);
   });
 
-  it('accepts an admin-only entry with no kinds at all', async () => {
+  it('accepts an entry with NO kinds, meaning any kind', async () => {
+    // FLIPPED at v0.8.0: an entry without `kinds` used to be admin-only and is
+    // now callable by every kind. The allowlist describes the SHAPE of the
+    // persona surface; who may use it is a rule someone writes.
     write(only(SET_PAIR));
-    const list = (await policy()).snapshot();
-    expect(list.find('converter', 'setPair')!.kinds).toEqual([]);
-    expect(list.find('converter', 'setPair')!.admin).toBe(true);
+    const entry = (await policy()).snapshot().find('converter', 'setPair')!;
+    expect(entry.kinds).toBeUndefined();
   });
 
-  it('accepts an entry that is both callable and admin-callable', async () => {
+  it('keeps a written kinds list binding', async () => {
     write(only({ ...SET_PAIR, kinds: ['org'] }));
     const entry = (await policy()).snapshot().find('converter', 'setPair')!;
-    expect(entry.admin).toBe(true);
     expect(entry.kinds).toEqual(['org']);
   });
 });
@@ -471,17 +532,18 @@ describe('addressArgs', () => {
     }
   });
 
-  it('allows it on an admin-only entry, which passes raw addresses', async () => {
-    // Platform scope encodes a checksummed address at any depth, so the reason
-    // for the refusal does not apply - and refusing anyway would deny the hub a
-    // shape the chain accepts.
-    write(only({ contract: 'converter', function: 'airdrop', admin: true }));
-    expect((await policy()).snapshot().entries).toHaveLength(1);
+  it('refuses it on EVERY entry, including one with no kinds', async () => {
+    // FLIPPED at v0.8.0. The exemption existed because an entry with no `kinds`
+    // was admin-only, and platform scope encodes a checksummed address at any
+    // depth. With `admin` gone there is no entry a wallet cannot reach, so the
+    // exemption would now exempt entries that ARE persona-reachable - exactly
+    // the case the refusal exists for.
+    write(only({ contract: 'converter', function: 'airdrop' }));
+    expect((await policy()).snapshot().entries).toHaveLength(0);
   });
 
-  it('refuses an entry that is BOTH admin and wallet-callable', async () => {
-    // Wallet scope can reach it, so the exemption does not.
-    write(only({ contract: 'converter', function: 'airdrop', admin: true, kinds: ['agent'] }));
+  it('refuses it on an entry with kinds too, as it always did', async () => {
+    write(only({ contract: 'converter', function: 'airdrop', kinds: ['agent'] }));
     expect((await policy()).snapshot().entries).toHaveLength(0);
   });
 
@@ -525,7 +587,7 @@ describe('maxPerStage', () => {
 // CONTRACT KEY as the counterparty, so a kind whose allow list is not ["*"]
 // must name every contract its callers may pay through. `agent` and `burner`
 // carry ["*.{tld}"], which no contract key matches - which is why
-// policy-defaults.json names `converter` explicitly, and why an entry naming
+// the example defaults name `converter` explicitly, and why an entry naming
 // something else is worth saying out loud at load.
 //
 // A WARNING AND NOT A REFUSAL, and that is load-bearing: the defaults are one

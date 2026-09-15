@@ -8,7 +8,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { parseEther, type Address } from 'viem';
-import { writeFile, rename, mkdir } from 'node:fs/promises';
+import { writeFile, rename, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
@@ -20,8 +20,8 @@ import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
 import { defaultToken, requireNames, resolveToken, type TokenModule } from './modules.ts';
-import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
-  type AgentPolicy, type PolicyDefaults, type WalletKind,
+import { mergePolicy, readPolicyFile, isWalletKind, WALLET_KINDS, isUnreadable,
+  type AgentPolicy, type PolicyDefaults, type PolicyRead, type WalletKind,
   assertPatternsUsable,
 } from './policy.ts';
 import {
@@ -94,24 +94,28 @@ function parseFundList(
 }
 
 export class Spawner {
-  private readonly policyDefaults: PolicyDefaults;
-
   constructor(
     private readonly config: Config,
     private readonly chain: Chain,
     private readonly keystore: Keystore,
     private readonly store: Store,
     private readonly resolver: Resolver,
-    policyDefaults?: PolicyDefaults,
-  ) {
-    this.policyDefaults =
-      policyDefaults ??
-      loadPolicyDefaults(
-        config.policyDefaultsPath,
-        chain.modules.names?.tld,
-        chain.modules.tokens.map((t) => t.key),
-      );
-  }
+    /// REQUIRED, AND NULL IS AN ANSWER - the shape Treasury has always had.
+    ///
+    /// It was optional, with a fallback that loaded `config.policyDefaultsPath`
+    /// whenever the argument was nullish. `??` cannot tell null from absent, so
+    /// a caller passing NULL to mean "no kind defaults" got the file instead
+    /// and the parameter's own `| null` was unsatisfiable. index.ts computes
+    /// the same ternary before constructing, so the fallback never ran in
+    /// production - it ran only for tests, where it quietly supplied the
+    /// defaults a test had asked to do without.
+    ///
+    /// Found by MUTATING the §1 write-path test, not by reading it: the test
+    /// passed, and passed under the mutant too. The spawner it built with
+    /// `null` wrote `allow: ["converter"]` from the example file, so the
+    /// caps-only document it exists to exercise was never written.
+    private readonly policyDefaults: PolicyDefaults | null,
+  ) {}
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is
   /// lost, the answer is `rotate`, not a lookup: chain-svc cannot reveal a
@@ -166,7 +170,11 @@ export class Spawner {
     // document: `{allow, deny}` with the caps left alone is the harness's whole
     // use, and demanding all four made that the one shape that failed while
     // sending nothing succeeded.
-    const policy = mergePolicy(body.policy, this.policyDefaults[kind]);
+    // THE BASE IS THE KIND'S DEFAULTS WHEN THERE ARE ANY, and nothing when
+    // there are not. A spawn that supplies no `policy` against a deployment
+    // with no defaults produces a wallet with no rules - which is what "policy
+    // is opt-in" means at the point a wallet comes into existence.
+    const policy = mergePolicy(body.policy, this.policyDefaults?.[kind] ?? null);
 
     // A burner is deliberately an unnamed address the game has to trace, so a
     // named burner is a contradiction rather than a request to be helpful about.
@@ -226,7 +234,7 @@ export class Spawner {
     // reads the registry: an argument refusal should not depend on the chain
     // being reachable, and a repeat spawn should not pay for a check whose
     // answer it already stored.
-    await this.assertDenyEntriesAreCanonical(policy.deny);
+    await this.assertDenyEntriesAreCanonical(policy.deny ?? []);
 
     const address = (await this.keystore.has(agentId))
       ? (await this.keystore.load(agentId)).address
@@ -252,7 +260,13 @@ export class Spawner {
       await this.registerIfAbsent(agentId, address);
       if (alias) await this.registerIfAbsent(alias, address);
     }
-    await this.writePolicyFile(agentId, policy, false);
+    // A FILE ONLY WHEN THE CALLER WROTE RULES. Until v0.8.0 every spawn wrote
+    // one, baking the kind defaults into a per-wallet document - so every
+    // wallet had "its own" policy that was really a snapshot of the kind's, and
+    // a later change to the kind defaults silently did not reach any existing
+    // wallet. A wallet spawned without `policy` now has no file and follows its
+    // kind's defaults live, or nothing if none are loaded.
+    if (body.policy !== undefined) await this.writePolicyFile(agentId, policy);
 
     // Minted before the marker: if the process dies between the two, the retry
     // re-runs this and issues a fresh token, rather than completing a spawn
@@ -285,16 +299,22 @@ export class Spawner {
   /// then this - and chain-svc deliberately does not tail the `agent.deleted`
   /// admin log line: it is a log record, not a subscribable event, and coupling
   /// to it would duplicate what hub-core will own.
-  async retire(agentId: string): Promise<{ frozen: true }> {
+  async retire(agentId: string): Promise<{ retired: true }> {
     assertCanonicalAgentId(agentId);
 
-    // Freeze first. If clearing the aliases fails halfway, the wallet is
-    // already unable to spend - the safe order.
+    // Mark retired FIRST. If clearing the aliases fails halfway, the wallet is
+    // already unable to spend - the safe order, and the reason this table is
+    // written here and nowhere else.
     this.store.freeze(agentId);
-    // Preserve whatever caps the wallet was spawned with: retirement freezes an
-    // agent, it does not silently re-balance one. Falls back to the `agent`
-    // defaults only when there is no file to preserve.
-    await this.writePolicyFile(agentId, await this.existingPolicy(agentId), true);
+    // §3. RETIREMENT NO LONGER WRITES A POLICY FILE. It used to rewrite the
+    // wallet's file with `frozen: true` stamped in, preserving whatever caps
+    // the wallet was spawned with. At v0.8.0 that would CREATE a file for a
+    // wallet that has none, bake the kind defaults into it, and leave a field
+    // nothing reads - turning retirement into an act that writes rules nobody
+    // asked for, which is the thing this release removes.
+    //
+    // The `frozen` table above IS the record. A policy document is the
+    // operator's rules; retirement is not one of them.
 
     const wallet = this.store.spawnedAddress(agentId);
     if (wallet) {
@@ -304,7 +324,7 @@ export class Spawner {
         await this.send('setTargetFor', [alias, '0x0000000000000000000000000000000000000000']);
       }
     }
-    return { frozen: true };
+    return { retired: true };
   }
 
   private parseKind(value: unknown): WalletKind {
@@ -409,20 +429,47 @@ export class Spawner {
     }
   }
 
-  private async existingPolicy(agentId: string): Promise<AgentPolicy> {
-    // Falls back to the `agent` defaults only when there is no file to preserve.
-    return (
-      (await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key)) ??
-      this.policyDefaults.agent
-    );
+  /// What `GET /wallets/:id` reports: the rules that will actually apply, and
+  /// WHERE THEY CAME FROM.
+  ///
+  /// Derived per read. An unreadable file is reported as its own source rather
+  /// than as `null` - an operator staring at an unbounded wallet must be able
+  /// to tell "nobody wrote rules" from "I wrote rules this service cannot
+  /// read", because only the second is something they broke.
+  async effectivePolicy(
+    agentId: string,
+  ): Promise<{ policy: AgentPolicy | null; policySource: 'wallet' | 'kind' | 'none' | 'unreadable' }> {
+    const read = await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key);
+    if (isUnreadable(read)) return { policy: null, policySource: 'unreadable' };
+    if (read !== null) return { policy: read, policySource: 'wallet' };
+    const kind = this.store.walletRow(agentId)?.kind;
+    const fromKind = this.policyDefaults && kind ? this.policyDefaults[kind] : undefined;
+    if (fromKind) return { policy: fromKind, policySource: 'kind' };
+    return { policy: null, policySource: 'none' };
+  }
+
+  /// The merge base for `PATCH` and for retirement.
+  ///
+  /// UNREADABLE PROPAGATES rather than falling back: a PATCH over a file this
+  /// service cannot read would silently discard whatever the operator wrote,
+  /// and `{ clear: true }` is the operation that means "throw it away". The
+  /// caller decides; this does not decide for it.
+  private async existingPolicy(agentId: string): Promise<PolicyRead> {
+    const read = await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key);
+    if (read !== null) return read;
+    // No file: the base is the wallet's OWN kind's default when defaults are
+    // loaded, and nothing otherwise.
+    if (!this.policyDefaults) return null;
+    const kind = this.store.walletRow(agentId)?.kind;
+    return (kind ? this.policyDefaults[kind] : undefined) ?? null;
   }
 
   /// Partial update of a wallet's policy (harness spec S3). Platform scope.
   ///
-  /// `frozen: false` is the ONLY way back from frozen. `DELETE /wallets` keeps
-  /// meaning retirement and stays irreversible: it also clears the wallet's
-  /// aliases, so un-retiring by un-freezing would return the ability to spend
-  /// without the ability to be paid.
+  /// NOT A WAY BACK FROM RETIREMENT. `frozen` left this body at v0.8.0 (§3)
+  /// and a body carrying it is refused by name; `DELETE /wallets` stays
+  /// irreversible, and it also clears the wallet's aliases, so un-retiring
+  /// would return the ability to spend without the ability to be paid.
   async patchPolicy(
     agentId: string,
     body: {
@@ -437,13 +484,42 @@ export class Spawner {
       max_per_stage?: unknown;
       allow?: unknown;
       deny?: unknown;
+      /// DELETE THE FILE. The one operation that means "this wallet has no
+      /// rules of its own" - which a PATCH cannot express, because with every
+      /// field optional an absent field means "leave it alone" and there is no
+      /// JSON for "remove it".
+      clear?: unknown;
     },
   ): Promise<Record<string, unknown>> {
     assertCanonicalAgentId(agentId);
+    // THE WALLET MUST EXIST BEFORE ANY BRANCH, and this check used to sit BELOW
+    // the clear branch: `PATCH {clear: true}` on a wallet that was never
+    // spawned answered `{cleared: true}`. An operator clearing a typo'd id was
+    // told the rules were gone when nothing had been looked at, which is the
+    // one answer a clear must never give - it reads as "done" and the real
+    // wallet still has its file.
+    //
+    // `rm --force` made it silent on the filesystem side, so the only thing
+    // that could have said otherwise was this check, and it ran too late.
     if (!this.store.spawnedAddress(agentId)) {
       throw new HttpError('wallet_not_found', `no wallet for ${agentId}`);
     }
-
+    if (body.clear !== undefined) {
+      if (body.clear !== true) {
+        throw new HttpError('invalid_request', 'clear is either true or absent');
+      }
+      // NO OTHER FIELD MAY ACCOMPANY IT. "Delete the file and also set this"
+      // has two readings - set it on the cleared file, or set it and then
+      // delete - and they differ in what the wallet ends up with.
+      const others = Object.keys(body).filter((k) => k !== 'clear');
+      if (others.length > 0) {
+        throw new HttpError('invalid_request', `clear takes no other fields; got ${others.join(', ')}`);
+      }
+      // WORKS ON AN UNREADABLE FILE, deliberately: it is the way out of one,
+      // and it reads nothing, so there is nothing for a bad document to break.
+      await rm(join(this.config.policyDir, keyFileName(agentId)), { force: true });
+      return { agentId, cleared: true };
+    }
     // ONE VALIDATOR FOR ONE DOCUMENT. This used to have its own - `assertCap`
     // and `assertPatternList` - while `POST /wallets` used `mergePolicy`, so
     // the two entry points to the same policy file enforced different rules:
@@ -458,21 +534,42 @@ export class Spawner {
     // is read against it rather than refused. A caller patching the old shape
     // is saying something about the default token; every other token's caps
     // come through from `current` untouched.
+    if (body.frozen !== undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'frozen is not a policy field; retire the wallet with DELETE, or freeze it on chain with admin-call',
+      );
+    }
+    if (isUnreadable(current)) {
+      // A PATCH MERGES ONTO WHAT IS THERE, and this service cannot read what is
+      // there. Merging onto a fallback would silently discard whatever the
+      // operator wrote; `{ clear: true }` is the operation that means throw it
+      // away, and it works on an unreadable file precisely because it reads
+      // nothing.
+      throw new HttpError(
+        'invalid_request',
+        // PLATFORM SCOPE, so the reason travels. This refusal reaches an
+        // operator holding the platform credential - the person who wrote the
+        // file - and telling them WHY their own document will not parse is the
+        // whole use of the message. The persona-facing path gets the fixed
+        // string and the reason goes to the log.
+        `${current.unreadable}: ${current.reason}; clear it first`,
+      );
+    }
     const next = mergePolicy(body, current, this.chain.modules.tokens[0]?.key);
 
     // Also called here now. It was on this path only, so `POST /wallets` with
     // `deny: ["mark.play"]` was accepted while PATCH with the identical value
     // was refused - the same asymmetry in the other direction.
-    await this.assertDenyEntriesAreCanonical(next.deny);
+    await this.assertDenyEntriesAreCanonical(next.deny ?? []);
 
-    const frozen = typeof body.frozen === 'boolean' ? body.frozen : this.store.isFrozen(agentId);
-    if (typeof body.frozen === 'boolean') {
-      if (body.frozen) this.store.freeze(agentId);
-      else this.store.unfreeze(agentId);
-    }
-
-    await this.writePolicyFile(agentId, next, frozen);
-    return { agentId, ...next, frozen };
+    // §3. `frozen` LEFT THIS BODY. The service-side lock is retirement, written
+    // by `retire()` alone to its own table - so a PATCH can no longer freeze or
+    // unfreeze, and freezing a LIVE wallet is the Token contract's, operated by
+    // admin-call. A body carrying `frozen` is refused above rather than
+    // ignored: an ignored field is one somebody wires up later.
+    await this.writePolicyFile(agentId, next);
+    return { agentId, ...next };
   }
 
   /// A deny entry must name a CANONICAL id or a PLATFORM name, never a vanity
@@ -519,8 +616,12 @@ export class Spawner {
   /// The per-agent policy file wallet-mcp reads (spec S5). Written atomically:
   /// wallet-mcp may read it at any moment, and a half-written file would parse
   /// as a missing policy rather than as an error.
-  private async writePolicyFile(agentId: string, caps: AgentPolicy, frozen: boolean): Promise<void> {
-    const policy = { agentId, ...caps, frozen };
+  /// `frozen` LEFT THE DOCUMENT at v0.8.0 (§3). Retirement writes its own
+  /// table and never a policy file, so a `frozen` field here would be a value
+  /// nothing writes and nothing reads - and wallet-mcp's local pre-check for it
+  /// is gone for the same reason.
+  private async writePolicyFile(agentId: string, caps: AgentPolicy): Promise<void> {
+    const policy = { agentId, ...caps };
     await mkdir(this.config.policyDir, { recursive: true });
     const target = join(this.config.policyDir, keyFileName(agentId));
     const temp = `${target}.tmp`;

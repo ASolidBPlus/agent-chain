@@ -50,13 +50,15 @@ export interface AmountRule {
 export interface CallEntry {
   contract: string;
   function: string;
-  /// Which wallet kinds may call it through `call`. Empty is legal only on an
-  /// admin-only entry.
-  kinds: WalletKind[];
-  /// Callable by the hub through `admin-call`. Written down even though
-  /// platform scope could bypass a list, so the hub's powers are on the record
-  /// beside the personas'.
-  admin: boolean;
+  /// Which wallet kinds may call it through `call`. ABSENT means ANY kind, as
+  /// of v0.8.0 - the allowlist describes the SHAPE of the persona surface, not
+  /// who is permitted on it, and a per-kind restriction is a rule someone
+  /// writes rather than one an empty field implies.
+  ///
+  /// A WRITTEN `kinds: []` is refused at load, so absent and empty can never
+  /// collapse: one says "any kind", the other says "no kind", and an entry no
+  /// kind may call describes nothing.
+  kinds?: WalletKind[];
   read: boolean;
   amount?: AmountRule;
   /// Whole units of the amount's token. Increment 3 has no per-wallet per-token
@@ -105,12 +107,73 @@ export function fixedCallPolicy(entries: CallEntry[]): CallPolicySource {
 /// digits only. `isCap` refuses a JSON number for the same reason.
 const WHOLE_UNITS = /^\d{1,30}$/;
 
+/// EVERY KEY AN ENTRY MAY CARRY. A key outside this set refuses the file, with
+/// the key named.
+///
+/// It was not checked, and v0.8.0 is what made that expensive. Absent `kinds`
+/// used to be a different thing from any-kind; now it MEANS any kind, so
+/// `"kindz": ["org"]` loads clean, logs "1 entry", and an entry its author
+/// restricted to orgs is callable by every wallet kind in the game. The typo
+/// WIDENS, silently, and the file still looks right to whoever wrote it.
+///
+/// The same reasoning as the `admin`, `perTxCap` and `uncapped` refusals, which
+/// keep their own messages because a key that was REMOVED deserves a sentence
+/// about what replaced it. This is the catch-all under them: a key nobody has
+/// ever heard of is a typo, and a typo in a security boundary is not a comment.
+const ENTRY_KEYS = [
+  'contract', 'function', 'kinds', 'read', 'amount', 'maxPerStage', 'intentArg', 'addressArgs',
+] as const;
+
 /// Function names that hand one address the right to spend another's balance.
 ///
 /// The ERC-20 pair, plus the two extensions a token is likely to carry. Listed
 /// by NAME rather than detected by shape because there is no shape to detect -
 /// `approve(address,uint256)` is indistinguishable from any other two-argument
 /// setter, and what makes it different is what the CONTRACT does with it.
+/// THE CHECKS THAT ARE PROPERTIES OF THE RAIL, not of a permission.
+///
+/// Factored out of `parseEntry` at v0.8.0 so `admin-call` can apply them to a
+/// function that has NO allowlist entry. The allowlist describes the shape of
+/// the persona surface; these describe what this chain is, and they hold for the
+/// platform exactly as they hold for a persona:
+///
+///   - an OVERLOADED name does not identify one function, and the two differ in
+///     argument types, which is what every validator and rule reads. THE CHECK
+///     IS NOT HERE: this function is handed ONE resolved `abiFunction`, so by
+///     the time it runs the ambiguity is already gone. It is `requireFunction`
+///     in modules.ts that counts the matches and refuses more than one - which
+///     is why an overload is refused identically on the entry path and on the
+///     entry-less admin-call path, without either of them saying so.
+///   - a PAYABLE function cannot be called: there is no ETH economy.
+///   - an APPROVAL grants an allowance, and money here is push-only. Refused by
+///     NAME on every contract, because a custom contract is free to declare one.
+///   - every parameter must be a type the validator can check.
+///
+/// The platform is the game and may call anything - but "anything" is anything
+/// this rail can express, and none of these four is a rule about who is asking.
+export function assertRailAllows(
+  name: string,
+  abiFunction: { stateMutability?: string; inputs?: readonly unknown[] },
+  where: string,
+): void {
+  if (abiFunction.stateMutability === 'payable') {
+    throw new Error(`payable functions are not callable; the chain has no ETH economy (${where})`);
+  }
+  if (APPROVAL_FUNCTIONS.has(name)) {
+    throw new Error(
+      `"${name}" grants an allowance, and this chain has none: money is push-only and a call ` +
+        `never spends what it was not given (${where})`,
+    );
+  }
+  for (const input of (abiFunction.inputs ?? []) as readonly AbiParameter[]) {
+    try {
+      assertSupportedType(input);
+    } catch (err) {
+      throw new Error(`${where}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 const APPROVAL_FUNCTIONS = new Set([
   'approve',
   'increaseAllowance',
@@ -174,42 +237,10 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
   }
   const abiFunction = matches[0]!;
   const inputs = abiFunction.inputs as readonly AbiParameter[];
+  assertRailAllows(name, abiFunction, where);
 
-  if (abiFunction.stateMutability === 'payable') {
-    throw new Error(`payable functions are not callable; the chain has no ETH economy (${where})`);
-  }
-
-  // NO APPROVALS, AND THE GENERIC OP IS WHERE THAT STOPS BEING AUTOMATIC.
-  //
-  // "Allowances/approvals of any kind" is a NON-GOAL of this increment, and it
-  // used to hold for free: nothing in chain-svc called `approve`, so the §8.10
-  // grep gate found no line outside a comment. It does not hold for free any
-  // more. The registry's ABIs are generated from the whole of contracts/src,
-  // the Token is a standard ERC-20, and the standard declares `approve` - so
-  // `{"contract": "play", "function": "approve"}` is now a manifest away from
-  // being a legal allowlist entry, and the money rail's push-only property
-  // would be a file's typo away from gone.
-  //
-  // Refused BY NAME at load, on every contract rather than on tokens: a custom
-  // contract is free to name a function `approve`, and if it does, the same
-  // question applies to it.
-  if (APPROVAL_FUNCTIONS.has(name)) {
-    throw new Error(
-      `"${name}" grants an allowance, and this chain has none: money is push-only and a call ` +
-        `never spends what it was not given (${where})`,
-    );
-  }
-
-  // Every parameter must be one the validator can check. AT LOAD, so the
-  // operator who wrote the file meets it - never at call time, in front of a
-  // persona, as a refusal nobody can act on.
-  for (const input of inputs) {
-    try {
-      assertSupportedType(input);
-    } catch (err) {
-      throw new Error(`${where}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  // (The rail checks - overload, payable, approvals, parameter types - moved to
+  // `assertRailAllows` above, so `admin-call` applies them without an entry.)
 
   const read = e.read === true;
   const isView = abiFunction.stateMutability === 'view' || abiFunction.stateMutability === 'pure';
@@ -223,22 +254,41 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     throw new Error(`"${name}" is view; it needs "read": true (${contract})`);
   }
 
-  const admin = e.admin === true;
-  const kinds: WalletKind[] = [];
+  // `admin` IS REFUSED AT LOAD, not ignored, and the message names the release.
+  // `admin-call` reaches any function of any registered contract as of v0.8.0,
+  // so the field grants nothing - and TOLERATING it would be a widening rather
+  // than a compatibility measure: with the concept gone, an entry that used to
+  // be admin-only becomes persona-callable the moment its `admin` is ignored.
+  // One bad entry refuses the whole file, which is the point: a stale allowlist
+  // is noticed rather than silently opened up.
+  if (e.admin !== undefined) {
+    throw new Error(
+      `${where}: "admin" was removed at v0.8.0 - admin-call reaches any function of any ` +
+        `registered contract, with or without an entry. Delete the field; an entry that also ` +
+        `names "kinds" keeps them.`,
+    );
+  }
+
+  // ABSENT MEANS ANY KIND; a WRITTEN empty list is refused. The two must never
+  // collapse, which is the same rule `allow: []` gets in a policy and for the
+  // same reason: an operator who wrote an empty list said something, and
+  // reading it as "no rule" discards it.
+  let kinds: WalletKind[] | undefined;
   if (e.kinds !== undefined) {
     if (!Array.isArray(e.kinds)) throw new Error(`${where}: "kinds" is not an array`);
+    if (e.kinds.length === 0) {
+      throw new Error(
+        `${where}: an entry no kind may call describes nothing - omit "kinds" for any kind, ` +
+          `or omit the entry`,
+      );
+    }
+    kinds = [];
     for (const k of e.kinds) {
       if (!(WALLET_KINDS as readonly unknown[]).includes(k)) {
         throw new Error(`${where}: "${String(k)}" is not a wallet kind`);
       }
       kinds.push(k as WalletKind);
     }
-  }
-  if (kinds.length === 0 && !admin) {
-    // An entry no kind may call and the hub may not call either is not a narrow
-    // permission - it is a line that does nothing, written by an author who
-    // believed it did something.
-    throw new Error(`${where}: no "kinds" and not "admin"; nothing could call it`);
   }
 
   // AN ADDRESS NESTED IN AN ARRAY OR A TUPLE IS NOT CALLABLE BY A WALLET, and
@@ -254,10 +304,12 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
   // failure would reach a persona as a 502 chain_error, which says the chain is
   // broken about an allowlist entry nobody could have used.
   //
-  // ADMIN-ONLY ENTRIES ARE EXEMPT because platform scope passes raw checksummed
-  // addresses, which encode at any depth. An entry with BOTH `admin` and
-  // `kinds` is refused: wallet scope can reach it.
-  if (kinds.length > 0) {
+  // EVERY ENTRY, as of v0.8.0. This used to be skipped when `kinds` was empty,
+  // because an empty `kinds` meant admin-only and platform scope passes raw
+  // checksummed addresses which encode at any depth. With `admin` gone there is
+  // no such thing as an entry a wallet cannot reach, so the exemption would now
+  // exempt entries that ARE persona-reachable.
+  {
     for (let i = 0; i < inputs.length; i++) {
       const nested = nestedAddressIn(inputs[i]!);
       if (nested) {
@@ -331,6 +383,19 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     }
   }
 
+  // ...AND ANYTHING ELSE. Below the three named refusals above, because a key
+  // that was removed deserves a sentence about what replaced it; what is left
+  // is a key this loader has never had, which is a typo.
+  const unknown = Object.keys(e).filter((k) => !(ENTRY_KEYS as readonly string[]).includes(k));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${where}: unknown ${unknown.length === 1 ? 'key' : 'keys'} ` +
+        `${unknown.map((k) => `"${k}"`).join(', ')}. An entry may carry ` +
+        `${ENTRY_KEYS.join(', ')}. A misspelled "kinds" would leave the entry callable by ` +
+        `ANY kind, since v0.8.0 reads an absent one that way.`,
+    );
+  }
+
   let intentArg: number | undefined;
   if (e.intentArg !== undefined) {
     if (read) {
@@ -372,7 +437,6 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
     contract,
     function: name,
     kinds,
-    admin,
     read,
     amount,
     intentArg,
@@ -420,7 +484,8 @@ function warnAboutUnallowedContracts(
     // so the allow list is consulted for every currency a call can move.
     if (entry.amount === undefined) continue;
 
-    for (const kind of entry.kinds) {
+    // ABSENT `kinds` means every kind, so the warning is about all of them.
+    for (const kind of entry.kinds ?? WALLET_KINDS) {
       const allow = defaults[kind]?.allow ?? [];
       const allowed = allow.some((p) => matchesPattern(p, entry.contract));
       if (!allowed) {
@@ -473,7 +538,7 @@ export class CallPolicy implements CallPolicySource {
     log: (line: string) => void,
     /// The kind defaults, for the load-time warning only. Optional because a
     /// test of the LOADER has no business needing them.
-    private readonly policyDefaults?: PolicyDefaults,
+    private readonly policyDefaults?: PolicyDefaults | null,
   ) {
     this.path = join(policyDir, 'calls.json');
     this.modules = modules;
@@ -507,7 +572,7 @@ export class CallPolicy implements CallPolicySource {
     try {
       this.cached = parseFile(readFileSync(this.path, 'utf8'), this.modules);
       this.complainedAbout = null;
-      warnAboutUnallowedContracts(this.cached.entries, this.policyDefaults, this.modules, this.log);
+      warnAboutUnallowedContracts(this.cached.entries, this.policyDefaults ?? undefined, this.modules, this.log);
       this.log(
         `[chain-svc] calls.json: ${this.cached.entries.length} entr${
           this.cached.entries.length === 1 ? 'y' : 'ies'

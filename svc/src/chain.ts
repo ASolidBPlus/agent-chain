@@ -388,7 +388,7 @@ export async function assertPrivateChain(chain: Chain): Promise<void> {
 /// is a 503 the caller can retry, a revert is a 502 they cannot (spec S4).
 export function asChainError(err: unknown): HttpError {
   // A REFUSAL IS NOT A CHAIN ERROR. Anything that already decided what it is -
-  // module_not_deployed, unknown_name, wallet_frozen - passes through with its
+  // module_not_deployed, unknown_name, wallet_retired - passes through with its
   // code intact.
   //
   // Without this, a guard that throws inside a call this function wraps has its

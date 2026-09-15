@@ -8,7 +8,7 @@
 //     in money policy. The alternative - an absent cap meaning "no limit" - is
 //     the one reading that costs money, and it is the reading a reader reaches
 //     for first.
-//   - `*` in policy-defaults.json is expanded to every DEPLOYED token key at
+//   - `*` in a kind-defaults file is expanded to every DEPLOYED token key at
 //     load, so a deployment that adds a token does not silently give every
 //     wallet an unbounded new currency, nor a bounded-by-nothing one.
 //   - an explicit key REPLACES the whole pair rather than merging field by
@@ -26,12 +26,13 @@ import { join } from 'node:path';
 import {
   capsFor,
   isCap,
+  isPolicy,
+  normalisePolicy,
   UNLIMITED,
   stageCapWei,
   enforcePolicy,
   loadPolicyDefaults,
   mergePolicy,
-  normalisePolicy,
   droppedPatternsLogged,
   type AgentPolicy,
 } from '../src/policy.ts';
@@ -66,25 +67,36 @@ describe('capsFor', () => {
     expect(capsFor(policy, 'vee')).toEqual({ max_per_tx: '100', max_per_stage: '500' });
   });
 
-  it('REFUSES a token the wallet has no entry for', () => {
-    // Silence fails CLOSED. An absent cap read as "no limit" is the one reading
-    // that costs money, and it is the reading a careless caller reaches for.
+  it('reads a token with NO entry as unbounded', () => {
+    // FLIPPED at v0.8.0, and this row is the reversal itself. Silence used to
+    // fail closed here on the argument that an absent cap read as "no limit" is
+    // the reading that costs money. The owner reversed it: this service
+    // enforces only rules someone wrote, and the rules that must survive a
+    // bypass live in the contracts. Refusing on silence is acting on its own
+    // initiative.
+    expect(capsFor(policy, 'au')).toEqual({});
+  });
+
+  it('reads an EMPTY entry as an entry with no bounds, not as garbage', () => {
+    // FLIPPED at v0.8.0. `{}` is an entry someone wrote and put no bounds in.
+    // Under the old rule it refused because `isTokenCaps` required both fields,
+    // so a shape defect and a value defect were one category; each field now
+    // stands alone and neither is present, so neither bounds anything.
+    expect(capsFor({ ...policy, caps: { au: {} } }, 'au')).toEqual({});
+  });
+
+  it('still refuses a field that is PRESENT and unreadable', () => {
+    // The half that survives. COMPARE TO A VALUE on the detail: it must name
+    // the FIELD, or a wallet with one typo between two currencies cannot tell
+    // which of its spends is impossible.
     let err: unknown;
     try {
-      capsFor(policy, 'au');
+      capsFor({ ...policy, caps: { au: { max_per_tx: 'lots' } } }, 'au');
     } catch (e) {
       err = e;
     }
-    expect(err).toBeInstanceOf(HttpError);
-    // §1b. `no_cap_set`, not `over_max_per_tx`: the old code told a persona a
-    // smaller amount would succeed, when no amount can. The DETAIL is
-    // unchanged - it was already right.
     expect((err as HttpError).code).toBe('no_cap_set');
-    expect((err as HttpError).detail).toBe('no cap set for au');
-  });
-
-  it('refuses even when the entry exists but is empty', () => {
-    expect(() => capsFor({ ...policy, caps: { au: {} as never } }, 'au')).toThrow(HttpError);
+    expect((err as HttpError).detail).toBe('max_per_tx for au is not a usable amount');
   });
 });
 
@@ -125,9 +137,9 @@ describe('"unlimited" in isCap', () => {
 describe('loadPolicyDefaults with per-token caps', () => {
   it('expands * to every deployed token key', () => {
     const d = loadPolicyDefaults(defaultsFile(FILE()), 'play', TOKENS, () => {});
-    expect(Object.keys(d.agent.caps).sort()).toEqual(['au', 'vee']);
-    expect(d.agent.caps.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
-    expect(d.agent.caps.au).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(Object.keys(d.agent.caps!).sort()).toEqual(['au', 'vee']);
+    expect(d.agent.caps!.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(d.agent.caps!.au).toEqual({ max_per_tx: '100', max_per_stage: '500' });
   });
 
   it('lets an explicit key REPLACE the pair, not merge into it', () => {
@@ -147,8 +159,8 @@ describe('loadPolicyDefaults with per-token caps', () => {
       TOKENS,
       () => {},
     );
-    expect(d.agent.caps.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
-    expect(d.agent.caps.au).toEqual({ max_per_tx: '1000', max_per_stage: '9000' });
+    expect(d.agent.caps!.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(d.agent.caps!.au).toEqual({ max_per_tx: '1000', max_per_stage: '9000' });
   });
 
   it('refuses an explicit key that is not a deployed token', () => {
@@ -189,12 +201,29 @@ describe('loadPolicyDefaults with per-token caps', () => {
     ).toThrow(/agent/);
   });
 
-  it('refuses a cap that is not a usable amount', () => {
-    for (const bad of [{ max_per_tx: '0', max_per_stage: '5' }, { max_per_tx: '-1', max_per_stage: '5' }, { max_per_tx: 'lots', max_per_stage: '5' }, { max_per_stage: '5' }]) {
+  it('refuses a cap that is PRESENT and not a usable amount', () => {
+    // `{ max_per_stage: '5' }` LEFT THIS LIST at v0.8.0 and is asserted below
+    // instead: an absent `max_per_tx` is not a bad value, it is no bound, and
+    // keeping it here would have been the fail-closed-on-silence rule surviving
+    // in the one place nobody looked.
+    for (const bad of [{ max_per_tx: '0', max_per_stage: '5' }, { max_per_tx: '-1', max_per_stage: '5' }, { max_per_tx: 'lots', max_per_stage: '5' }]) {
       expect(() =>
         loadPolicyDefaults(defaultsFile(FILE({ agent: KIND({ '*': bad }) })), 'play', TOKENS, () => {}),
       ).toThrow();
     }
+  });
+
+  it('LOADS a defaults entry that bounds only one of the two', () => {
+    const d = loadPolicyDefaults(
+      defaultsFile(FILE({ agent: KIND({ '*': { max_per_stage: '5' } }) })),
+      'play',
+      TOKENS,
+      () => {},
+    );
+    // Bounds the stage and says nothing about a single transaction - which is a
+    // coherent thing for an operator to write and was refused as malformed
+    // until each field stood alone.
+    expect(d.agent.caps!.vee).toEqual({ max_per_stage: '5' });
   });
 
   it('still drops TLD patterns on a names-less deployment', () => {
@@ -228,7 +257,7 @@ describe('loadPolicyDefaults with per-token caps', () => {
     // every spend is refused by capsFor - which is correct, because there is
     // nothing to spend.
     const d = loadPolicyDefaults(defaultsFile(FILE()), 'play', [], () => {});
-    expect(d.agent.caps).toEqual({});
+    expect(d.agent.caps!).toEqual({});
   });
 });
 
@@ -249,10 +278,17 @@ describe('the legacy policy shape', () => {
     expect(normalisePolicy(modern, 'vee')).toEqual(modern);
   });
 
-  it('refuses a document that is neither shape', () => {
-    for (const bad of [{ allow: [], deny: [] }, { caps: 'lots', allow: [], deny: [] }, null, 'policy']) {
+  it('refuses a document that is not a document, and a caps map that is not a map', () => {
+    // `{ allow: [], deny: [] }` LEFT THIS LIST at v0.8.0 - it is a document
+    // with rules and no bounds, which is exactly what §1 invites an operator to
+    // write. It threw until now, and because `readPolicyFile` calls this inside
+    // its try, the throw became the unreadable marker: a valid permissive file
+    // turned into a wallet that refused every spend.
+    for (const bad of [{ caps: 'lots', allow: [], deny: [] }, null, 'policy', []]) {
       expect(() => normalisePolicy(bad, 'vee')).toThrow();
     }
+    // ...and the one that moved, asserted as what it now means.
+    expect(normalisePolicy({ allow: [], deny: [] }, 'vee')).toEqual({ allow: [], deny: [] });
   });
 
   it('prefers caps when a file somehow carries both shapes', () => {
@@ -282,16 +318,16 @@ describe('mergePolicy with caps', () => {
     // its kind may. Merging would let a caller widen one token by naming
     // another.
     const merged = mergePolicy({ caps: { au: { max_per_tx: '1', max_per_stage: '2' } } }, defaults);
-    expect(merged.caps).toEqual({ au: { max_per_tx: '1', max_per_stage: '2' } });
+    expect(merged.caps!).toEqual({ au: { max_per_tx: '1', max_per_stage: '2' } });
     expect(merged.allow).toEqual(['*.play']);
   });
 
   it('accepts the legacy pair from a caller and reads it as the default token', () => {
     const merged = mergePolicy({ max_per_tx: '7' }, defaults, 'vee');
-    expect(merged.caps.vee).toEqual({ max_per_tx: '7', max_per_stage: '500' });
+    expect(merged.caps!.vee).toEqual({ max_per_tx: '7', max_per_stage: '500' });
     // The OTHER token's defaults survive: a caller writing the legacy shape is
     // saying something about the default token, not about every token.
-    expect(merged.caps.au).toEqual({ max_per_tx: '10', max_per_stage: '50' });
+    expect(merged.caps!.au).toEqual({ max_per_tx: '10', max_per_stage: '50' });
   });
 
   it('refuses a cap that is not an amount, in either shape', () => {
@@ -317,6 +353,69 @@ describe('mergePolicy with caps', () => {
 // So the assertion is about the PAIR. A test naming "unlimited" would have gone
 // green the moment the two consumers were taught about it and said nothing
 // about the next special value somebody adds. This one stays true.
+// THE SAME PROPERTY ONE LEVEL UP, at the document rather than the field: every
+// shape `isPolicy` accepts must be usable by `normalisePolicy`.
+//
+// Handed to me by the wallet-mcp lane rather than found here, and it is the
+// right instrument: the three instances they reported were five, and a test
+// naming today's shapes says nothing about the next one somebody writes.
+//
+// WHY THE PAIR MATTERS MORE THAN IT DID. The two were allowed to disagree while
+// a document `normalisePolicy` threw on became "no policy" and fell back to the
+// kind defaults - wrong, but bounded. At v0.8.0 that throw lands in
+// `readPolicyFile`'s catch and becomes the UNREADABLE marker, so a disagreement
+// turns a valid permissive document into a wallet that refuses every spend.
+describe('every document isPolicy accepts is usable by normalisePolicy', () => {
+  const ACCEPTED: Array<[string, unknown]> = [
+    ['allow and deny with no caps at all', { allow: ['*.play'], deny: ['treasury.play'] }],
+    ['an empty document', {}],
+    ['the legacy pair, both halves', { allow: [], deny: [], max_per_tx: '100', max_per_stage: '500' }],
+    ['the legacy pair, max_per_tx alone', { allow: [], deny: [], max_per_tx: '100' }],
+    ['the legacy pair, max_per_stage alone', { allow: [], deny: [], max_per_stage: '500' }],
+    ['the new shape, both bounds', { caps: { play: { max_per_tx: '1', max_per_stage: '2' } } }],
+    ['the new shape, one bound', { caps: { play: { max_per_tx: '1' } } }],
+    ['the new shape, an empty entry', { caps: { play: {} } }],
+    ['"unlimited" in an entry', { caps: { play: { max_per_tx: 'unlimited' } } }],
+    ['allow written empty', { allow: [], deny: [] }],
+  ];
+
+  it('has a fixture the gate actually accepts, or it proves nothing', () => {
+    // THE GUARD ON THE GUARD. A shape that stopped being accepted would be
+    // skipped by the loop below and pass vacuously - the empty-set failure that
+    // is how a property test quietly stops testing its property.
+    for (const [name, doc] of ACCEPTED) expect([name, isPolicy(doc)]).toEqual([name, true]);
+    expect(ACCEPTED.length).toBeGreaterThan(6);
+  });
+
+  it('never throws on one', () => {
+    for (const [name, doc] of ACCEPTED) {
+      // The name rides in the assertion so a failure says WHICH shape, rather
+      // than making the reader count loop iterations.
+      let outcome = 'ok';
+      try {
+        normalisePolicy(doc, 'play');
+      } catch (err) {
+        outcome = `THREW ${(err as HttpError).code}: ${(err as HttpError).detail}`;
+      }
+      expect([name, outcome]).toEqual([name, 'ok']);
+    }
+  });
+
+  it('still refuses a document the gate refuses', () => {
+    // COMPARE TO A VALUE at the other end: without this the property would hold
+    // for a `normalisePolicy` that threw on nothing at all.
+    // A GARBAGE VALUE IS NOT A SHAPE FAILURE as of the field-level ruling: the
+    // document parses, and `capsFor` refuses that field for that token at the
+    // point of use while the wallet's other tokens keep their bounds. The gate
+    // refuses documents it cannot READ, and a cap value is never shape.
+    expect(isPolicy({ caps: { play: { max_per_tx: 'lots' } } })).toBe(true);
+    for (const bad of [{ allow: 'everyone' }, { caps: 'lots' }, { caps: { play: 'lots' } }, [], 'policy']) {
+      expect(isPolicy(bad)).toBe(false);
+    }
+    expect(() => normalisePolicy({ allow: 'everyone' }, 'play')).toThrow(HttpError);
+  });
+});
+
 describe('every value isCap accepts is usable by everything that consumes a cap', () => {
   const ACCEPTED = ['1', '25', '1000000', '0.5', '25.000000000000000001'.slice(0, 20), UNLIMITED, 100, 1];
 

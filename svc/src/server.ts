@@ -256,8 +256,8 @@ async function getIntent({ services, param, principal }: RouteContext): Promise<
 /// The wallet row, platform scope (spec S4).
 ///
 /// EVERY FIELD HERE IS PRODUCED BY A WRITE PATH AND WAS READABLE BY NONE.
-/// `kind` is recorded at spawn, `frozen` is set by retirement and cleared only
-/// by `PATCH /policy {frozen:false}`, and `bareIdCount` is incremented by the
+/// `kind` is recorded at spawn, `retired` is set by `DELETE /wallets` and by
+/// nothing else, and `bareIdCount` is incremented by the
 /// §5 detector - and until this endpoint the only way to see any of them was to
 /// open the sqlite file. The harness's Wallets panel synthesises this row today
 /// from several calls and cannot get the last two at all.
@@ -301,13 +301,26 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
         ),
       );
 
+  // §1. THE EFFECTIVE POLICY AND WHERE IT CAME FROM, derived at read time
+  // rather than stored: the answer changes when a file is written or cleared,
+  // or when the kind defaults are re-pointed, and a stored copy would be a
+  // snapshot that disagrees with what the next spend enforces.
+  //
+  // `policySource` is the field that makes `policy: null` legible. Null alone
+  // cannot tell "no rules anywhere" from "the kind has none" from "this
+  // deployment loads no defaults at all", and an operator looking at an
+  // unbounded wallet needs to know which of those to change.
+  const { policy, policySource } = await services.spawner.effectivePolicy(agentId);
+
   return {
     agentId,
     address: row.address,
     canonical,
     kind: row.kind,
-    frozen: services.store.isFrozen(agentId),
+    retired: services.store.isRetired(agentId),
     bareIdCount: row.bareIdCount,
+    policy,
+    policySource,
     ...(balances === null ? {} : { balances }),
   };
 }
@@ -392,8 +405,9 @@ async function postBalance({ services, body, param, principal }: RouteContext): 
   return services.treasury.setBalance(assertCanonicalAgentId(param), body);
 }
 
-/// Partial policy update, and the only way back from frozen. DELETE /wallets
-/// still means retirement and stays irreversible.
+/// Partial policy update. It is NOT a way back from retirement: `frozen` left
+/// this body at v0.8.0 and is refused, `DELETE /wallets` stays irreversible,
+/// and freezing a LIVE wallet is the Token contract's, through admin-call.
 async function patchPolicy({ services, body, param, principal }: RouteContext): Promise<unknown> {
   requirePlatform(principal, 'PATCH /wallets/:agentId/policy');
   return services.spawner.patchPolicy(assertCanonicalAgentId(param), body);
@@ -486,13 +500,20 @@ async function getCalls({ services, principal }: RouteContext): Promise<unknown>
   const platform = principal.scope === 'platform';
   const kind = platform ? null : services.store.walletRow(principal.agentId!)?.kind ?? 'agent';
 
-  const visible = snapshot.entries.filter((e) => (platform ? true : kind && e.kinds.includes(kind)));
+  // ABSENT `kinds` means ANY kind, so an entry without them is visible to every
+  // wallet. `kinds: []` cannot occur - it is refused at load.
+  const visible = snapshot.entries.filter(
+    (e) => platform || (kind !== null && (e.kinds === undefined || e.kinds.includes(kind))),
+  );
   return {
     calls: visible.map((e) => ({
       contract: e.contract,
       function: e.function,
       read: e.read,
-      ...(platform ? { admin: e.admin, kinds: e.kinds } : {}),
+      // `admin` left the entry shape at v0.8.0. `kinds` is NULL rather than
+      // absent when the entry writes none, so a platform reader can tell "any
+      // kind" from a field this reply forgot to include.
+      ...(platform ? { kinds: e.kinds ?? null } : {}),
       params: (e.abiFunction.inputs as ReadonlyArray<{ name?: string; type: string }>).flatMap(
         (input, i) => {
           // The slot the SERVER fills is not a parameter this caller has: a

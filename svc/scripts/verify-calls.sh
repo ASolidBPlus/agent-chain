@@ -86,10 +86,15 @@ echo "  play=$PLAY gold=$GOLD converter=$CONV"
 
 step "the allowlist"
 mkdir -p "$WORK/policies"
-# §2's example. No `perTxCap`: it is retired as of the multi-token increment -
-# caps are per wallet per token in policy, so the wallet carries a bound for
-# whichever currency the {arg} form resolves to, and an entry still carrying the
-# field is refused at load.
+# §2's example, rewritten at v0.8.0. NO `admin` ENTRIES: the field is refused at
+# load now, and `admin-call` reaches any function of any registered contract
+# with or without an entry - so `setPair`, `setPaused` and `setFrozen` are
+# simply absent here and the smoke calls them anyway.
+#
+# `kinds` is written on the entries that MEAN a restriction and omitted where
+# any kind may call. Absent means any kind; a written `kinds: []` is refused.
+#
+# No `perTxCap`: retired at the multi-token increment.
 cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
 {
   "schema": 1,
@@ -104,13 +109,9 @@ cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
       "addressArgs": { "0": "token", "1": "token" } },
     { "contract": "converter", "function": "pair",  "read": true, "kinds": ["org", "agent", "burner"],
       "addressArgs": { "0": "token", "1": "token" } },
-    { "contract": "converter", "function": "setPair", "admin": true },
-    { "contract": "converter", "function": "setPaused", "admin": true },
-    { "contract": "play", "function": "setFrozen", "admin": true },
-    { "contract": "gold", "function": "setFrozen", "admin": true },
-    { "contract": "play", "function": "frozen", "read": true, "kinds": ["org", "agent", "burner"],
+    { "contract": "play", "function": "frozen", "read": true,
       "addressArgs": { "0": "name" } },
-    { "contract": "gold", "function": "frozen", "read": true, "kinds": ["org", "agent", "burner"],
+    { "contract": "gold", "function": "frozen", "read": true,
       "addressArgs": { "0": "name" } }
   ]
 }
@@ -293,6 +294,91 @@ else:
 PYEOF
 )" \
   "setPair/None"
+
+step "the allowlist is the persona surface; the platform is the game"
+# `setPaused` has NO ENTRY in this file at all - the `admin` field is gone and
+# admin-call reaches any function of any registered contract.
+#
+# IT IS ALSO THE PRECONDITION for everything below: the paused-pair step above
+# left play->gold paused, and the converts that follow need it lifted. So this
+# check is load-bearing rather than decorative - if admin-call could not reach
+# an un-allowlisted function, every check after it would fail too.
+UNPAUSE=$(body -X POST "$BASE/admin-call" -d "{\"contract\":\"converter\",\"function\":\"setPaused\",\"args\":[\"$PLAY\",\"$GOLD\",false],\"intentId\":\"open-5\"}")
+check "admin-call reaches a function with no entry" "$(echo "$UNPAUSE" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+
+step "policy is opt-in: a wallet nobody wrote rules for is unbounded"
+# §5.4. THE WHOLE INCREMENT IN ONE SEQUENCE. No POLICY_DEFAULTS_FILE is set, so
+# there are no kind defaults; this wallet is spawned without `policy`, so there
+# is no file either. Nothing has been written about it anywhere.
+OPEN=$(api -X POST "$BASE/wallets" -d '{"agentId":"orch:open","kind":"org","fund":[{"token":"play","amount":"5000"}]}' | jget "['walletToken']")
+check "no rules anywhere" "$(api "$BASE/wallets/orch:open" | jget "['policySource']")" "none"
+
+# 2000 in ONE call. Under the old rule this wallet had the agent kind defaults
+# baked into a file at spawn and this would have refused over_max_per_tx.
+BIG=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"2000"],"intentId":"open-1"}')
+check "an unbounded wallet converts 2000" "$(echo "$BIG" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+
+step "a written bound binds, and clearing it unbinds"
+api -X PATCH "$BASE/wallets/orch:open/policy" -d '{"max_per_tx":"100"}' >/dev/null
+check "now it has its own rules" "$(api "$BASE/wallets/orch:open" | jget "['policySource']")" "wallet"
+CAPPED=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"2000"],"intentId":"open-2"}')
+check "the same call now refuses" "$(echo "$CAPPED" | jget "['error']")" "over_max_per_tx"
+
+api -X PATCH "$BASE/wallets/orch:open/policy" -d '{"clear":true}' >/dev/null
+check "cleared, and the source says so" "$(api "$BASE/wallets/orch:open" | jget "['policySource']")" "none"
+AGAIN=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"2000"],"intentId":"open-3"}')
+check "and it is unbounded again" "$(echo "$AGAIN" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+
+step "fail closed on garbage, open on silence"
+# A cap that is WRITTEN and unreadable. Silence is no bound; a typo is not
+# silence, and this is the one direction that still refuses.
+python3 - <<PYEOF
+import json, pathlib
+p = pathlib.Path("$WORK/policies/orch%3Aopen.json")
+p.write_text(json.dumps({"agentId": "orch:open", "caps": {"play": {"max_per_tx": "unlimted"}}}))
+PYEOF
+TYPO=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"open-4"}')
+check "a typo'd cap refuses" "$(echo "$TYPO" | jget "['error']")" "no_cap_set"
+# GARBAGE IS SCOPED TO THE FIELD IT TOUCHES (ruled). The detail names the FIELD
+# and the token, not the file: the document still reads, and the refusal happens
+# at the point of use for that token alone. Bricking a two-token wallet over one
+# mistyped field would be the service deciding more than it was told.
+#
+# This check asserted the opposite until v0.8.0 - 'unreadable' in the detail -
+# and it was right when it was written: `isTokenCaps` checked VALUES, so one bad
+# cap failed `isPolicy` and the whole file came back as the marker. Relaxing that
+# predicate to SHAPE ONLY moved this answer, and the smoke was the only thing
+# that noticed, because it is the only instrument that reads the detail a
+# persona actually receives.
+check "and says WHICH field, not that the file is bad" "$(echo "$TYPO" | python3 -c "import sys,json;print(json.load(sys.stdin).get('detail',''))")" "max_per_tx for play is not a usable amount"
+
+# THE OTHER SIDE OF THE SAME RULING, so the row above cannot be read as "nothing
+# is ever file-level". A document whose SHAPE is wrong - not a value in it - is
+# unreadable, and every token refuses with the fixed sentence.
+python3 - <<PYEOF
+import pathlib
+pathlib.Path("$WORK/policies/orch%3Aopen.json").write_text('{"caps": []}')
+PYEOF
+SHAPE=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"open-5"}')
+check "a wrong-SHAPE document is file-level" "$(echo "$SHAPE" | jget "['error']")" "no_cap_set"
+check "and the detail is the fixed sentence" "$(echo "$SHAPE" | jget "['detail']")" "policy file unreadable"
+check "without quoting the file back" "$(echo "$TYPO" | grep -ci 'unlimted' || true)" "0"
+rm -f "$WORK/policies/orch%3Aopen.json"
+
+step "the rail's rules hold for the platform too"
+# Push-only is a property of the
+# money, not a permission, so it is refused at REQUEST time for the platform
+# exactly as it is refused at LOAD for an entry.
+OPEN_ADDR=$(api "$BASE/wallets/orch:open" | jget "['address']")
+APPROVE=$(body -X POST "$BASE/admin-call" -d "{\"contract\":\"play\",\"function\":\"approve\",\"args\":[\"$OPEN_ADDR\",\"1\"],\"intentId\":\"open-6\"}")
+check "approve is refused whoever asks" "$(echo "$APPROVE" | jget "['error']")" "invalid_request"
+check "and says why" "$(echo "$APPROVE" | python3 -c "import sys,json;print('push-only' in str(json.load(sys.stdin).get('detail','')))")" "True"
+
+step "retirement, not a freeze"
+api -X DELETE "$BASE/wallets/orch:open" >/dev/null
+check "the wallet reports retired" "$(api "$BASE/wallets/orch:open" | jget "['retired']")" "True"
+GONE=$(wbody "$OPEN" -X POST "$BASE/sign-transfer" -d '{"to":"orch:dest","amount":"1","intentId":"open-7"}')
+check "a retired wallet cannot spend" "$(echo "$GONE" | jget "['error']")" "wallet_retired"
 
 step "the on-chain send freeze"
 # §5.3. The freeze is a CONTRACT primitive operated by admin-call, so every

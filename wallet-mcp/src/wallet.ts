@@ -3,7 +3,7 @@
 
 import { ChainSvcClient, type CallResult } from './client.ts';
 import type { WalletConfig } from './config.ts';
-import { checkLocally, normaliseVee, readPolicy, type Refusal } from './policy.ts';
+import { checkLocally, isUnreadable, normaliseVee, readPolicy, type Refusal } from './policy.ts';
 import { defaultTokenOf, resolveTokenOrRefusal, type ModulesReply, type TokenModule } from './modules.ts';
 // TYPE-ONLY, and that is load-bearing rather than stylistic: `import type` is
 // erased, so wallet-mcp keeps ZERO runtime dependency on chain-svc and still
@@ -120,7 +120,7 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   no_cap_set: 'no_cap_set',
   over_stage_cap: 'over_stage_cap',
   counterparty_denied: 'counterparty_denied',
-  wallet_frozen: 'frozen',
+
   unknown_name: 'unknown_name',
   ambiguous_name: 'ambiguous_name',
   // The send MAY have happened. The model must be able to tell this apart from
@@ -167,6 +167,14 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // - but this is declared rather than left to that, because "no route reaches
   // it" is a property of today's routes and this map is the standing answer.
   treasury_insufficient: null,
+  // §3. A RETIRED WALLET HAS NO PERSONA LEFT TO READ THIS. The refusal is
+  // operator-facing: retirement is an act performed ON a wallet, and the thing
+  // it retires is the thing that would have been told. Withheld rather than
+  // disclosed for that reason and not because it is sensitive.
+  //
+  // It replaces `wallet_frozen`, which WAS persona-facing - so the closed set
+  // goes from fifteen to fourteen, and the disclosure test says fourteen.
+  wallet_retired: null,
   // Infrastructure: tells a persona only "it did not happen", which the generic
   // reason already says.
   chain_error: null,
@@ -623,7 +631,19 @@ export class Wallet {
       return this.fail(resolved.error, resolved.detail);
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, token);
+    // The DEFAULT TOKEN'S KEY, for a legacy file's top-level cap pair. Read off
+    // the modules reply rather than assumed: a pre-v0.5.0 policy names no token,
+    // and which token it meant is a fact about the deployment.
+    const policy = readPolicy(this.config.policyFile, defaultTokenOf(this.modules)?.key);
+    // THE OPERATOR'S HALF OF THE MARKER. The persona gets the fixed sentence in
+    // the refusal detail; the reason - which may quote the file - goes here and
+    // nowhere else. Logged on the path that refuses, so an operator who broke a
+    // policy learns WHAT broke rather than only that something did, which is
+    // the same split `refusalFor` makes for a withheld chain-svc code.
+    if (isUnreadable(policy)) {
+      this.log(`[wallet-mcp] ${this.config.policyFile}: ${policy.reason}`);
+    }
+    const local = checkLocally(policy, to, amount, token);
     if (local) return this.fail(local.reason, local.detail);
 
     // The wire says `amount` and names its token, on both sides, since the

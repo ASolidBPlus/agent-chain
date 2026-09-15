@@ -44,7 +44,15 @@ export interface Config {
   /// Per-`kind` policy caps applied when POST /wallets carries no explicit
   /// policy. Provisional game balance, tuned by the game owner - deliberately a
   /// file rather than a constant in the code (ruled).
-  policyDefaultsPath: string;
+  /// OPT-IN as of v0.8.0: unset means NO KIND DEFAULTS AT ALL, not "use the
+  /// shipped file". The file that ships is `policy-defaults.example.json` and
+  /// nothing loads it - a deployment that wants kind defaults mounts one and
+  /// points `POLICY_DEFAULTS_FILE` at it.
+  ///
+  /// It was a baked-in path with the shipped file as its default, so every
+  /// deployment enforced one game's balance numbers whether or not its operator
+  /// had ever seen them.
+  policyDefaultsPath?: string;
   deploymentsDir: string;
   /// hub-core's outcome feed. Unset is legitimate until C5 exists - events are
   /// buffered and retried rather than dropped (spec S4). SET-BUT-JUNK is not
@@ -94,7 +102,14 @@ function required(name: string): string {
   return value;
 }
 
-function optional(name: string, fallback: string): string {
+/// AN ABSENT FALLBACK IS A FALLBACK. The overload exists so an optional
+/// setting with no default reads the same way as one with a default: `||
+/// undefined` looked equivalent and was not, because it treats `"   "` as a
+/// value while every neighbour treats it as unset - so a whitespace
+/// POLICY_DEFAULTS_FILE became a path of spaces and failed at load.
+function optional(name: string, fallback: string): string;
+function optional(name: string, fallback?: undefined): string | undefined;
+function optional(name: string, fallback?: string): string | undefined {
   const value = process.env[name];
   return value === undefined || value.trim() === '' ? fallback : value;
 }
@@ -128,7 +143,7 @@ export function loadConfig(env = process.env): Config {
       keystoreDir: optional('KEYSTORE_DIR', '/keystore'),
       policyDir: optional('POLICY_DIR', '/policies'),
       storePath: optional('STORE_PATH', '/store/chain-svc.sqlite'),
-      policyDefaultsPath: optional('POLICY_DEFAULTS_FILE', join(PACKAGE_ROOT, 'policy-defaults.json')),
+      policyDefaultsPath: optional('POLICY_DEFAULTS_FILE'),
       deploymentsDir: optional('DEPLOYMENTS_DIR', '/deployments'),
       hubCoreUrl: hubCoreUrl(process.env.HUB_CORE_URL),
     };
