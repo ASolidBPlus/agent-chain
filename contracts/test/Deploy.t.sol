@@ -84,6 +84,12 @@ contract DeployTest is Test {
         assertEq(t.symbol(), "PLAY");
         assertEq(t.balanceOf(treasury), 1_000_000 ether);
         assertFalse(t.hasRole(t.BURNER_ROLE(), treasury));
+        // Granted by Token's CONSTRUCTOR, asserted by the deploy script. This
+        // mirrors the script's require so the property is checked where the
+        // deploy actually runs AND where a reader of the tests can see it - the
+        // script's require only fires during a deploy, and a deploy that is
+        // never run in CI asserts nothing.
+        assertTrue(t.hasRole(t.FREEZER_ROLE(), treasury), "treasury freezes play");
 
         NameRegistry r = NameRegistry(vm.parseJsonAddress(out, ".modules[1].address"));
         assertEq(r.resolve("treasury.play"), treasury);
@@ -401,6 +407,18 @@ contract DeployTest is Test {
         assertTrue(play.hasRole(play.MINTER_ROLE(), address(c)), "converter mints play");
         assertFalse(play.hasRole(play.BURNER_ROLE(), treasury), "treasury must not burn play");
         assertFalse(gold.hasRole(gold.BURNER_ROLE(), treasury), "treasury must not burn gold");
+        // THE CONVERTER MUST NEVER FREEZE, on either token. Nothing grants it
+        // the role, so this asserts something no line of code makes true - and
+        // that is the reason to assert it: the four grants directly above are
+        // where a fifth would go, and a converter that could freeze the accounts
+        // it burns from is one word away from here.
+        assertFalse(play.hasRole(play.FREEZER_ROLE(), address(c)), "converter must not freeze play");
+        assertFalse(gold.hasRole(gold.FREEZER_ROLE(), address(c)), "converter must not freeze gold");
+        // And the treasury DOES hold it on both, which is what makes the two
+        // assertions above a statement about the converter rather than about
+        // the role being unheld everywhere.
+        assertTrue(play.hasRole(play.FREEZER_ROLE(), treasury), "treasury freezes play");
+        assertTrue(gold.hasRole(gold.FREEZER_ROLE(), treasury), "treasury freezes gold");
 
         // The converter's address is CREATE2 from its salt and init code, like
         // every other module (§3). Same canonical deployer as the token/names

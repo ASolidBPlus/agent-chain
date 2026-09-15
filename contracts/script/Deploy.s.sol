@@ -211,6 +211,13 @@ contract Deploy is Script {
             if (_eq(mods[i].kind, KIND_TOKEN)) {
                 Token t = Token(addrs[i]);
                 require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
+                // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
+                // script - so this asserts a property of the contract rather
+                // than confirming its own work, which is the more useful
+                // direction: a constructor that stopped granting it would fail
+                // the deploy instead of producing a chain where no freeze is
+                // possible and nothing says so until the first one is tried.
+                require(t.hasRole(t.FREEZER_ROLE(), treasury), "Deploy: treasury lacks FREEZER_ROLE");
                 // BURNER_ROLE is held by the CONVERTER alone when a deployment
                 // has one, and by NOBODY otherwise. AccessControl has no member
                 // enumeration, so that is asserted against the address that could
@@ -232,6 +239,23 @@ contract Deploy is Script {
                 // exhaustive "nobody holds it" claim lives in Token.t.sol, where
                 // there is no broadcast and the addresses are real.
                 require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
+                // THE CONVERTER MUST NEVER FREEZE. Nothing grants it
+                // FREEZER_ROLE, so this is asserting something no line of code
+                // makes true - which is the reason to assert it rather than the
+                // reason not to. The grants a few lines up hand the converter
+                // BURNER and MINTER on the tokens it converts between; a fifth
+                // grant added there later would be one word from being a
+                // contract that can freeze the accounts it burns from, and this
+                // is what would notice.
+                //
+                // Checked rather than assumed, mirroring the BURNER-not-treasury
+                // assertion directly above.
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.FREEZER_ROLE(), converterAddr),
+                        "Deploy: converter must not hold FREEZER_ROLE"
+                    );
+                }
                 require(
                     t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
                 );

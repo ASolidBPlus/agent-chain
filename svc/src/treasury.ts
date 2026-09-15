@@ -597,7 +597,16 @@ export class Treasury {
       this.store.recordMemo({ txHash: hash, memo: reason, intentId, fromAgentId: agentId });
       return { txHash: hash };
     } catch (err) {
-      throw asChainError(err);
+      // THE FOURTH INSTANCE, and the first at PLATFORM scope since v0.4.0's
+      // admin-call fix. The sweep signs with the WALLET's own key, so a frozen
+      // wallet's downward set-balance reverts at gas estimation - and answered
+      // 502 chain_error carrying AccountFrozen's selector and the frozen
+      // address, to an operator who asked for a balance reset.
+      //
+      // The spec and this PR's body both said the operator gets `revert`. They
+      // were describing the behaviour the send path has; nothing made it true
+      // here, and it was measured false.
+      throw this.asCallError(err, `set-balance sweep for ${agentId}`);
     }
   }
 
@@ -899,7 +908,22 @@ export class Treasury {
       serializedTransaction = await wallet.signTransaction(request as never);
     } catch (err) {
       this.store.release(intentId);
-      throw asChainError(err);
+      // asCallError, NOT asChainError - THE THIRD PATH WITH THIS DEFECT and the
+      // first that could not be reached until the token had a freeze.
+      //
+      // `prepareTransactionRequest` ESTIMATES GAS, so a contract-level revert
+      // arrives here as an exception rather than as a reverted receipt. Until
+      // `setFrozen` existed nothing could make a well-formed transfer revert -
+      // the balance is checked before signing - so this line was never
+      // exercised by a revert and two earlier fixes of the same defect
+      // (admin-call's simulate, then the wallet call path) did not reach it.
+      //
+      // Measured against a real Anvil before the fix: a frozen wallet's send
+      // answered 502 `chain_error` with
+      // `custom error 0x4f2a367e: 000...8dab55de...` in the detail - the
+      // AccountFrozen selector and the frozen account's address, which is the
+      // contract's internal state crossing to a wallet-scope caller.
+      throw this.asCallError(err, `sign-transfer for ${fromAgentId}`);
     }
 
     // --- AT OR AFTER THE BROADCAST ----------------------------------------
