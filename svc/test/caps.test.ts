@@ -404,7 +404,12 @@ describe('every document isPolicy accepts is usable by normalisePolicy', () => {
   it('still refuses a document the gate refuses', () => {
     // COMPARE TO A VALUE at the other end: without this the property would hold
     // for a `normalisePolicy` that threw on nothing at all.
-    for (const bad of [{ caps: { play: { max_per_tx: 'lots' } } }, { allow: 'everyone' }, [], 'policy']) {
+    // A GARBAGE VALUE IS NOT A SHAPE FAILURE as of the field-level ruling: the
+    // document parses, and `capsFor` refuses that field for that token at the
+    // point of use while the wallet's other tokens keep their bounds. The gate
+    // refuses documents it cannot READ, and a cap value is never shape.
+    expect(isPolicy({ caps: { play: { max_per_tx: 'lots' } } })).toBe(true);
+    for (const bad of [{ allow: 'everyone' }, { caps: 'lots' }, { caps: { play: 'lots' } }, [], 'policy']) {
       expect(isPolicy(bad)).toBe(false);
     }
     expect(() => normalisePolicy({ allow: 'everyone' }, 'play')).toThrow(HttpError);

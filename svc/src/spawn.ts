@@ -540,7 +540,12 @@ export class Spawner {
       // nothing.
       throw new HttpError(
         'invalid_request',
-        `policy file unreadable: ${current.unreadable}; clear it first`,
+        // PLATFORM SCOPE, so the reason travels. This refusal reaches an
+        // operator holding the platform credential - the person who wrote the
+        // file - and telling them WHY their own document will not parse is the
+        // whole use of the message. The persona-facing path gets the fixed
+        // string and the reason goes to the log.
+        `${current.unreadable}: ${current.reason}; clear it first`,
       );
     }
     const next = mergePolicy(body, current, this.chain.modules.tokens[0]?.key);

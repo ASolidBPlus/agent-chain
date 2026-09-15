@@ -329,7 +329,7 @@ export class Treasury {
       // wallet-scope spend from a wallet whose file will not parse refuses, and
       // the reason reaches the operator's log while the persona gets the code.
       console.warn(`[chain-svc] policy file for ${agentId} is unreadable: ${read.unreadable}`);
-      throw new HttpError('no_cap_set', `policy file unreadable: ${read.unreadable}`);
+      throw new HttpError('no_cap_set', read.unreadable);
     }
     if (read !== null) return read;
     if (!this.policyDefaults) return null;

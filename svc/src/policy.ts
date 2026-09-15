@@ -165,13 +165,40 @@ const CAPS_WILDCARD = '*';
 /// refused as malformed rather than read as what it plainly says. Each field
 /// stands alone now; `{}` is an entry with no bounds, and `{max_per_tx: 'lots'}`
 /// is still refused because the field is there and unreadable.
-function isTokenCaps(value: unknown): value is TokenCaps {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+/// SHAPE ONLY. Is this an OBJECT that could be an entry? The VALUES are
+/// `capsFor`'s business - its fourth outcome, `no_cap_set` at the point of use.
+///
+/// It used to validate values too, and that made one typo'd cap fail the whole
+/// DOCUMENT: `isPolicy` runs this over every entry, so a wallet holding two
+/// tokens lost both because one was mistyped. wallet-mcp validated per cap and
+/// bounded only the affected token, and the divergence was found by reading the
+/// two file READS side by side - which nothing compared, because every
+/// agreement test we had compares a function to a function.
+///
+/// Ruled per-FIELD: a present-but-unusable value is garbage for its own field
+/// and no more. The blast radius is the whole of the difference - one mistyped
+/// cap either bricks a two-token wallet or bounds one token and leaves the
+/// other alone - and the narrower answer is also the more informative one,
+/// because `capsFor`'s detail names the field.
+/// SHAPE *AND* VALUES, for the two places an OPERATOR is looking when it runs:
+/// the kind-defaults file at boot, and a platform-scope PATCH body.
+///
+/// The FILE path deliberately does not use this. A per-wallet file is read on
+/// every send, long after whoever wrote it has gone, and a bad value there is
+/// scoped to its own field by `capsFor`. Here the author is present and the
+/// refusal is the fastest way to tell them - the same reason `calls.json`
+/// refuses at load rather than at call time.
+function isUsableCaps(value: unknown): value is TokenCaps {
+  if (!isTokenCaps(value)) return false;
   const c = value as Record<string, unknown>;
   return (
     (c.max_per_tx === undefined || isCap(c.max_per_tx)) &&
     (c.max_per_stage === undefined || isCap(c.max_per_stage))
   );
+}
+
+function isTokenCaps(value: unknown): value is TokenCaps {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /// Turns the defaults file's `caps` into one entry per DEPLOYED token.
@@ -201,7 +228,7 @@ function expandCaps(raw: unknown, tokenKeys: string[], kind: string, path: strin
   const out: Record<string, TokenCaps> = {};
   let wildcard: TokenCaps | undefined;
   for (const [key, value] of entries) {
-    if (!isTokenCaps(value)) {
+    if (!isUsableCaps(value)) {
       throw new Error(
         `chain-svc: policy defaults at ${path}: "${kind}" caps "${key}" is not ` +
           `{max_per_tx, max_per_stage} of usable amounts`,
@@ -520,7 +547,7 @@ export function mergePolicy(
       throw new HttpError('invalid_request', 'caps must be an object keyed by token');
     }
     for (const [key, value] of Object.entries(p.caps as Record<string, unknown>)) {
-      if (!isTokenCaps(value)) {
+      if (!isUsableCaps(value)) {
         throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
       }
     }
@@ -540,7 +567,7 @@ export function mergePolicy(
         max_per_stage: (p.max_per_stage as VeeCap) ?? existing?.max_per_stage,
       },
     };
-    if (!isTokenCaps(caps[defaultTokenKey])) {
+    if (!isUsableCaps(caps[defaultTokenKey])) {
       throw new HttpError('invalid_request', 'max_per_tx and max_per_stage must be usable amounts');
     }
   }
@@ -612,10 +639,13 @@ export function isPolicy(value: unknown): value is AgentPolicy {
 ///
 /// The third used to collapse into the second, which was safe only while an
 /// absent cap refused downstream.
-export type PolicyRead = AgentPolicy | null | { unreadable: string };
+/// `unreadable` is the PERSONA-facing string and is always the same words.
+/// `reason` is the operator's, and goes to the log and to the platform-scope
+/// PATCH refusal - never to a wallet-scope caller.
+export type PolicyRead = AgentPolicy | null | { unreadable: string; reason: string };
 
 /// Is this read a marker rather than a policy?
-export function isUnreadable(r: PolicyRead): r is { unreadable: string } {
+export function isUnreadable(r: PolicyRead): r is { unreadable: string; reason: string } {
   return r !== null && 'unreadable' in r;
 }
 
@@ -639,7 +669,7 @@ export async function readPolicyFile(
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!isPolicy(parsed)) {
-      return { unreadable: 'not a policy document' };
+      return { unreadable: 'policy file unreadable', reason: 'not a policy document' };
     }
     // MIGRATED IN MEMORY, NOT REWRITTEN HERE. A read is a read; the file is
     // rewritten in the new shape by the next `writePolicyFile`, which is a
@@ -662,18 +692,17 @@ export async function readPolicyFile(
     // So: absent -> null (no rules written), unreadable -> a marker every
     // spend refuses on. Fail closed on garbage, open on silence, at file level
     // exactly as at field level.
-    // A FIXED STRING PER FAILURE CLASS, never the parser's message. This
-    // reason reaches a PERSONA: `no_cap_set` is persona-facing and its detail
-    // crosses with it. Measured - bun answers
-    // `JSON Parse error: Unexpected identifier "broken"`, quoting a fragment of
-    // the operator's own policy file, and a malformed value could be a name, a
-    // pattern or a number the operator did not intend to publish.
+    // ONE FIXED STRING, and the reason never travels with it. This marker
+    // becomes a PERSONA-facing detail: `no_cap_set` is persona-facing and its
+    // detail crosses with it. Measured on both sides - bun answers
+    // `JSON Parse error: Unexpected identifier "treasuryOnly"`, quoting an
+    // operator's unquoted value verbatim, so a counterparty name or an amount
+    // reaches a model through a refusal.
     //
-    // The class is what a caller can act on ("this file is not JSON") and the
-    // message is what an operator needs, so the message goes to the log sink -
-    // the same split `revert` makes, for the same reason.
-    void err;
-    return { unreadable: 'not valid JSON' };
+    // Naming the failing FIELD would report the document back the same way, so
+    // shape failures use the same string. The reason goes to the log sink,
+    // which is the split `revert` already makes.
+    return { unreadable: 'policy file unreadable', reason: err instanceof Error ? err.message.split('\n')[0] : 'unparseable' };
   }
 }
 
