@@ -7,9 +7,26 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"       # the repo root
 export ANVIL_MNEMONIC=${ANVIL_MNEMONIC:-"test test test test test test test test test test test junk"}
-export CHAIN_SVC_TOKEN=${CHAIN_SVC_TOKEN:-compose-verify-token}
-export KEYSTORE_SECRET=${KEYSTORE_SECRET:-compose-verify-secret}
-COMPOSE=(docker compose -f "$HERE/compose.chain.yml" --profile chain)
+# FINDING 16: NO DEFAULT SECRETS, and the reason is that these two are not
+# "test values" - they are the SAME NAMES the real deployment uses.
+#
+# `${VAR:-default}` invented a token and a keystore passphrase when the
+# environment had none, so a run against a stack that was already up used a
+# credential nobody configured: it failed with 401s that look like a broken
+# service, or - worse - a fresh stack came up encrypted under
+# `compose-verify-secret`, a passphrase now sitting in this file in a public
+# repository, holding real wallet keys for as long as that volume lives.
+#
+# `${VAR:?}` is what compose.chain.yml itself uses for both. The script now
+# refuses with the variable's name rather than inventing a value, which is the
+# same contract one layer up.
+export CHAIN_SVC_TOKEN=${CHAIN_SVC_TOKEN:?set CHAIN_SVC_TOKEN, as compose requires; this script will not invent one}
+export KEYSTORE_SECRET=${KEYSTORE_SECRET:?set KEYSTORE_SECRET, as compose requires; it encrypts every wallet key this stack creates}
+# AND ITS OWN PROJECT NAME. Without `-p`, compose derives the project from the
+# first -f file's directory - the repo root - so this verification shared a
+# project with whatever else was running from here, and its `down` at the end
+# stopped that too. Named, so the verify stack is a stack of its own.
+COMPOSE=(docker compose -p agent-chain-verify -f "$HERE/compose.chain.yml" --profile chain)
 FAIL=0
 FAILED_CHECKS=""
 
