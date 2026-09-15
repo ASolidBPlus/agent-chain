@@ -49,18 +49,6 @@ services:
     volumes:
       - ./contracts:/contracts
       - ./deployments:/deployments
-      # THE FRESH-DEPLOY MARKER LIVES WITH THE CHAIN, NOT WITH THE MANIFEST.
-      #
-      # It records "this chain has held a deployment", and the only thing that
-      # can answer that honestly is the chain's own volume. Kept beside
-      # local.json under ./deployments it shared one lifetime with the manifest:
-      # wipe the bind mount, rotate the deployer key, keep the chain, and both
-      # were absent - so the one-shot declared a fresh volume and deployed a
-      # SECOND SET beside the live one. Nothing caught it downstream either,
-      # because the treasury is a constructor argument: every derived address
-      # MOVED with the new key, so no address was occupied and the foreign-code
-      # check had nothing to see. The old token kept the supply.
-      - chain-state:/state
     # Account 0 of the mnemonic is the deployer and the treasury (spec S2), so
     # the key is derived in the script rather than being a second secret to keep
     # in step.

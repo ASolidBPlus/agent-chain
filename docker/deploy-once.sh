@@ -19,19 +19,6 @@ CONTRACTS="${CONTRACTS_DIR:-/contracts}"
 RPC="${RPC_URL:-http://chain:8545}"
 LOCAL="$DEPLOYMENTS/local.json"
 PENDING="$LOCAL.pending"
-# Written on the first successful promotion and never removed. Its ABSENCE is
-# what "this chain has never held a deployment" means - a question the script
-# cannot answer from the chain itself, and used to guess at from the deployer's
-# nonce.
-#
-# IT LIVES IN THE CHAIN-STATE VOLUME, NOT BESIDE THE MANIFEST. Under
-# ./deployments it shared one lifetime with local.json, so losing the bind mount
-# lost both - and with the deployer key rotated as well, every derived address
-# MOVES (the treasury is a constructor argument), so nothing is occupied, the
-# foreign-code check sees nothing, and a second set of modules deploys beside
-# the live one with the old token still holding the supply. Two absences that
-# always vanish together cannot be two independent questions.
-MARKER="${MARKER_FILE:-/state/.deployed-once}"
 
 if [ -z "${ANVIL_MNEMONIC:-}" ]; then
   echo "deploy: ANVIL_MNEMONIC is unset - it derives the treasury key" >&2
@@ -47,22 +34,52 @@ fi
 # promotion can only ever move a file this run wrote.
 rm -f "$PENDING"
 
-# THE FLAG IS SET ONLY ON A VOLUME THAT HAS NEVER HELD A DEPLOYMENT, and only
-# when there is no manifest to restore. Both conditions, because they answer
-# different questions: the marker says "nothing was ever deployed from here",
-# and the missing local.json says "there is nothing to read". A volume that has
-# deployed before and lost its manifest is exactly the case the refusal exists
-# for - the operator restores the file or says the chain is disposable, and
-# neither is this script's call to make.
-ALLOW=""
-if [ ! -f "$MARKER" ] && [ ! -f "$LOCAL" ]; then
-  echo "deploy: no $MARKER and no $LOCAL - treating this as a fresh chain"
-  ALLOW=1
+# WHEN MAY THIS DECLARE A FRESH CHAIN?
+#
+# It used to ask the filesystem: no marker file and no local.json. Both lived
+# under the same bind mount, so they shared ONE LIFETIME - wipe the mount,
+# rotate the deployer key, keep the chain, and both were absent. The script
+# declared a fresh chain and deployed a SECOND SET beside the live one. Nothing
+# downstream caught it: the treasury is a CONSTRUCTOR ARGUMENT, so a new key
+# MOVES every derived address, nothing was occupied, and the old token kept the
+# supply. Two absences that always vanish together cannot be two independent
+# questions.
+#
+# THE MARKER'S OBVIOUS HOME WAS WORSE THAN THE BUG. Putting it in the chain-state
+# volume would have meant mounting that volume here - handing the container that
+# compiles bind-mounted Solidity write access to anvil.json, the entire
+# persisted chain.
+#
+# So ask the CHAIN, which is the thing the question is actually about. anvil
+# mines ON DEMAND - entrypoint.sh omits --block-time deliberately - so height 0
+# means nothing has ever been mined here, and `--state` carries the height
+# across restarts. Any block at all means the chain has been used, whether or
+# not this deployment is what used it.
+#
+# Conservative in the one direction that matters: a chain someone merely sent a
+# transaction to refuses, and the operator says so with the flag.
+if [ -n "${ALLOW_FRESH_DEPLOY:-}" ]; then
+  # An operator who set it deliberately is the authority. This script only ever
+  # DECIDES the flag when nobody has.
+  ALLOW="$ALLOW_FRESH_DEPLOY"
+  echo "deploy: ALLOW_FRESH_DEPLOY=$ALLOW was set by the caller"
+elif [ -f "$LOCAL" ]; then
+  ALLOW=""
+else
+  height=$(cast block-number --rpc-url "$RPC" 2>/dev/null || echo "")
+  if [ -z "$height" ]; then
+    echo "deploy: could not read the block height from $RPC - refusing to guess" >&2
+    exit 1
+  fi
+  if [ "$height" = "0" ]; then
+    echo "deploy: no $LOCAL and the chain is at block 0 - nothing here to orphan"
+    ALLOW=1
+  else
+    echo "deploy: no $LOCAL, but the chain is at block $height - it has been used."
+    echo "deploy: the deploy will refuse; restore the manifest, or set ALLOW_FRESH_DEPLOY=1 if this chain really is disposable."
+    ALLOW=""
+  fi
 fi
-
-# The marker's directory has to exist before the promotion can write it. The
-# state volume is anvil's and is mounted here read-write for this one file.
-mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
 
 # THE PHRASE NEVER REACHES ARGV (finding 25).
 #
@@ -128,10 +145,7 @@ fi
 # had nothing to write, which is not an error.
 if [ -f "$PENDING" ]; then
   mv "$PENDING" "$LOCAL"
-  : > "$MARKER"
   echo "deploy: promoted $PENDING to $LOCAL"
 else
   echo "deploy: nothing to promote; $LOCAL is up to date"
-  # A deployment that was already current still proves the volume has held one.
-  [ -f "$LOCAL" ] && : > "$MARKER"
 fi
