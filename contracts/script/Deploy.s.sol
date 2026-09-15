@@ -81,16 +81,34 @@ contract Deploy is Script {
     function run() external {
         deploy(
             vm.envOr("DEPLOYMENTS_DIR", string("../deployments")),
-            vm.envOr("INITIAL_SUPPLY_VEE", string(""))
+            vm.envOr("INITIAL_SUPPLY_VEE", string("")),
+            vm.envOr("ALLOW_FRESH_DEPLOY", string("")),
+            vm.envUint("DEPLOYER_PRIVATE_KEY")
         );
     }
 
-    function deploy(string memory dir, string memory retiredSupplyEnv) public {
-        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
+    /// EVERY INPUT IS A PARAMETER; `run()` reads the environment and passes them
+    /// in. That includes the DEPLOYER KEY, which was read here.
+    ///
+    /// Not a style choice: `vm.setEnv` writes a PROCESS-WIDE variable and forge
+    /// runs test contracts in PARALLEL, so a test that changes one changes it
+    /// for every suite running beside it. Measured with `ALLOW_FRESH_DEPLOY` -
+    /// six unrelated deploy tests failed with its refusal, in a run whose only
+    /// change was one test setting the variable to "". A parameter is a value
+    /// one call has; an env var is a value the whole process shares.
+    ///
+    /// The key is the same problem waiting: a KEY-ROTATION probe had to run in
+    /// its own forge process, because setting `DEPLOYER_PRIVATE_KEY` reached
+    /// every other suite. As a parameter, rotation is just a different argument.
+    function deploy(
+        string memory dir,
+        string memory retiredSupplyEnv,
+        string memory allowFreshDeploy,
+        uint256 deployerKey
+    ) public {
         address treasury = vm.addr(deployerKey);
 
         string memory path = string.concat(dir, "/local.json");
-        string memory manifestPath = string.concat(dir, "/manifest.json");
 
         // Retired rather than ignored. Silently dropping it would leave an
         // operator's supply setting doing nothing with no way to notice.
@@ -98,58 +116,42 @@ contract Deploy is Script {
             revert("Deploy: INITIAL_SUPPLY_VEE is retired; put initialSupply in the manifest");
         }
 
-        ModuleSpec[] memory mods = _readManifest(manifestPath);
+        // READ ONCE AND PASSED DOWN. It was re-read by `_readConverterPairs`,
+        // by `_deployContract` for every custom contract, and - once the cache
+        // check arrived - by `_expectedAddress` for every one again. N+2 reads
+        // of a file that cannot change mid-run, and N+2 chances to act on two
+        // different versions of it if it ever did.
+        string memory manifest = _readManifestFile(string.concat(dir, "/manifest.json"));
+        ModuleSpec[] memory mods = _readManifest(manifest);
         // Validated up front so a bad converter manifest fails fast, with the
         // readable message, before anything is broadcast.
-        ConverterPair[] memory pairs = _readConverterPairs(manifestPath, mods);
+        ConverterPair[] memory pairs = _readConverterPairs(manifest, mods);
         // Custom-contract artifacts are checked before broadcast so a missing one
         // is a readable refusal rather than a raw getCode revert mid-deploy. Their
         // constructor args are read from the manifest at deploy time in
         // _deployContract, where @key references resolve to earlier addresses.
         _requireContractArtifacts(mods);
 
-        if (_alreadyDeployed(path, mods)) {
-            console.log("Deploy: local.json matches the manifest and every address has code - nothing to do");
+        // THE CACHE, CHECKED RATHER THAN BELIEVED, and planned PER MODULE.
+        // In its own function because `deploy()` is already at the stack limit -
+        // the same reason `_deployContract` lives apart from it.
+        Plan memory plan = _plan(dir, path, manifest, mods, treasury, allowFreshDeploy);
+        if (plan.done) {
+            // THE SKIP PATH ASSERTS TOO, and this is the whole of residual B.
+            //
+            // Roles are STORAGE. The codehash proves the code at an address is
+            // the code this manifest describes and says nothing about who
+            // administers it - so a treasury that had renounced DEFAULT_ADMIN
+            // and MINTER, or handed them to someone else, got "nothing to do"
+            // on every compose restart. The modules were the right contracts at
+            // the right addresses, administered by a stranger.
+            //
+            // Read-only, no broadcast: this asks the chain questions and
+            // changes nothing.
+            _assertDeployment(mods, plan.addrs, pairs, treasury);
             return;
         }
 
-        // THE OTHER DIRECTION, and the dangerous one. The guard above handles
-        // "local.json survived, chain state was wiped". The reverse - local.json
-        // gone, chain intact - reaches here and would deploy a SECOND set of
-        // modules, orphaning the first along with every balance in the game. It
-        // is not a hypothetical: ./deployments is a bind mount and chain-state
-        // is a named volume, so they have independent lifetimes and either can
-        // outlive the other.
-        //
-        // Without local.json there is no address to check for code, so the
-        // question "has anything been deployed here?" cannot be answered
-        // directly. The deployer's nonce answers a WEAKER question honestly:
-        // this account has transacted on this chain before, so this is not the
-        // cold start the redeploy path assumes. Refusing costs an operator one
-        // deliberate command; being wrong the other way costs the game its
-        // money with no error at all.
-        //
-        // Conditioned on the FILE BEING ABSENT, not merely on _alreadyDeployed
-        // being false. Those are different: local.json can be present and point
-        // at dead addresses (a wiped chain), which is the forward case above and
-        // must still redeploy. Guarding on the weaker condition made this fire
-        // for that case too - so the message could be false, and, worse, this
-        // check masked the forward one: a mutant disabling _alreadyDeployed was
-        // caught here instead, which means neither guard was independently
-        // tested. Two guards satisfied by one scenario is two guards you have
-        // not tested.
-        if (!vm.exists(path) && vm.getNonce(treasury) > 0) {
-            revert(
-                string.concat(
-                    "Deploy: refusing to redeploy. No local.json, but the deployer has already ",
-                    "transacted on this chain - a fresh deployment would orphan the existing ",
-                    "modules and every balance in them. Restore deployments/local.json, or wipe ",
-                    "the chain-state volume if this chain really is disposable."
-                )
-            );
-        }
-
-        address[] memory addrs = new address[](mods.length);
         address namesAddr = address(0);
         address converterAddr = address(0);
         string memory tld = "";
@@ -157,16 +159,42 @@ contract Deploy is Script {
 
         vm.startBroadcast(deployerKey);
         for (uint256 i = 0; i < mods.length; i++) {
+            // PER-MODULE IDEMPOTENCY. A module already live at its derived
+            // address is left alone; only the empty ones are deployed. Without
+            // this a partially-wiped chain - one module gone, the rest intact -
+            // had no outcome at all: the run either redeployed everything, which
+            // reverts inside `new` at the first address that still holds code,
+            // or refused wholesale and left the gap unfilled.
+            //
+            // The address is the DERIVED one either way, so a skipped module and
+            // a deployed one are described identically afterwards.
+            if (!plan.needsDeploy[i]) {
+                console.log("Deploy: already deployed, skipping", mods[i].kind, plan.addrs[i]);
+                // THE WIRING BELOW STILL NEEDS THESE. A skipped names or
+                // converter module that left these at zero would make the
+                // treasury registration and the pair wiring silently do
+                // nothing - the failure mode of a guard that returns early
+                // without carrying its outputs forward.
+                if (_eq(mods[i].kind, KIND_NAMES)) {
+                    namesAddr = plan.addrs[i];
+                    tld = mods[i].tld;
+                } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                    converterAddr = plan.addrs[i];
+                } else if (_eq(mods[i].kind, KIND_TOKEN)) {
+                    haveToken = true;
+                }
+                continue;
+            }
             if (_eq(mods[i].kind, KIND_TOKEN)) {
                 Token t = new Token{salt: saltFor(mods[i].kind, mods[i].key)}(
                     mods[i].name, mods[i].symbol, treasury
                 );
                 if (mods[i].initialSupply > 0) t.mint(treasury, mods[i].initialSupply * 1e18);
-                addrs[i] = address(t);
+                plan.addrs[i] = address(t);
                 haveToken = true;
             } else if (_eq(mods[i].kind, KIND_NAMES)) {
                 NameRegistry r = new NameRegistry{salt: saltFor(mods[i].kind, "")}(treasury);
-                addrs[i] = address(r);
+                plan.addrs[i] = address(r);
                 namesAddr = address(r);
                 tld = mods[i].tld;
             } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
@@ -175,14 +203,14 @@ contract Deploy is Script {
                 // bare kind (one converter per deployment) so its address is
                 // deterministic like every other module's.
                 Converter c = new Converter{salt: saltFor(KIND_CONVERTER, "")}(treasury);
-                addrs[i] = address(c);
+                plan.addrs[i] = address(c);
                 converterAddr = address(c);
             } else {
                 // A custom contract, deployed by name with static-typed args. Kept
                 // in its own function so deploy()'s stack stays within limits.
                 // Registered contracts get NO role grants (spec S1.1); any role
                 // they need comes later through admin-call.
-                addrs[i] = _deployContract(manifestPath, i, mods, addrs, treasury);
+                plan.addrs[i] = _deployContract(manifest, i, mods, plan.addrs, treasury);
             }
         }
         // `treasury.<tld>` names the treasury FOR A TOKEN'S BENEFIT, so it is
@@ -190,7 +218,15 @@ contract Deploy is Script {
         // gets a registry with nothing in it, which is correct: there is no
         // money for the treasury to hold.
         if (namesAddr != address(0) && haveToken) {
-            NameRegistry(namesAddr).registerFor(string.concat("treasury.", tld), treasury, treasury);
+            // ONLY IF IT IS NOT ALREADY THERE. With per-module idempotency the
+            // registry can be a survivor while a token beside it is redeployed,
+            // and registering a name that already resolves is a refusal rather
+            // than a no-op - so the run would fail on its second pass over a
+            // registry it had just been right to keep.
+            string memory treasuryName = string.concat("treasury.", tld);
+            if (NameRegistry(namesAddr).resolve(treasuryName) == address(0)) {
+                NameRegistry(namesAddr).registerFor(treasuryName, treasury, treasury);
+            }
         }
         // Wire the converter LAST: each pair needs its two token addresses, and
         // the converter is the only holder of BURNER_ROLE on any token. The
@@ -198,8 +234,8 @@ contract Deploy is Script {
         // additional minter on each target, never a replacement.
         if (converterAddr != address(0)) {
             for (uint256 j = 0; j < pairs.length; j++) {
-                address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
-                address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
+                address src = _tokenAddrByKey(mods, plan.addrs, pairs[j].source);
+                address tgt = _tokenAddrByKey(mods, plan.addrs, pairs[j].target);
                 Converter(converterAddr).setPair(src, tgt, pairs[j].rate);
                 Token(src).grantRole(Token(src).BURNER_ROLE(), converterAddr);
                 Token(tgt).grantRole(Token(tgt).MINTER_ROLE(), converterAddr);
@@ -207,105 +243,33 @@ contract Deploy is Script {
         }
         vm.stopBroadcast();
 
-        for (uint256 i = 0; i < mods.length; i++) {
-            if (_eq(mods[i].kind, KIND_TOKEN)) {
-                Token t = Token(addrs[i]);
-                require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
-                // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
-                // script - so this asserts a property of the contract rather
-                // than confirming its own work, which is the more useful
-                // direction: a constructor that stopped granting it would fail
-                // the deploy instead of producing a chain where no freeze is
-                // possible and nothing says so until the first one is tried.
-                require(t.hasRole(t.FREEZER_ROLE(), treasury), "Deploy: treasury lacks FREEZER_ROLE");
-                // BURNER_ROLE is held by the CONVERTER alone when a deployment
-                // has one, and by NOBODY otherwise. AccessControl has no member
-                // enumeration, so that is asserted against the address that could
-                // plausibly hold it: the treasury, which is this token's
-                // DEFAULT_ADMIN and the only account this script grants to. The
-                // converter's own grants are asserted in its branch below.
-                //
-                // THERE WAS A SECOND ASSERTION HERE, against `address(this)`,
-                // and finding it cost a compose smoke. `forge script
-                // --broadcast` REFUSES `address(this)` in a script contract -
-                // "script contracts are ephemeral and their addresses should not
-                // be relied upon" - while `forge test` allows it. So it passed
-                // locally and reverted the deploy inside the container, which is
-                // the only place it ran for real. Do not reinstate it here.
-                //
-                // It was also asking the wrong question: under broadcast the
-                // deployer is the treasury EOA and the script contract holds
-                // nothing, so the check could only ever have been vacuous. The
-                // exhaustive "nobody holds it" claim lives in Token.t.sol, where
-                // there is no broadcast and the addresses are real.
-                require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
-                // THE CONVERTER MUST NEVER FREEZE. Nothing grants it
-                // FREEZER_ROLE, so this is asserting something no line of code
-                // makes true - which is the reason to assert it rather than the
-                // reason not to. The grants a few lines up hand the converter
-                // BURNER and MINTER on the tokens it converts between; a fifth
-                // grant added there later would be one word from being a
-                // contract that can freeze the accounts it burns from, and this
-                // is what would notice.
-                //
-                // Checked rather than assumed, mirroring the BURNER-not-treasury
-                // assertion directly above.
-                if (converterAddr != address(0)) {
-                    require(
-                        !t.hasRole(t.FREEZER_ROLE(), converterAddr),
-                        "Deploy: converter must not hold FREEZER_ROLE"
-                    );
-                }
-                require(
-                    t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
-                );
-            } else if (_eq(mods[i].kind, KIND_NAMES)) {
-                NameRegistry r = NameRegistry(addrs[i]);
-                require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
-                if (haveToken) {
-                    require(
-                        r.resolve(string.concat("treasury.", tld)) == treasury,
-                        "Deploy: treasury name does not resolve"
-                    );
-                }
-            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
-                Converter c = Converter(addrs[i]);
-                for (uint256 j = 0; j < pairs.length; j++) {
-                    address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
-                    address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
-                    (,, bool exists) = c.pair(src, tgt);
-                    require(exists, "Deploy: converter pair was not set");
-                    require(
-                        Token(src).hasRole(Token(src).BURNER_ROLE(), address(c)),
-                        "Deploy: converter lacks BURNER_ROLE on a source token"
-                    );
-                    require(
-                        Token(tgt).hasRole(Token(tgt).MINTER_ROLE(), address(c)),
-                        "Deploy: converter lacks MINTER_ROLE on a target token"
-                    );
-                }
-            } else {
-                // A custom contract: it exists and has code. No roles are asserted
-                // because the deploy grants it none.
-                require(addrs[i].code.length > 0, "Deploy: contract has no code");
-            }
-        }
+        // ASSERTED ON BOTH PATHS. See `_assertDeployment`.
+        _assertDeployment(mods, plan.addrs, pairs, treasury);
 
-        _writeDeployment(dir, path, mods, addrs, treasury);
+        _writeDeployment(dir, path, mods, plan.addrs, treasury);
 
         for (uint256 i = 0; i < mods.length; i++) {
-            console.log("Deploy: module", mods[i].kind, addrs[i]);
+            console.log("Deploy: module", mods[i].kind, plan.addrs[i]);
         }
         console.log("Deploy: treasury    ", treasury);
     }
 
     // ── the manifest ────────────────────────────────────────────────────────
 
-    function _readManifest(string memory manifestPath) internal view returns (ModuleSpec[] memory) {
+    /// THE ONE READ. Separate from the parser so the not-found refusal can name
+    /// the path, which the parser no longer sees.
+    function _readManifestFile(string memory manifestPath) internal view returns (string memory) {
         if (!vm.exists(manifestPath)) {
-            revert(string.concat("Deploy: manifest: none found at ", manifestPath, "; a deployment must declare its modules"));
+            revert(
+                string.concat(
+                    "Deploy: manifest: none found at ", manifestPath, "; a deployment must declare its modules"
+                )
+            );
         }
-        string memory json = vm.readFile(manifestPath);
+        return vm.readFile(manifestPath);
+    }
+
+    function _readManifest(string memory json) internal view returns (ModuleSpec[] memory) {
 
         uint256 schema = vm.parseJsonUint(json, ".schema");
         if (schema != SCHEMA) {
@@ -420,7 +384,7 @@ contract Deploy is Script {
     /// string in (0, MAX_RATE]; and no pair may combine with its reverse to mint
     /// value on a round trip. Validated here so a bad manifest fails with a
     /// readable message rather than the contract's raw error.
-    function _readConverterPairs(string memory manifestPath, ModuleSpec[] memory mods)
+    function _readConverterPairs(string memory json, ModuleSpec[] memory mods)
         internal
         view
         returns (ConverterPair[] memory)
@@ -434,7 +398,6 @@ contract Deploy is Script {
         }
         if (convIdx == type(uint256).max) return new ConverterPair[](0);
 
-        string memory json = vm.readFile(manifestPath);
         string memory base = string.concat(".modules[", vm.toString(convIdx), "].pairs");
 
         uint256 n = 0;
@@ -596,13 +559,12 @@ contract Deploy is Script {
     /// address matches computeCreate2Address(salt, keccak256(initcode), 0x4e59)
     /// (measured). Its own function so deploy() stays within the stack limit.
     function _deployContract(
-        string memory manifestPath,
+        string memory json,
         uint256 idx,
         ModuleSpec[] memory mods,
         address[] memory addrs,
         address treasury
     ) internal returns (address deployed) {
-        string memory json = vm.readFile(manifestPath);
         bytes memory initcode = abi.encodePacked(
             vm.getCode(string.concat(mods[idx].name, ".sol:", mods[idx].name)),
             _encodeContractArgs(json, idx, mods, addrs, treasury)
@@ -739,6 +701,35 @@ contract Deploy is Script {
 
     // ── local.json ──────────────────────────────────────────────────────────
 
+    /// THE CANONICAL CREATE2 DEPLOYER. Anvil predeploys it, and a salted `new`
+    /// inside a Script-derived contract under broadcast routes through it -
+    /// which is what makes an address the same under `forge test` and under
+    /// `forge script --broadcast`, and is why the cache re-derives against this
+    /// and not against the treasury. Measured in Create2Probe.t.sol's fourth
+    /// case; the same shape inside a TEST contract gives the broadcaster, which
+    /// is the wrong answer and the easy mistake.
+    address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+
+    /// What the cache records for one module.
+    struct CacheEntry {
+        address addr;
+        /// The module's runtime codehash at write time, or zero on a file
+        /// written before codehashes were recorded.
+        bytes32 codehash;
+    }
+
+    /// THE COMPARISON KEY, on both sides of every cache check: `kind:key`.
+    ///
+    /// `_effectiveKey` collapses to the bare key for tokens and contracts and to
+    /// the bare kind for the singletons, so a token keyed "names" and the names
+    /// module both reduce to "names". The manifest's own uniqueness check uses
+    /// that collapse and refuses such a manifest - but the cache is a FILE, and
+    /// a file is not required to have come from a manifest this script accepted.
+    /// Qualifying by kind makes the two unconfusable whatever the file says.
+    function _cacheKey(string memory kind, string memory key) internal pure returns (string memory) {
+        return string.concat(kind, ":", key);
+    }
+
     /// True only if the existing local.json lists EXACTLY the manifest's
     /// modules, in order, and every address still has code.
     ///
@@ -747,34 +738,488 @@ contract Deploy is Script {
     /// contracts were deployed under two different manifests, and nothing
     /// afterwards could tell which. The operator redeploys on a fresh chain or
     /// fixes the manifest; both are one deliberate act.
-    function _alreadyDeployed(string memory path, ModuleSpec[] memory mods) internal view returns (bool) {
-        if (!vm.exists(path)) return false;
+    /// What the cache says this run must do. Returned as ONE struct: `deploy()`
+    /// is at the stack limit, and five separate returns would put it over.
+    struct Plan {
+        address[] addrs;
+        bool[] needsDeploy;
+        /// The whole run is already done - nothing to deploy, and any promotion
+        /// already written.
+        bool done;
+    }
 
+    function _plan(
+        string memory dir,
+        string memory path,
+        string memory manifest,
+        ModuleSpec[] memory mods,
+        address treasury,
+        string memory allowFreshDeploy
+    ) internal returns (Plan memory plan) {
+        // THE CACHE, CHECKED RATHER THAN BELIEVED, and planned PER MODULE.
+        //
+        // Three outcomes per module, and the third is the one that used to be a
+        // bare revert: the derived address is empty, so deploy it; it holds the
+        // code this manifest describes, so skip it; or it holds SOMETHING ELSE,
+        // which is refused by name with both codehashes rather than failing
+        // inside a `new` with no indication of which module or why.
+        // Without local.json there is no address to check for code, so the
+        // question "has anything been deployed here?" cannot be answered
+        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
+        // what this replaces.
+        //
+        // The nonce answered a weaker question - has this account transacted
+        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
+        // whose deployer had done anything at all (a funding transfer, a
+        // probe, a previous run that reverted after its first transaction)
+        // refused a deployment that was perfectly safe. And a chain deployed
+        // from a DIFFERENT key read as untouched, because the nonce it checked
+        // was not the nonce that deployed anything - so the one case worth
+        // refusing, someone else's modules already live here, sailed through.
+        //
+        // An inferred signal cannot be made to mean what an operator meant. So
+        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
+        // statement that there is nothing here to orphan. Refusing costs one
+        // environment variable; being wrong the other way costs the game its
+        // money with no error at all.
+        //
+        // CHECKED BEFORE THE PER-MODULE LOOP, and the order is the message.
+        //
+        // With the manifest gone and the chain intact, BOTH refusals are true:
+        // there is no local.json, and the derived addresses are occupied. The
+        // loop's message would be the squat one - "another deployment is using
+        // this address" - which MISDESCRIBES it: that is our own deployment,
+        // whose manifest we lost. This one says restore the file, which is what
+        // the operator should do.
+        //
+        // So the squat message now fires only when the operator has said the
+        // chain is fresh AND an address is occupied anyway, which is exactly
+        // what it claims.
+        //
+        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
+        // below failing. Those are different: local.json can be present and
+        // point at dead addresses (a wiped chain), which is the forward case
+        // and must still redeploy. Guarding on the weaker condition made this
+        // fire for that case too - so the message could be false, and, worse,
+        // it MASKED the forward guard: a mutant disabling the cache check was
+        // caught here instead, which means neither guard was independently
+        // tested. Two guards satisfied by one scenario is two guards you have
+        // not tested.
+        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
+        // wrong direction for a flag whose whole job is to be deliberate:
+        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
+        // accident, and the operator who wrote 0 meant the opposite.
+        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
+            revert(
+                string.concat(
+                    "Deploy: refusing to deploy with no ",
+                    path,
+                    ". A fresh deployment on a chain that already has modules would orphan them ",
+                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
+                    "state that this chain has nothing to orphan."
+                )
+            );
+        }
+
+        plan.addrs = new address[](mods.length);
+        plan.needsDeploy = new bool[](mods.length);
+        bool haveCache = vm.exists(path);
+        bool legacyCache = false;
+        bool anyToDeploy = false;
+
+        CacheEntry[] memory cached;
+        if (haveCache) (cached, legacyCache) = _readCache(path, mods, treasury);
+
+        for (uint256 i = 0; i < mods.length; i++) {
+            plan.addrs[i] = _expectedAddress(manifest, i, mods, plan.addrs, treasury);
+            if (haveCache && cached[i].addr != plan.addrs[i]) {
+                revert(
+                    string.concat(
+                        "Deploy: ",
+                        _cacheKey(mods[i].kind, mods[i].key),
+                        " is recorded at ",
+                        vm.toString(cached[i].addr),
+                        " but this manifest derives ",
+                        vm.toString(plan.addrs[i]),
+                        " - the file does not describe this deployment"
+                    )
+                );
+            }
+            if (plan.addrs[i].code.length == 0) {
+                plan.needsDeploy[i] = true;
+                anyToDeploy = true;
+            } else if (haveCache && !legacyCache && cached[i].codehash != plan.addrs[i].codehash) {
+                revert(_foreignCode(mods[i], plan.addrs[i], cached[i].codehash));
+            } else if (!haveCache) {
+                // No cache and the address is occupied: on a fresh chain this is
+                // a squat, and deploying would revert inside `new` with nothing
+                // to say which module or why.
+                revert(_foreignCode(mods[i], plan.addrs[i], bytes32(0)));
+            }
+        }
+
+        if (haveCache && !anyToDeploy) {
+            if (legacyCache) {
+                // A PROMOTION, NOT A PASS. The file verified by derivation and
+                // treasury, so it describes this deployment - it just predates
+                // codehashes. Rewriting it means the NEXT run can make the
+                // stronger check, and says so rather than silently upgrading.
+                console.log("Deploy: local.json verified and rewritten with codehashes");
+                _writeDeployment(dir, path, mods, plan.addrs, treasury);
+                plan.done = true;
+                return plan;
+            }
+            console.log("Deploy: local.json matches the manifest and every address has code - nothing to do");
+            plan.done = true;
+            return plan;
+        }
+
+        // THE OTHER DIRECTION, and the dangerous one. The guard above handles
+        // "local.json survived, chain state was wiped". The reverse - local.json
+        // gone, chain intact - reaches here and would deploy a SECOND set of
+        // modules, orphaning the first along with every balance in the game. It
+        // is not a hypothetical: ./deployments is a bind mount and chain-state
+        // is a named volume, so they have independent lifetimes and either can
+        // outlive the other.
+        //
+
+    }
+
+    /// Every role and wiring claim this deployment makes, checked against the
+    /// chain. READ-ONLY, and run on BOTH paths.
+    ///
+    /// It used to sit below the skip return, so a chain that had already been
+    /// deployed was never re-checked - and roles are STORAGE, which no codehash
+    /// can see. A treasury that had renounced DEFAULT_ADMIN and MINTER, or
+    /// handed them to someone else, got "nothing to do" on every compose
+    /// restart: the modules were the right contracts at the right addresses,
+    /// administered by a stranger.
+    ///
+    /// The wiring facts are derived from `mods` and `addrs` rather than passed
+    /// in, so the function needs nothing the skip path does not have.
+    function _assertDeployment(
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        ConverterPair[] memory pairs,
+        address treasury
+    ) internal view {
+        address namesAddr = address(0);
+        address converterAddr = address(0);
+        string memory tld = "";
+        bool haveToken = false;
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_NAMES)) {
+                namesAddr = addrs[i];
+                tld = mods[i].tld;
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                converterAddr = addrs[i];
+            } else if (_eq(mods[i].kind, KIND_TOKEN)) {
+                haveToken = true;
+            }
+        }
+
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_TOKEN)) {
+                Token t = Token(addrs[i]);
+                require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
+                // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
+                // script - so this asserts a property of the contract rather
+                // than confirming its own work, which is the more useful
+                // direction: a constructor that stopped granting it would fail
+                // the deploy instead of producing a chain where no freeze is
+                // possible and nothing says so until the first one is tried.
+                require(t.hasRole(t.FREEZER_ROLE(), treasury), "Deploy: treasury lacks FREEZER_ROLE");
+                // BURNER_ROLE is held by the CONVERTER alone when a deployment
+                // has one, and by NOBODY otherwise. AccessControl has no member
+                // enumeration, so that is asserted against the address that could
+                // plausibly hold it: the treasury, which is this token's
+                // DEFAULT_ADMIN and the only account this script grants to. The
+                // converter's own grants are asserted in its branch below.
+                //
+                // THERE WAS A SECOND ASSERTION HERE, against `address(this)`,
+                // and finding it cost a compose smoke. `forge script
+                // --broadcast` REFUSES `address(this)` in a script contract -
+                // "script contracts are ephemeral and their addresses should not
+                // be relied upon" - while `forge test` allows it. So it passed
+                // locally and reverted the deploy inside the container, which is
+                // the only place it ran for real. Do not reinstate it here.
+                //
+                // It was also asking the wrong question: under broadcast the
+                // deployer is the treasury EOA and the script contract holds
+                // nothing, so the check could only ever have been vacuous. The
+                // exhaustive "nobody holds it" claim lives in Token.t.sol, where
+                // there is no broadcast and the addresses are real.
+                require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
+                // THE CONVERTER MUST NEVER FREEZE. Nothing grants it
+                // FREEZER_ROLE, so this is asserting something no line of code
+                // makes true - which is the reason to assert it rather than the
+                // reason not to. The grants a few lines up hand the converter
+                // BURNER and MINTER on the tokens it converts between; a fifth
+                // grant added there later would be one word from being a
+                // contract that can freeze the accounts it burns from, and this
+                // is what would notice.
+                //
+                // Checked rather than assumed, mirroring the BURNER-not-treasury
+                // assertion directly above.
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.FREEZER_ROLE(), converterAddr),
+                        "Deploy: converter must not hold FREEZER_ROLE"
+                    );
+                }
+                require(
+                    t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
+                );
+                // FINDING 20. WHO ADMINISTERS THIS TOKEN, asserted rather than
+                // assumed. DEFAULT_ADMIN_ROLE is the role that grants every
+                // other one, so an unintended holder is not a smaller problem
+                // than an unintended MINTER - it is the same problem with one
+                // extra step.
+                //
+                // The three negatives are the ones a mistake would produce. The
+                // CONVERTER is granted BURNER and MINTER a few lines up, and a
+                // fourth grant added there later would be one word from an admin
+                // that can grant itself anything. `address(0)` is what an
+                // uninitialised admin argument looks like, and it is a hole
+                // nobody holds and everybody can see. The SCRIPT address cannot
+                // be asserted here - `forge script --broadcast` refuses
+                // `address(this)` in a script contract, which cost a compose
+                // smoke once already - so Token.t.sol makes the exhaustive
+                // claim where the addresses are real and there is no broadcast.
+                require(
+                    t.hasRole(t.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_NAMES)) {
+                NameRegistry r = NameRegistry(addrs[i]);
+                require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
+                // FINDING 20, the registry's half. A registry whose admin is not
+                // the treasury is a registry someone else can hand names out of,
+                // and a name is what every payment in this system resolves
+                // through.
+                require(
+                    r.hasRole(r.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !r.hasRole(r.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE on the registry"
+                    );
+                }
+                if (haveToken) {
+                    require(
+                        r.resolve(string.concat("treasury.", tld)) == treasury,
+                        "Deploy: treasury name does not resolve"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                Converter c = Converter(addrs[i]);
+                // FINDING 20, the converter's half. RATE_ADMIN sets the rate at
+                // which one token becomes another - the exchange rate of the
+                // game's economy - so the question of who holds it is the
+                // question of who can print value by moving a number.
+                require(
+                    c.hasRole(c.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    c.hasRole(c.RATE_ADMIN_ROLE(), treasury), "Deploy: treasury lacks RATE_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.RATE_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold RATE_ADMIN_ROLE"
+                );
+                for (uint256 j = 0; j < pairs.length; j++) {
+                    address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
+                    address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
+                    (,, bool exists) = c.pair(src, tgt);
+                    require(exists, "Deploy: converter pair was not set");
+                    require(
+                        Token(src).hasRole(Token(src).BURNER_ROLE(), address(c)),
+                        "Deploy: converter lacks BURNER_ROLE on a source token"
+                    );
+                    require(
+                        Token(tgt).hasRole(Token(tgt).MINTER_ROLE(), address(c)),
+                        "Deploy: converter lacks MINTER_ROLE on a target token"
+                    );
+                }
+            } else {
+                // A custom contract: it exists and has code. No roles are asserted
+                // because the deploy grants it none.
+                require(addrs[i].code.length > 0, "Deploy: contract has no code");
+            }
+        }
+
+    }
+
+    /// The refusal for an address that holds code this deployment did not put
+    /// there. NAMED, with both codehashes, because the alternative is a revert
+    /// from inside `new` that says only that a creation failed.
+    function _foreignCode(ModuleSpec memory m, address at, bytes32 expected)
+        internal
+        view
+        returns (string memory)
+    {
+        return string.concat(
+            "Deploy: ",
+            _cacheKey(m.kind, m.key),
+            " derives ",
+            vm.toString(at),
+            ", which already holds code with codehash ",
+            vm.toString(at.codehash),
+            expected == bytes32(0)
+                ? " and no manifest records it - another deployment is using this address"
+                : string.concat("; the manifest records ", vm.toString(expected))
+        );
+    }
+
+    /// The address this manifest WOULD produce for module `i`, derived rather
+    /// than read: `saltFor` + the keccak of the init code + the canonical
+    /// CREATE2 deployer.
+    ///
+    /// This is what makes local.json a cache. Every fact in that file is now
+    /// checkable against the manifest and the compiled artefacts, so an edited,
+    /// copied or hand-written file cannot name an address this deployment could
+    /// not have produced - which is what it could do when the address was simply
+    /// believed.
+    ///
+    // `addrs` carries the EARLIER modules' addresses, for a custom contract
+    // whose constructor references one by @key. Forward references are already
+    // refused when the manifest is read, so by the time module i is derived
+    // every address it can name is known. (Plain comments: solc reads `@key` in
+    // a doc block as a natspec tag and refuses the file.)
+    function _expectedAddress(
+        string memory json,
+        uint256 i,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal returns (address) {
+        bytes memory initcode;
+        bytes32 salt;
+        if (_eq(mods[i].kind, KIND_TOKEN)) {
+            initcode = abi.encodePacked(
+                type(Token).creationCode, abi.encode(mods[i].name, mods[i].symbol, treasury)
+            );
+            salt = saltFor(mods[i].kind, mods[i].key);
+        } else if (_eq(mods[i].kind, KIND_NAMES)) {
+            initcode = abi.encodePacked(type(NameRegistry).creationCode, abi.encode(treasury));
+            salt = saltFor(mods[i].kind, "");
+        } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+            initcode = abi.encodePacked(type(Converter).creationCode, abi.encode(treasury));
+            salt = saltFor(KIND_CONVERTER, "");
+        } else {
+            initcode = abi.encodePacked(
+                vm.getCode(string.concat(mods[i].name, ".sol:", mods[i].name)),
+                _encodeContractArgs(json, i, mods, addrs, treasury)
+            );
+            salt = saltFor(KIND_CONTRACT, mods[i].key);
+        }
+        return vm.computeCreate2Address(salt, keccak256(initcode), CREATE2_DEPLOYER);
+    }
+
+    /// Reads the cache and checks everything about it that does not need the
+    /// manifest's init code: the chain it was written for, the treasury that
+    /// wrote it, and that it describes exactly the modules being asked for.
+    ///
+    /// LOCAL.JSON IS A CACHE, NOT AN AUTHORITY. Everything here used to be
+    /// taken on trust: the file said an address and the script believed it,
+    /// checking only that SOMETHING had code there. So a file edited by hand,
+    /// copied from another deployment, or written for another chain was
+    /// indistinguishable from one this script produced - and the script would
+    /// wire a game's money to whatever it named.
+    ///
+    /// Reverts on every mismatch rather than returning false: a cache that
+    /// disagrees with the manifest is not a reason to redeploy silently, it is
+    /// a question for whoever wrote one of them.
+    function _readCache(string memory path, ModuleSpec[] memory mods, address treasury)
+        internal
+        view
+        returns (CacheEntry[] memory entries, bool legacy)
+    {
         string memory json = vm.readFile(path);
-        // A malformed local.json reverts here on purpose: silently redeploying
-        // over a file we could not read is how balances get orphaned.
+
+        // THE CHAIN IT WAS WRITTEN FOR. A manifest from another chain names
+        // addresses that mean nothing here - and on a chain where those
+        // addresses happen to hold code, means something worse than nothing.
+        uint256 recordedChain = vm.parseJsonUint(json, ".chainId");
+        if (recordedChain != block.chainid) {
+            revert(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written for chain ",
+                    vm.toString(recordedChain),
+                    "; this is chain ",
+                    vm.toString(block.chainid)
+                )
+            );
+        }
+
+        // THE TREASURY THAT WROTE IT. A rotated deployer key is a different
+        // treasury: the recorded modules' admin roles are held by the OLD one,
+        // so continuing would produce a deployment nobody present can administer.
+        address recordedTreasury = vm.parseJsonAddress(json, ".treasury");
+        if (recordedTreasury != treasury) {
+            revert(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written by treasury ",
+                    vm.toString(recordedTreasury),
+                    "; this deployer is ",
+                    vm.toString(treasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            );
+        }
+
         uint256 n = 0;
         while (vm.keyExistsJson(json, string.concat(".modules[", vm.toString(n), "]"))) {
             n++;
         }
 
         string memory declared = "";
+        entries = new CacheEntry[](n);
+        legacy = false;
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".modules[", vm.toString(i), "]");
             string memory kind = vm.parseJsonString(json, string.concat(at, ".kind"));
-            string memory key =
-                vm.keyExistsJson(json, string.concat(at, ".key")) ? vm.parseJsonString(json, string.concat(at, ".key")) : "";
-            // An entry is identified by its key when it has one (token, contract),
-            // else by its kind (the singletons names/converter) - the same
-            // effective key _readManifest enforces unique.
-            declared = string.concat(
-                declared, i == 0 ? "" : ",", (_eq(kind, KIND_TOKEN) || _eq(kind, KIND_CONTRACT)) ? key : kind
-            );
+            string memory key = vm.keyExistsJson(json, string.concat(at, ".key"))
+                ? vm.parseJsonString(json, string.concat(at, ".key"))
+                : "";
+            declared = string.concat(declared, i == 0 ? "" : ",", _cacheKey(kind, key));
+
+            entries[i].addr = vm.parseJsonAddress(json, string.concat(at, ".address"));
+            if (vm.keyExistsJson(json, string.concat(at, ".codehash"))) {
+                entries[i].codehash = vm.parseJsonBytes32(json, string.concat(at, ".codehash"));
+            } else {
+                // A FILE FROM BEFORE CODEHASHES WERE RECORDED. Verified by
+                // address derivation and treasury like any other, then rewritten
+                // WITH codehashes - a promotion, not a pass.
+                legacy = true;
+            }
         }
 
         string memory asked = "";
         for (uint256 i = 0; i < mods.length; i++) {
-            asked = string.concat(asked, i == 0 ? "" : ",", _effectiveKey(mods[i]));
+            asked = string.concat(asked, i == 0 ? "" : ",", _cacheKey(mods[i].kind, mods[i].key));
         }
 
         if (!_eq(declared, asked)) {
@@ -788,14 +1233,6 @@ contract Deploy is Script {
                 )
             );
         }
-
-        // The file surviving is not enough - a wiped chain-state volume leaves
-        // local.json pointing at addresses with no code, and that must redeploy.
-        for (uint256 i = 0; i < n; i++) {
-            address a = vm.parseJsonAddress(json, string.concat(".modules[", vm.toString(i), "].address"));
-            if (a.code.length == 0) return false;
-        }
-        return n > 0;
     }
 
     function _writeDeployment(
@@ -818,6 +1255,11 @@ contract Deploy is Script {
             // record their fixed contract.
             string memory contractName =
                 isToken ? CONTRACT_TOKEN : isNames ? CONTRACT_NAMES : isContract ? mods[i].name : CONTRACT_CONVERTER;
+            // THE RUNTIME CODEHASH, recorded at write time so the skip path can
+            // ask whether the code at that address is still the code this
+            // manifest describes. Without it "the address has code" was the
+            // whole check, and ANY code passed it - including a different
+            // contract that happened to be deployed there first.
             string memory entry = string.concat(
                 '{"kind":"',
                 mods[i].kind,
@@ -826,6 +1268,8 @@ contract Deploy is Script {
                 contractName,
                 '","address":"',
                 vm.toString(addrs[i]),
+                '","codehash":"',
+                vm.toString(addrs[i].codehash),
                 '"',
                 isNames ? string.concat(',"tld":"', mods[i].tld, '"') : "",
                 "}"
@@ -847,6 +1291,19 @@ contract Deploy is Script {
         );
 
         vm.createDir(dir, true);
-        vm.writeJson(out, path);
+        // WRITTEN AS `.pending`, PROMOTED BY THE CALLER ON SUCCESS.
+        //
+        // `forge script` runs the whole thing in SIMULATION first, and will run
+        // it in simulation ALONE when `--broadcast` is absent. A simulated run
+        // computes real addresses from real init code and then mines nothing -
+        // so writing local.json here meant a simulation could hand every
+        // service downstream a manifest of contracts that do not exist, with no
+        // error anywhere and nothing to distinguish it from a real deploy.
+        //
+        // The script cannot tell the two apart from inside. The caller can: the
+        // broadcast's exit status is the fact, and `docker/deploy-once.sh` moves
+        // this file into place only when that status is zero.
+        vm.writeJson(out, string.concat(path, ".pending"));
+        console.log("Deploy: wrote", string.concat(path, ".pending"));
     }
 }

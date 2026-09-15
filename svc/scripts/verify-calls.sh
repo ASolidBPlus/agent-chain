@@ -76,8 +76,15 @@ cp "$DEPLOYMENTS/examples/two-tokens.json" "$DEPLOYMENTS/manifest.json"
 # fails with an unhelpful envUint parse error. Deriving it also checks the thing
 # that matters: that this mnemonic really does control account 0 on this chain.
 KEY=$(cast wallet private-key --mnemonic "$MNEMONIC")
+# ALLOW_FRESH_DEPLOY and the PROMOTION are what the container's one-shot does.
+# This script drives `forge script` directly into a fresh temp directory, so it
+# has to do both itself: the script writes local.json.pending and never
+# local.json, because a run WITHOUT --broadcast would otherwise hand every
+# service downstream a manifest of contracts nobody mined.
 ( cd "$CONTRACTS" && DEPLOYER_PRIVATE_KEY="$KEY" DEPLOYMENTS_DIR="$DEPLOYMENTS" \
+    ALLOW_FRESH_DEPLOY=1 \
     forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast ) >/dev/null 2>&1
+mv "$DEPLOYMENTS/local.json.pending" "$DEPLOYMENTS/local.json"
 
 PLAY=$(python3 -c "import json;print([m for m in json.load(open('$DEPLOYMENTS/local.json'))['modules'] if m.get('key')=='play'][0]['address'])")
 GOLD=$(python3 -c "import json;print([m for m in json.load(open('$DEPLOYMENTS/local.json'))['modules'] if m.get('key')=='gold'][0]['address'])")

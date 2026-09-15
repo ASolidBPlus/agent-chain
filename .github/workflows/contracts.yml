@@ -20,6 +20,14 @@ on:
     branches: [main]
   pull_request:
 
+# LEAST PRIVILEGE, SET EXPLICITLY rather than inherited, as ci.yml already does.
+# Without this the workflow gets the repository's default token permissions,
+# which on a public repo is read-only today and is a REPOSITORY SETTING somebody
+# can widen from a web form - so the job's authority would change without a diff.
+# Neither job here writes anything; both read a tree and run a build.
+permissions:
+  contents: read
+
 jobs:
   forge:
     runs-on: ubuntu-latest
@@ -33,6 +41,35 @@ jobs:
           # Pinned to the version the contracts were written and reviewed
           # against; foundry.toml pins solc and the EVM version to match.
           version: v1.8.1
+
+      # FFI STAYS OFF, CHECKED IN THE CONFIG RATHER THAN SET IN THE ENV.
+      #
+      # This was `FOUNDRY_FFI: false` in the job env, and that is INERT -
+      # measured by the reviewer with `ffi = true` inserted in
+      # [profile.default]: forge ran the shelled-out command on the runner with
+      # the variable set in every spelling. `--ffi` is ENABLE-ONLY and the env
+      # var is its binding, so there is no value of it that turns the feature
+      # off. A control that cannot fail closed is worse than none: it reads as a
+      # guarantee.
+      #
+      # So the guarantee is the one thing that can actually be asserted here -
+      # that the config does not enable it. FFI lets a test shell out, and
+      # `forge test` runs every file under test/ including any a dependency
+      # update drags in.
+      - name: refuse ffi in the config
+        working-directory: contracts
+        run: |
+          if grep -qE '^[[:space:]]*ffi[[:space:]]*=[[:space:]]*true' foundry.toml; then
+            echo "::error::ffi must not be enabled in CI - forge test would run arbitrary commands on the runner"
+            exit 1
+          fi
+          echo "ffi is not enabled in foundry.toml"
+
+      # The guard above is one line and its regression test is not, because the
+      # obvious way to write that test passes for the wrong reason - see the
+      # script.
+      - name: the ffi guard can fail
+        run: sh .github/scripts/test-ffi-guard.sh
 
       - name: forge test
         working-directory: contracts
@@ -62,7 +99,12 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          # PINNED, as in ci.yml. `latest` makes the toolchain a moving part of
+          # every run: a bun release changes what this job does with no commit
+          # to point at, and the one job whose output is COMMITTED to the repo
+          # is the worst place for that - a regenerated abi.ts would differ for
+          # a reason nobody could find in the diff.
+          bun-version: 1.3.14
 
       - run: bun install --frozen-lockfile --ignore-scripts
 
@@ -89,9 +131,45 @@ jobs:
         working-directory: svc
         run: bun run scripts/generate-abi.ts
 
+      # THE GENERATOR AND THE CONTRACTS MUST NOT MOVE IN ONE PR, and this is
+      # the step that says so.
+      #
+      # The check below compares the committed abi.ts to what the generator
+      # produces. That is a comparison between the ABI and ITSELF-AS-GENERATED:
+      # it cannot see a change that alters both. A PR that edits a contract AND
+      # edits the generator so the new output still matches passes this gate
+      # while the thing the gate exists to notice - the ABI drifting from the
+      # contracts - has happened.
+      #
+      # So the two are not allowed in one change. Separated, each is gated by
+      # the other's unchanged half: a contract change is checked by the old
+      # generator, and a generator change regenerates against unchanged
+      # contracts and shows its own diff.
+      - name: refuse a generator change beside a contract change
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then echo "not a pull request; nothing to compare"; exit 0; fi
+          git fetch --no-tags --depth=1 origin "$base"
+          # TWO DOTS, NOT THREE. `a...b` asks git for the MERGE BASE of a and b,
+          # and a shallow checkout has no common ancestor to find - the step
+          # failed with "no merge base" and exit 128 the first time it ran.
+          # Two dots compares the two commits directly, which is what is wanted:
+          # `base` is already the merge base GitHub computed for the PR.
+          changed=$(git diff --name-only "$base" HEAD)
+          gen=$(echo "$changed" | grep -c '^svc/scripts/generate-abi\.ts$' || true)
+          src=$(echo "$changed" | grep -c '^contracts/src/' || true)
+          if [ "$gen" -gt 0 ] && [ "$src" -gt 0 ]; then
+            echo "::error::This PR changes svc/scripts/generate-abi.ts AND contracts/src. Split them: the ABI gate compares the committed file to this generator's output, so a PR that moves both can pass while the ABI and the contracts diverge."
+            exit 1
+          fi
+
+      # `HEAD --` rather than a bare path: without an explicit commit, `git diff`
+      # compares the WORKING TREE to the INDEX, so a change that was somehow
+      # staged would be invisible to it. Against HEAD the comparison is to what
+      # is committed, which is what the guarantee is about.
       - name: fail if the committed ABI no longer matches the contracts
         run: |
-          if ! git diff --exit-code -- svc/src/abi.ts; then
+          if ! git diff --exit-code HEAD -- svc/src/abi.ts; then
             echo "::error::svc/src/abi.ts is stale. Run 'cd svc && bun run scripts/generate-abi.ts' and commit the result."
             exit 1
           fi

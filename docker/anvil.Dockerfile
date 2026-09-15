@@ -13,7 +13,12 @@ FROM ghcr.io/foundry-rs/foundry:v1.8.1@sha256:0c00cb0bda1ab1b91c9a6bf60f4c76c09c
 USER root
 RUN mkdir -p /state && chown 1000:1000 /state
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# The deploy one-shot runs from this same image (it needs forge and cast). COPIED
+# rather than bind-mounted: the image is then self-contained, and a compose file
+# that mounts a script over a path is a compose file where the script and the
+# image can disagree about what is there.
+COPY deploy-once.sh /usr/local/bin/deploy-once.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/deploy-once.sh
 USER 1000
 
 EXPOSE 8545

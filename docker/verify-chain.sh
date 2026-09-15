@@ -15,11 +15,30 @@ RPC=${RPC:-http://127.0.0.1:8545}
 # it for a secret: the real ANVIL_MNEMONIC lives in the hub .env (spec S10) and
 # is generated with `cast wallet new-mnemonic`.
 MNEMONIC=${ANVIL_MNEMONIC:-"test test test test test test test test test test test junk"}
-CONTRACTS_DIR="$(cd "$(dirname "$0")/../contracts" && pwd)"
+# RESOLVED BEFORE ANY `cd`, both of them. `$0` is relative when the script is
+# invoked as `./docker/verify-chain.sh` - which is what the header tells you to
+# do - and the deploy section cd's into contracts/, after which
+# `$(dirname "$0")` names a directory that does not exist. The sibling script it
+# needs was then unfindable, and only in the one invocation the header
+# documents.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CONTRACTS_DIR="$(cd "$HERE/../contracts" && pwd)"
 
 step() { printf '\n=== %s\n' "$1"; }
-cleanup() { docker rm -f "$NAME" "$NAME-noq" >/dev/null 2>&1 || true; docker volume rm "$VOLUME" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$NAME" "$NAME-noq" "$NAME-argv" "$NAME-argv-control" >/dev/null 2>&1 || true; docker volume rm "$VOLUME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+
+# THE IMAGE MUST EXIST FIRST. Without it the two leading checks - "refuses
+# without a mnemonic", "refuses a truncated phrase" - PASS VACUOUSLY: `docker
+# run` fails because there is nothing to run, and a check that asserts a
+# non-zero exit cannot tell that from the refusal it is testing. The first two
+# rows of this script would report a working guard on an image that does not
+# exist.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+  echo "FAIL: no image $IMAGE - build it first:"
+  echo "  docker build -t $IMAGE docker -f docker/anvil.Dockerfile"
+  exit 1
+}
 
 cleanup
 rm -f "$CONTRACTS_DIR/../deployments/local.json"
@@ -73,7 +92,13 @@ cat > "$CONTRACTS_DIR/../deployments/manifest.json" <<'MANIFEST_JSON'
   ]
 }
 MANIFEST_JSON
-forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|Compiler run|ONCHAIN EXECUTION|Error" | head -10
+# ALLOW_FRESH_DEPLOY and the PROMOTION are what the container's one-shot does;
+# this script drives `forge script` directly, so it has to do both itself. The
+# script writes local.json.pending and never local.json - a simulation must not
+# be able to hand the rest of the system a manifest of contracts nobody mined.
+ALLOW_FRESH_DEPLOY=1 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|Compiler run|ONCHAIN EXECUTION|Error" | head -10
+[ -f ../deployments/local.json ] && { echo "FAIL: the script wrote local.json; promotion is the caller's"; exit 1; }
+mv ../deployments/local.json.pending ../deployments/local.json
 cat ../deployments/local.json
 
 VEE=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='token'][0]['address'])")
@@ -89,6 +114,10 @@ echo "resolve(treasury.play): $resolve_before"
 
 step "second run is idempotent (must NOT redeploy)"
 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast 2>&1 | grep -E "Deploy:|nothing to do" | head -5
+# THE SKIP PATH WRITES NOTHING, which is the direct statement of "deployed
+# nothing new" - stronger than comparing addresses, because CREATE2 with the
+# same salt and init code gives the same address either way.
+[ -f ../deployments/local.json.pending ] && { echo "FAIL: the second run wrote a manifest"; exit 1; }
 VEE2=$(python3 -c "import json;print([m for m in json.load(open('../deployments/local.json'))['modules'] if m['kind']=='token'][0]['address'])")
 [ "$VEE" = "$VEE2" ] || { echo "FAIL: token address changed: $VEE -> $VEE2"; exit 1; }
 echo "token address unchanged: $VEE2"
@@ -98,14 +127,59 @@ step "the OTHER idempotence direction: local.json gone, chain intact (must REFUS
 # outlive the other. Without this guard the script below deploys a SECOND token
 # and writes it over the file, orphaning the first with every balance in it.
 mv ../deployments/local.json /tmp/local.json.hidden
+# WITHOUT the flag, which is the whole point: the one-shot sets it only on a
+# volume that has never held a deployment, and this volume has.
 if forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast >/tmp/redeploy.log 2>&1; then
   mv /tmp/local.json.hidden ../deployments/local.json
   echo "FAIL: redeployed with no local.json - the live token has been orphaned"; exit 1
 fi
-grep -oE "refusing to redeploy[^\"]*" /tmp/redeploy.log | head -1
+# ASSERTED, NOT GREPPED FOR ITS EXIT STATUS. Under `set -e` a grep that finds
+# nothing kills the script with no FAIL line at all - so a CHANGED REFUSAL
+# MESSAGE looks identical to a crash, on correct behaviour. Capture, test, and
+# say which.
+refusal=$(grep -oE "Deploy: refusing to deploy with no [^\"]*" /tmp/redeploy.log | head -1 || true)
+if [ -z "$refusal" ]; then
+  echo "FAIL: it refused, but not with the no-manifest message. What it said:"
+  grep -oE "Deploy: [^\"]*" /tmp/redeploy.log | head -3
+  exit 1
+fi
+echo "$refusal"
 [ -f ../deployments/local.json ] && { echo "FAIL: it wrote a local.json anyway"; exit 1; }
-echo "refused, and wrote no local.json"
+[ -f ../deployments/local.json.pending ] && { echo "FAIL: it wrote a pending manifest anyway"; exit 1; }
+echo "refused, and wrote nothing"
 mv /tmp/local.json.hidden ../deployments/local.json
+
+step "a run WITHOUT --broadcast leaves the manifest alone (finding 6)"
+# The reviewer's probe. `forge script` simulates when --broadcast is absent,
+# computing real CREATE2 addresses for contracts it never mines - so a
+# simulation that wrote local.json handed every service downstream a manifest of
+# contracts that do not exist.
+before=$(cat ../deployments/local.json)
+ALLOW_FRESH_DEPLOY=1 forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" >/tmp/simulate.log 2>&1 || true
+[ "$(cat ../deployments/local.json)" = "$before" ] || { echo "FAIL: a simulation changed local.json"; exit 1; }
+rm -f ../deployments/local.json.pending
+echo "local.json unchanged by a simulated run"
+
+step "the one-shot never puts the mnemonic on a command line (finding 25)"
+# THE GATING TEST IS docker/test-mnemonic-argv.sh, which stubs `cast` and needs
+# no Docker at all - deterministic, and the thing CI could run.
+#
+# What follows is a NON-GATING VIEW of the same property through the real image,
+# kept because it is the only place the container's own process table is
+# visible. It samples /proc via `docker top`, and a process that exits in
+# milliseconds may not be caught either way - which is exactly why it does not
+# gate: an unobserved run here would otherwise read as a pass.
+sh "$HERE/test-mnemonic-argv.sh" || { echo "FAIL: the argv test failed"; exit 1; }
+
+docker run -d --rm --name "$NAME-argv" --entrypoint /bin/sh "$IMAGE" \
+  -c "umask 077; f=\$(mktemp); printf '%s' '$MNEMONIC' > \$f; cast wallet private-key --mnemonic \$f >/dev/null; sleep 3" >/dev/null
+sleep 1
+if docker top "$NAME-argv" -o args 2>/dev/null | grep -q "junk"; then
+  docker rm -f "$NAME-argv" >/dev/null 2>&1 || true
+  echo "FAIL: the phrase is on the command line in the real image"; exit 1
+fi
+docker rm -f "$NAME-argv" >/dev/null 2>&1 || true
+echo "view: nothing observed on the container's argv (non-gating; see the test above)"
 
 step "the startup banner does not leak the treasury key"
 # anvil prints the mnemonic and every private key unless -q. Account 0 is the

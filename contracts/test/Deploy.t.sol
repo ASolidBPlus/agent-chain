@@ -24,12 +24,26 @@ contract DeployTest is Test {
 
     function setUp() public {
         treasury = vm.addr(KEY);
-        vm.setEnv("DEPLOYER_PRIVATE_KEY", vm.toString(KEY));
-        runId = block.timestamp;
+        // NO `vm.setEnv` HERE ANY MORE. Every input `deploy()` needs is a
+        // parameter; `run()` is the only thing that reads the environment. That
+        // is what lets a key-rotation case be a different ARGUMENT rather than
+        // a whole forge process - `vm.setEnv` is process-wide and forge runs
+        // test contracts in parallel.
+        // UNIQUE PER RUN, not per second. `block.timestamp` is the same for two
+        // runs in the same second, so a FAILING run - which leaves its directory
+        // behind, because `_clean` never reaches - fed the next run a local.json
+        // written by a DIFFERENT manifest. That surfaces as the derivation
+        // check refusing "a file that does not describe this deployment", which
+        // reads exactly like a real defect in the code under test.
+        runId = vm.randomUint();
     }
 
     function _dir(string memory name) internal returns (string memory) {
         string memory d = string.concat("../deployments/test-", name, "-", vm.toString(runId));
+        // A LEFTOVER FROM A FAILED RUN IS NOT A FIXTURE. Even with a unique run
+        // id this costs nothing and removes the whole class: whatever is here,
+        // this test did not put it here.
+        if (vm.exists(d)) vm.removeDir(d, true);
         vm.createDir(d, true);
         return d;
     }
@@ -41,11 +55,46 @@ contract DeployTest is Test {
     function _clean(string memory dir) internal {
         vm.removeFile(string.concat(dir, "/manifest.json"));
         if (vm.exists(string.concat(dir, "/local.json"))) vm.removeFile(string.concat(dir, "/local.json"));
+        // A refusal can leave a .pending behind - the container's script deletes
+        // one before every run for the same reason, so a failed run cannot hand
+        // the next one a manifest describing a deployment that never happened.
+        if (vm.exists(string.concat(dir, "/local.json.pending"))) {
+            vm.removeFile(string.concat(dir, "/local.json.pending"));
+        }
         vm.removeDir(dir, true);
     }
 
     function _example(string memory name) internal view returns (string memory) {
         return vm.readFile(string.concat("../deployments/examples/", name));
+    }
+
+    /// What `docker/deploy-once.sh` does after a broadcast exits 0: move the
+    /// manifest the script wrote into place.
+    ///
+    /// THE TESTS PROMOTE EXPLICITLY rather than the script writing local.json
+    /// directly, because that split is the finding. `forge script` simulates
+    /// before it broadcasts and will simulate ALONE when `--broadcast` is
+    /// absent, computing real addresses for contracts it never mines - so the
+    /// script writes `.pending` and only a successful broadcast promotes it. A
+    /// test that read local.json straight after `deploy()` would be asserting on
+    /// a file the production path does not write at that moment.
+    /// Returns true if there was something to promote. NO .pending IS NOT AN
+    /// ERROR: the skip path writes nothing, and the container's script says
+    /// "nothing to promote" rather than failing. A helper that insisted on a
+    /// file would make the idempotent second run look like a broken deploy.
+    function _promote(string memory dir) internal returns (bool) {
+        string memory pending = string.concat(dir, "/local.json.pending");
+        if (!vm.exists(pending)) return false;
+        vm.writeFile(string.concat(dir, "/local.json"), vm.readFile(pending));
+        vm.removeFile(pending);
+        return true;
+    }
+
+    /// Deploy and promote, which together are one successful run of the
+    /// container's one-shot.
+    function _deployed(Deploy d, string memory dir, string memory supply) internal returns (bool) {
+        d.deploy(dir, supply, "1", KEY);
+        return _promote(dir);
     }
 
     /// Constructed BEFORE any `vm.expectRevert`, never inline with it.
@@ -58,6 +107,483 @@ contract DeployTest is Test {
         return new Deploy();
     }
 
+    // ── finding 8: no local.json is a question, not an inference ────────────
+
+    /// The absent-file path refuses without the flag, and the message names it.
+    ///
+    /// THE REFUSAL IS THE FEATURE. A deployment with no manifest of its own
+    /// cannot tell whether the chain already holds modules, so it asks the
+    /// operator instead of guessing - and the guess it used to make, the
+    /// deployer's nonce, was wrong in both directions: a fresh chain whose
+    /// deployer had sent one transaction refused a safe deploy, and a chain
+    /// deployed from a DIFFERENT key read as untouched, which is the only case
+    /// worth refusing.
+    function test_NoLocalJsonRefusesWithoutTheFlag() public {
+        string memory dir = _dir("fresh-refuse");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        vm.expectRevert(bytes(_freshRefusal(dir)));
+        // PASSED, NOT UNSET. `vm.setEnv` writes a process-wide variable and
+        // forge runs test contracts in parallel, so unsetting it here unset it
+        // for every suite running beside this one - measured, six unrelated
+        // deploy tests failed with this refusal. The flag is a parameter for
+        // exactly that reason; the env read lives in `run()`.
+        d.deploy(dir, "", "", KEY);
+
+        // Nothing was written: the refusal happens before any broadcast.
+        assertFalse(vm.exists(string.concat(dir, "/local.json")), "local.json must not exist");
+        _clean(dir);
+    }
+
+    /// EXACTLY "1", not any truthy-looking value. `ALLOW_FRESH_DEPLOY=0` meaning
+    /// "yes" is what a permissive reading would give, and an operator who wrote
+    /// 0 meant the opposite of what they would have got.
+    function test_TheFlagIsExactlyOne() public {
+        string memory dir = _dir("fresh-flag-strict");
+        _write(dir, _example("token-and-names.json"));
+
+        for (uint256 i = 0; i < 4; i++) {
+            string memory value = i == 0 ? "0" : i == 1 ? "true" : i == 2 ? "yes" : "  1";
+            Deploy d = _script();
+            vm.expectRevert(bytes(_freshRefusal(dir)));
+            d.deploy(dir, "", value, KEY);
+        }
+
+        // ...and the control: the exact string deploys, or the loop above would
+        // pass against a build that refused everything.
+        Deploy ok = _script();
+        _deployed(ok, dir, "");
+        assertTrue(vm.exists(string.concat(dir, "/local.json")), "local.json should exist");
+        _clean(dir);
+    }
+
+    function _freshRefusal(string memory dir) internal pure returns (string memory) {
+        return string.concat(
+            "Deploy: refusing to deploy with no ",
+            dir,
+            "/local.json. A fresh deployment on a chain that already has modules would orphan them ",
+            "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
+            "state that this chain has nothing to orphan."
+        );
+    }
+
+    // ── finding 6: a simulation must never touch the manifest ───────────────
+
+    /// The script writes `.pending` and NOTHING ELSE. Promotion is the caller's,
+    /// conditional on a broadcast that actually succeeded.
+    ///
+    /// The reviewer's probe: `forge script` simulates before it broadcasts and
+    /// will simulate ALONE when `--broadcast` is absent, computing real CREATE2
+    /// addresses for contracts it never mines. Writing local.json from inside
+    /// the script therefore handed every service downstream a manifest of
+    /// contracts that do not exist, with nothing to distinguish it from a real
+    /// deploy. The script cannot tell the two apart from inside; the exit status
+    /// of the broadcast is the fact, and only the caller has it.
+    function test_TheScriptWritesPendingAndNeverTheManifest() public {
+        string memory dir = _dir("pending-only");
+        _write(dir, _example("token-and-names.json"));
+
+        Deploy d = _script();
+        d.deploy(dir, "", "1", KEY);
+
+        assertTrue(
+            vm.exists(string.concat(dir, "/local.json.pending")),
+            "the script should write local.json.pending"
+        );
+        assertFalse(
+            vm.exists(string.concat(dir, "/local.json")),
+            "the script must NOT write local.json - promotion is the caller's"
+        );
+
+        // ...and after the caller promotes, the manifest is exactly what the
+        // script wrote. Promotion moves bytes; it does not re-derive anything.
+        string memory pending = vm.readFile(string.concat(dir, "/local.json.pending"));
+        _promote(dir);
+        assertEq(vm.readFile(string.concat(dir, "/local.json")), pending, "promotion must not alter the file");
+        assertFalse(vm.exists(string.concat(dir, "/local.json.pending")), "the pending file should be consumed");
+
+        _clean(dir);
+    }
+
+    // ── findings 7 / 17 / 18 / 19: the manifest is a cache, not an authority ─
+
+    /// A file written for ANOTHER CHAIN is refused, and says which.
+    function test_ACacheFromAnotherChainIsRefused() public {
+        string memory dir = _dir("chainid");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        // `vm.writeJson` at a key, not a string replace: the file is
+        // PRETTY-PRINTED, so `"chainId":31337` does not appear in it and a
+        // replace would silently do nothing - leaving a test that passes
+        // against an unmodified file.
+        vm.writeJson("1", path, ".chainId");
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ", path, " was written for chain 1; this is chain ", vm.toString(block.chainid)
+                )
+            )
+        );
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    /// A ROTATED DEPLOYER KEY is a different treasury, and the recorded modules'
+    /// admin roles belong to the old one - so continuing would produce a
+    /// deployment nobody present can administer.
+    function test_ACacheFromAnotherTreasuryIsRefused() public {
+        string memory dir = _dir("treasury");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address other = vm.addr(0xB0B);
+        vm.writeFile(path, vm.replace(json, vm.toString(treasury), vm.toString(other)));
+
+        Deploy again = _script();
+        // The FIRST refusal is the treasury one: it is checked before any
+        // address is derived, because a wrong treasury makes every derivation
+        // wrong too and the useful message is the cause, not the symptom.
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written by treasury ",
+                    vm.toString(other),
+                    "; this deployer is ",
+                    vm.toString(treasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            )
+        );
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    /// AN ADDRESS THIS MANIFEST COULD NOT PRODUCE is refused by derivation.
+    /// This is the check that makes the file a cache: before it, the script
+    /// believed whatever address the file named and looked only for code there.
+    function test_ATamperedAddressIsRefused() public {
+        string memory dir = _dir("tampered");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address real = vm.parseJsonAddress(json, ".modules[0].address");
+        // Somewhere with no code, so the failure is the DERIVATION and not the
+        // codehash check one branch further on.
+        address fake = address(0xDEAD);
+        vm.writeFile(path, vm.replace(json, vm.toString(real), vm.toString(fake)));
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play is recorded at ",
+                    vm.toString(fake),
+                    " but this manifest derives ",
+                    vm.toString(real),
+                    " - the file does not describe this deployment"
+                )
+            )
+        );
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    /// A RECORDED CODEHASH THAT NO LONGER MATCHES is refused BY NAME, with both
+    /// hashes - never a bare revert from inside `new`.
+    function test_AChangedCodehashIsRefusedByName() public {
+        string memory dir = _dir("codehash");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address at = vm.parseJsonAddress(json, ".modules[0].address");
+        bytes32 recorded = vm.parseJsonBytes32(json, ".modules[0].codehash");
+        bytes32 wrong = keccak256("not this contract");
+        vm.writeFile(path, vm.replace(json, vm.toString(recorded), vm.toString(wrong)));
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play derives ",
+                    vm.toString(at),
+                    ", which already holds code with codehash ",
+                    vm.toString(at.codehash),
+                    "; the manifest records ",
+                    vm.toString(wrong)
+                )
+            )
+        );
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    /// A LEGACY FILE - no codehash field - is verified by derivation and
+    /// treasury, then REWRITTEN with codehashes. A promotion, not a pass.
+    function test_ALegacyCacheIsVerifiedThenPromoted() public {
+        string memory dir = _dir("legacy");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        bytes32 recorded = vm.parseJsonBytes32(json, ".modules[0].codehash");
+        // BUILT BY HAND rather than stripped by a string replace. The file is
+        // pretty-printed, so the field's on-disk spelling carries newlines and
+        // indentation that a naive replace misses - and a fixture that failed to
+        // strip the field would leave this test asserting the promotion path
+        // while exercising the ordinary one. The assertion below is what says
+        // the fixture is the shape this test is named for.
+        vm.writeFile(
+            path,
+            string.concat(
+                '{"schema":1,"chainId":',
+                vm.toString(block.chainid),
+                ',"treasury":"',
+                vm.toString(treasury),
+                '","modules":[{"kind":"token","key":"play","contract":"Token","address":"',
+                vm.toString(vm.parseJsonAddress(json, ".modules[0].address")),
+                '"},{"kind":"names","contract":"NameRegistry","address":"',
+                vm.toString(vm.parseJsonAddress(json, ".modules[1].address")),
+                '","tld":"play"}]}'
+            )
+        );
+        assertFalse(vm.keyExistsJson(vm.readFile(path), ".modules[0].codehash"), "the fixture must lack it");
+
+        Deploy again = _script();
+        again.deploy(dir, "", "1", KEY);
+        // Promotion writes through the same pending/promote path as a deploy.
+        _promote(dir);
+
+        string memory after_ = vm.readFile(string.concat(dir, "/local.json"));
+        assertTrue(vm.keyExistsJson(after_, ".modules[0].codehash"), "the promotion should add codehashes");
+        assertEq(vm.parseJsonBytes32(after_, ".modules[0].codehash"), recorded, "and the right ones");
+        _clean(dir);
+    }
+
+    /// A WIPED CHAIN WITH A SURVIVING MANIFEST: every address is empty, so every
+    /// module is deployed again - and lands back on the SAME addresses, because
+    /// CREATE2 derives them from the manifest and not from a nonce.
+    ///
+    /// This is the reachable half of per-module planning. ./deployments is a
+    /// bind mount and chain-state is a named volume, so the file outliving the
+    /// chain is ordinary.
+    function test_AWipedChainRedeploysToTheSameAddresses() public {
+        string memory dir = _dir("wiped");
+        // A ZERO-SUPPLY token, because `vm.etch` replaces CODE and leaves
+        // STORAGE. A real wiped volume takes the whole account; the closest this
+        // harness can get is an empty-code account with its nonce reset, and a
+        // token that minted on its first deployment would mint again on top of
+        // surviving balances and trip the seeding assertion. The planner's
+        // decision is what this test is about, and it is the same either way.
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY","initialSupply":"0"},'
+            '{"kind":"names","tld":"play"}]}'
+        );
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory json = vm.readFile(string.concat(dir, "/local.json"));
+        address token = vm.parseJsonAddress(json, ".modules[0].address");
+        address registry = vm.parseJsonAddress(json, ".modules[1].address");
+        // A wiped chain-state volume takes the whole account, not just its code:
+        // `vm.etch(a, "")` alone leaves the account with its nonce, and CREATE2
+        // answers CreateCollision to an address that has ever been used.
+        vm.etch(token, "");
+        vm.etch(registry, "");
+        vm.resetNonce(token);
+        vm.resetNonce(registry);
+
+        Deploy again = _script();
+        assertTrue(_deployed(again, dir, ""), "a wiped chain redeploys and writes a manifest");
+
+        string memory after_ = vm.readFile(string.concat(dir, "/local.json"));
+        assertEq(vm.parseJsonAddress(after_, ".modules[0].address"), token, "the token returns to its address");
+        assertEq(vm.parseJsonAddress(after_, ".modules[1].address"), registry, "and so does the registry");
+        assertEq(
+            NameRegistry(registry).resolve("treasury.play"), treasury, "the treasury name is registered again"
+        );
+        _clean(dir);
+    }
+
+    /// A SQUATTED ADDRESS is refused BY NAME, with the codehash, rather than by
+    /// a CreateCollision from inside `new` that says only that a creation
+    /// failed.
+    ///
+    /// This is the other reachable half: a fresh deployment onto a chain where
+    /// something already occupies an address this manifest derives.
+    function test_ASquattedAddressIsRefusedByName() public {
+        string memory dir = _dir("squat");
+        _write(dir, _example("token-only.json"));
+
+        // Derive where the token will go, and put something else there first.
+        Deploy probe = _script();
+        _deployed(probe, dir, "");
+        address taken = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        _clean(dir);
+
+        string memory dir2 = _dir("squat2");
+        _write(dir2, _example("token-only.json"));
+        vm.etch(taken, hex"60006000fd");
+
+        Deploy d = _script();
+        // No cache, so the message is the one for an occupied address nobody
+        // recorded - the case that would otherwise be a bare CreateCollision.
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play derives ",
+                    vm.toString(taken),
+                    ", which already holds code with codehash ",
+                    vm.toString(taken.codehash),
+                    " and no manifest records it - another deployment is using this address"
+                )
+            )
+        );
+        d.deploy(dir2, "", "1", KEY);
+        _clean(dir2);
+    }
+
+    // ── finding 20, residual B: the skip path asserts too ───────────────────
+
+    /// ROLES ARE STORAGE, and no codehash can see them. A second run over an
+    /// intact chain used to answer "nothing to do" without looking at who
+    /// administers the modules it found.
+    ///
+    /// The reviewer's case: a treasury that has handed DEFAULT_ADMIN to someone
+    /// else. The contracts are right, at the right addresses, with the right
+    /// code - and administered by a stranger. Every compose restart said
+    /// nothing was wrong.
+    function test_TheSkipPathNoticesRolesHandedToAStranger() public {
+        string memory dir = _dir("roles-skip");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        address token = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        address stranger = vm.addr(0xBADA55);
+
+        // The treasury gives its admin away and keeps nothing. Done as the
+        // treasury, because that is who could actually do it.
+        vm.startPrank(treasury);
+        Token(token).grantRole(Token(token).DEFAULT_ADMIN_ROLE(), stranger);
+        Token(token).renounceRole(Token(token).DEFAULT_ADMIN_ROLE(), treasury);
+        vm.stopPrank();
+
+        // Nothing about the CODE changed, so the cache is entirely happy: same
+        // address, same codehash, same chain, same treasury in the file.
+        Deploy again = _script();
+        vm.expectRevert(bytes("Deploy: treasury lacks DEFAULT_ADMIN_ROLE"));
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    /// The same path, for a role this script GRANTS rather than one the
+    /// constructor sets - so the two halves of finding 20 are both exercised on
+    /// the skip path and not only the one that happens to be first.
+    function test_TheSkipPathNoticesARenouncedMinter() public {
+        string memory dir = _dir("minter-skip");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        address token = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        // THE ROLE IS READ BEFORE THE PRANK. `vm.prank` applies to the NEXT
+        // CALL, and `MINTER_ROLE()` is a call - so `vm.prank(t);
+        // c.renounceRole(c.MINTER_ROLE(), t)` spends the prank on the getter and
+        // runs the renounce unpranked, which OZ answers with
+        // AccessControlBadConfirmation. The same shape as `vm.expectRevert`
+        // arming against a constructor, which this file already warns about one
+        // helper up.
+        bytes32 minter = Token(token).MINTER_ROLE();
+        vm.prank(treasury);
+        Token(token).renounceRole(minter, treasury);
+
+        Deploy again = _script();
+        vm.expectRevert(bytes("Deploy: treasury lacks MINTER_ROLE"));
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    // ── the rotation cases, now possible in ONE forge process ───────────────
+
+    /// A ROTATED DEPLOYER KEY over an existing deployment is refused, and the
+    /// refusal names both treasuries.
+    ///
+    /// This test is the reason the key became a parameter. It needed its own
+    /// forge process while `deploy()` read `DEPLOYER_PRIVATE_KEY` from the
+    /// environment, because `vm.setEnv` is process-wide and forge runs test
+    /// contracts in parallel - the same trap that broke six unrelated tests
+    /// when `ALLOW_FRESH_DEPLOY` was read that way. As an argument, rotation is
+    /// just a different argument.
+    function test_ARotatedKeyIsRefusedOverAnExistingDeployment() public {
+        string memory dir = _dir("rotate");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        uint256 newKey = 0xB0B;
+        address newTreasury = vm.addr(newKey);
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ",
+                    dir,
+                    "/local.json was written by treasury ",
+                    vm.toString(treasury),
+                    "; this deployer is ",
+                    vm.toString(newTreasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            )
+        );
+        again.deploy(dir, "", "1", newKey);
+        _clean(dir);
+    }
+
+    /// AND THE CASE THAT MOTIVATED THE WHOLE FRESH-DEPLOY RULE: a rotated key
+    /// with the manifest GONE. Every derived address moves with the treasury -
+    /// it is a constructor argument - so nothing is occupied, the foreign-code
+    /// check has nothing to see, and without a guard this deploys a second set
+    /// beside the live one with the old token still holding the supply.
+    ///
+    /// The guard that stops it is the flag, and the container decides the flag
+    /// from the chain's block height rather than from the filesystem. Here,
+    /// where there is no chain to ask, the flag is simply absent.
+    function test_ARotatedKeyWithNoManifestRefusesWithoutTheFlag() public {
+        string memory dir = _dir("rotate-nomanifest");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+        vm.removeFile(string.concat(dir, "/local.json"));
+
+        Deploy again = _script();
+        vm.expectRevert(bytes(_freshRefusal(dir)));
+        again.deploy(dir, "", "", 0xB0B);
+
+        assertFalse(vm.exists(string.concat(dir, "/local.json.pending")), "nothing should be written");
+        _clean(dir);
+    }
+
     // ── the four shipped examples ───────────────────────────────────────────
 
     function test_TokenAndNames() public {
@@ -65,7 +591,7 @@ contract DeployTest is Test {
         _write(dir, _example("token-and-names.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonUint(out, ".schema"), 1);
@@ -102,7 +628,7 @@ contract DeployTest is Test {
         _write(dir, _example("token-only.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonString(out, ".modules[0].kind"), "token");
@@ -118,7 +644,7 @@ contract DeployTest is Test {
         _write(dir, _example("names-only.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonString(out, ".modules[0].kind"), "names");
@@ -135,7 +661,7 @@ contract DeployTest is Test {
         _write(dir, _example("two-tokens.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonString(out, ".modules[0].key"), "play");
@@ -178,7 +704,7 @@ contract DeployTest is Test {
         string memory dir = _dir("create2");
         _write(dir, _example("token-and-names.json"));
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         address token = vm.parseJsonAddress(out, ".modules[0].address");
@@ -213,7 +739,7 @@ contract DeployTest is Test {
         Deploy d = _script();
 
         uint256 snap = vm.snapshotState();
-        d.deploy(dirA, "");
+        _deployed(d, dirA, "");
         string memory first = vm.readFile(string.concat(dirA, "/local.json"));
         address tokenA = vm.parseJsonAddress(first, ".modules[0].address");
         address registryA = vm.parseJsonAddress(first, ".modules[1].address");
@@ -221,7 +747,7 @@ contract DeployTest is Test {
 
         vm.revertToState(snap);
 
-        d.deploy(dirA, "");
+        _deployed(d, dirA, "");
         string memory second = vm.readFile(string.concat(dirA, "/local.json"));
         assertEq(vm.parseJsonAddress(second, ".modules[0].address"), tokenA);
         assertEq(vm.parseJsonAddress(second, ".modules[1].address"), registryA);
@@ -235,7 +761,7 @@ contract DeployTest is Test {
         string memory dir = _dir("absent");
         Deploy d = _script();
         vm.expectRevert(bytes(string.concat("Deploy: manifest: none found at ", dir, "/manifest.json; a deployment must declare its modules")));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         vm.removeDir(dir, true);
     }
 
@@ -244,7 +770,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":2,"modules":[{"kind":"names","tld":"play"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest schema 2 unsupported"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -253,7 +779,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: at least one module is required"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -262,7 +788,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"oracle"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: unknown kind "oracle"'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -274,7 +800,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate key "play"'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -286,7 +812,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate symbol "PLAY"'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -295,7 +821,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"names","tld":"a"},{"kind":"names","tld":"b"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: more than one names module"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -304,7 +830,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"token","key":"play","name":"A","symbol":"play"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: token "play" has an invalid symbol'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -313,7 +839,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"token","key":"play","name":"A","symbol":"AAA","initialSupply":"1.5"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: token "play" has an invalid initialSupply'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -322,7 +848,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"names","tld":"PLAY"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: names module has an invalid tld"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -331,7 +857,7 @@ contract DeployTest is Test {
         _write(dir, _example("token-only.json"));
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: INITIAL_SUPPLY_VEE is retired; put initialSupply in the manifest"));
-        d.deploy(dir, "1000");
+        d.deploy(dir, "1000", "1", KEY);
         _clean(dir);
     }
 
@@ -343,11 +869,17 @@ contract DeployTest is Test {
         _write(dir, _example("token-and-names.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        assertTrue(_deployed(d, dir, ""), "the first run should write a manifest");
         string memory first = vm.readFile(string.concat(dir, "/local.json"));
         address firstToken = vm.parseJsonAddress(first, ".modules[0].address");
 
-        d.deploy(dir, "");
+        // THE SKIP PATH WRITES NOTHING, and that is the direct statement of
+        // "deployed nothing new". Comparing addresses is weaker than it looks:
+        // CREATE2 with the same salt and init code gives the SAME address, so a
+        // run that really did redeploy would either revert or - if it somehow
+        // did not - produce an identical address and pass. No .pending is a
+        // fact about what this run did, not about what it would have produced.
+        assertFalse(_deployed(d, dir, ""), "the second run should write nothing");
         string memory second = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonAddress(second, ".modules[0].address"), firstToken);
 
@@ -361,14 +893,20 @@ contract DeployTest is Test {
         string memory dir = _dir("mismatch");
         _write(dir, _example("token-and-names.json"));
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         _write(dir, _example("token-only.json"));
         d = _script();
         vm.expectRevert(
-            bytes("Deploy: local.json declares modules play,names; manifest asks for play - redeploy on a fresh chain or fix the manifest")
+            // QUALIFIED BY KIND on both sides (finding 18). `_effectiveKey` collapses a
+            // token to its bare key and a singleton to its bare kind, so a token
+            // keyed "names" and the names module both reduce to "names". The
+            // manifest's own uniqueness check refuses such a manifest - but the
+            // cache is a FILE, and a file is not required to have come from a
+            // manifest this script accepted.
+            bytes("Deploy: local.json declares modules token:play,names:; manifest asks for token:play - redeploy on a fresh chain or fix the manifest")
         );
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
 
         _clean(dir);
     }
@@ -380,7 +918,7 @@ contract DeployTest is Test {
         _write(dir, _example("two-tokens.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         assertEq(vm.parseJsonString(out, ".modules[3].kind"), "converter");
@@ -448,7 +986,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: pair play->gold x gold->play mints value"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -463,7 +1001,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: converter pair target "gold" is not a token key'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -478,7 +1016,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: converter pair "play" converts to itself'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -495,7 +1033,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: more than one converter module"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -510,7 +1048,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: converter has no pairs"));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -568,7 +1106,7 @@ contract DeployTest is Test {
         );
 
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         // local.json entry shape (§8.8): kind, key, the Solidity contract name,
@@ -621,7 +1159,7 @@ contract DeployTest is Test {
             )
         );
         Deploy d = _script();
-        d.deploy(dir, "");
+        _deployed(d, dir, "");
 
         string memory out = vm.readFile(string.concat(dir, "/local.json"));
         Fixture a = Fixture(vm.parseJsonAddress(out, ".modules[0].address"));
@@ -650,7 +1188,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: "@gold" is not deployed yet'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -665,7 +1203,7 @@ contract DeployTest is Test {
         vm.expectRevert(
             bytes('Deploy: manifest: constructor arg type "string" is not supported; use an initialiser function')
         );
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -677,7 +1215,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: no artifact for "NoSuchContract"'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -691,7 +1229,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate key "play"'));
-        d.deploy(dir, "");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 }

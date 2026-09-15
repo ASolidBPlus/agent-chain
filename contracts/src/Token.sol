@@ -147,10 +147,20 @@ contract Token is ERC20, AccessControl {
     /// can never move anyone else's money, and adding either would make it a
     /// second, weaker `transferFrom`.
     ///
-    /// @param intentId keccak256(bytes(<the caller's intent id string>)). ONE
-    /// derivation, used identically when chain-svc reserves the intent, when it
-    /// calls this, and when the sweep scans for it - three derivations would
-    /// give three answers to "did this land?".
+    /// @param intentId AN OPAQUE bytes32, chosen by the service at reservation
+    /// and passed through unchanged. THE CONTRACT NEVER DERIVES IT, and this
+    /// block used to state the derivation - `keccak256(bytes(<intent id>))` -
+    /// which made a caller's scheme read as a contract guarantee. It is neither
+    /// checked nor relied on here, so documenting it committed this file to a
+    /// decision taken entirely on the other side of the wire, and a change to
+    /// that scheme would have made the contract's own comment false with no
+    /// line of Solidity to notice.
+    ///
+    /// What the contract DOES require is that one value identifies one
+    /// reservation for everyone who looks - the reserver, the caller and the
+    /// sweep - because three answers to "did this land?" is the failure the
+    /// field exists to prevent. That is the service's invariant to keep; this
+    /// contract only carries the value.
     ///
     /// THIS CONTRACT DOES NOT DEDUPLICATE, and that is the design rather than an
     /// omission. Two calls with the same intentId both succeed and both emit.
