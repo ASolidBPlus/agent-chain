@@ -50,7 +50,30 @@ if [ ! -f "$MARKER" ] && [ ! -f "$LOCAL" ]; then
   ALLOW=1
 fi
 
-KEY=$(cast wallet private-key --mnemonic "$ANVIL_MNEMONIC")
+# THE PHRASE NEVER REACHES ARGV (finding 25).
+#
+# `cast wallet private-key --mnemonic "$ANVIL_MNEMONIC"` puts the treasury's
+# BIP-39 phrase in the process command line, where `docker top`, `ps` and
+# /proc/<pid>/cmdline all show it to anyone on the host - and a container's
+# cmdline is readable without entering the container at all. That is the one
+# secret in this system that can mint.
+#
+# `--mnemonic-stdin` DOES NOT EXIST in the pinned cast (v1.8.1) - checked, the
+# flag list has --mnemonic, --mnemonic-passphrase, --mnemonic-derivation-path
+# and --mnemonic-index and nothing that reads the phrase from a pipe. What
+# --mnemonic DOES accept is "the mnemonic phrase OR mnemonic file at the
+# specified path", so the phrase goes to a file and the PATH goes on argv.
+# Verified: both spellings derive the same key.
+#
+# The file is created with a 077 umask in the container's own filesystem and
+# removed on every exit path, including a failed deploy.
+umask 077
+MNEMONIC_FILE=$(mktemp)
+cleanup() { rm -f "$MNEMONIC_FILE"; }
+trap cleanup EXIT INT TERM
+printf '%s' "$ANVIL_MNEMONIC" > "$MNEMONIC_FILE"
+
+KEY=$(cast wallet private-key --mnemonic "$MNEMONIC_FILE")
 cd /contracts
 
 # `set -e` would exit here on a non-zero status, which is the wrong shape: a

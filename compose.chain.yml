@@ -49,7 +49,6 @@ services:
     volumes:
       - ./contracts:/contracts
       - ./deployments:/deployments
-      - ./docker/deploy-once.sh:/deploy-once.sh:ro
     # Account 0 of the mnemonic is the deployer and the treasury (spec S2), so
     # the key is derived in the script rather than being a second secret to keep
     # in step.
@@ -60,7 +59,7 @@ services:
     # that were never mined - which is more logic than a `command:` block can
     # carry reviewably, and it is also the file someone will run by hand when a
     # promotion fails.
-    entrypoint: ["/bin/sh", "/deploy-once.sh"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/deploy-once.sh"]
 
   chain-svc:
     build:
