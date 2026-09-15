@@ -1433,17 +1433,48 @@ export class Store {
   // --- outbox ------------------------------------------------------------
 
   /// @returns how many events were dropped to stay under the cap (0 normally).
+  /// FINDING 28. ONE TRANSACTION, and `chain.anomaly` rows are never evicted.
+  ///
+  /// Two faults in three statements. The insert, the count and the delete ran
+  /// separately, so two concurrent enqueues both counted a buffer that was
+  /// already over, both computed the same excess, and the second deleted rows
+  /// the first had already removed - evicting twice the overflow and taking
+  /// live events with it.
+  ///
+  /// And the eviction took the OLDEST row whatever it was. `chain.anomaly` is
+  /// the one event kind that means something went wrong - a double emission
+  /// under an intent this store reserved - and it is also, by construction, the
+  /// kind most likely to be sitting in a buffer that is overflowing, because
+  /// whatever produced the flood produced it too. The detector's whole output
+  /// was the first thing discarded.
+  ///
+  /// Anomalies are not exempt from the CAP, only from being chosen: if the
+  /// buffer is nothing but anomalies the delete removes none and the buffer
+  /// grows, which is the right failure - an operator with ten thousand
+  /// anomalies queued has a problem that silence would not fix.
   enqueueEvent(kind: string, payload: unknown): number {
-    this.db
-      .query(`INSERT INTO outbox (kind, payload, created_at) VALUES (?, ?, ?)`)
-      .run(kind, JSON.stringify(payload), Date.now());
+    return this.db.transaction((): number => {
+      this.db
+        .query(`INSERT INTO outbox (kind, payload, created_at) VALUES (?, ?, ?)`)
+        .run(kind, JSON.stringify(payload), Date.now());
 
-    const count = (this.db.query(`SELECT COUNT(*) AS n FROM outbox`).get() as { n: number }).n;
-    if (count <= MAX_BUFFERED_EVENTS) return 0;
+      const count = (this.db.query(`SELECT COUNT(*) AS n FROM outbox`).get() as { n: number }).n;
+      if (count <= MAX_BUFFERED_EVENTS) return 0;
 
-    const excess = count - MAX_BUFFERED_EVENTS;
-    this.db.query(`DELETE FROM outbox WHERE id IN (SELECT id FROM outbox ORDER BY id ASC LIMIT ?)`).run(excess);
-    return excess;
+      const excess = count - MAX_BUFFERED_EVENTS;
+      const evicted = this.db
+        .query(
+          `DELETE FROM outbox WHERE id IN (
+             SELECT id FROM outbox WHERE kind != 'chain.anomaly' ORDER BY id ASC LIMIT ?
+           )`,
+        )
+        .run(excess);
+      // WHAT WAS ACTUALLY REMOVED, not what was asked for. With anomalies
+      // exempt the two can differ, and the caller logs this number - reporting
+      // an eviction that did not happen would send an operator looking for
+      // events that are still there.
+      return Number(evicted.changes);
+    })();
   }
 
   dueEvents(limit: number, now = Date.now()): OutboundEvent[] {

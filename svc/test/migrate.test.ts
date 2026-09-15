@@ -591,6 +591,45 @@ describe('the ledger lifetime control', () => {
     expect(() => assertLedgerLifetimeIntact({ ...wiped, acknowledged: true })).not.toThrow();
   });
 
+  // FINDING 21: releasing is not the same as going quiet. The flag lives in
+  // compose or an env file, so it stays set for every restart after the one it
+  // was typed for - a facilitator who acknowledged a wipe in October is running
+  // an unguarded store in March with nothing to remind them. That is the same
+  // shape as the refusal being routed around, arriving by a slower road.
+  it('warns every boot while the acknowledgement is set, naming the notice and the advice', () => {
+    const lines: string[] = [];
+    const warn = console.warn;
+    console.warn = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    try {
+      assertLedgerLifetimeIntact({ ...wiped, acknowledged: true });
+      assertLedgerLifetimeIntact({ ...wiped, acknowledged: true });
+    } finally {
+      console.warn = warn;
+    }
+    // EVERY boot, not the first: two calls, two lines.
+    expect(lines).toHaveLength(2);
+    // NAMING the constants rather than summarising them, so an operator reads
+    // the same sentences the refusal would have shown. Asserted by content, so
+    // a warning that said "acknowledged, carrying on" would fail.
+    expect(lines[0]).toContain(LEDGER_RESET_NOTICE);
+    expect(lines[0]).toContain(FREEZE_RECOVERY_ADVICE);
+  });
+
+  // THE CONTROL: a healthy store says nothing. Without it the row above passes
+  // on a build that warns on every boot of every store, which would train an
+  // operator to ignore the line that matters.
+  it('control: an intact ledger warns about nothing', () => {
+    const lines: string[] = [];
+    const warn = console.warn;
+    console.warn = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    try {
+      assertLedgerLifetimeIntact({ ...wiped, intentsEmpty: false });
+    } finally {
+      console.warn = warn;
+    }
+    expect(lines).toEqual([]);
+  });
+
   // The acknowledgement is the ONLY thing that releases a genuine wipe: a
   // mutant that returns early on any other conjunct alone would pass the tests
   // above and disable the control.

@@ -712,7 +712,29 @@ export class LedgerWipeError extends Error {
 /// the wipe, and a warning at startup is read by nobody. The legitimate reset
 /// is not obstructed - it IS the acknowledgement flag, one documented step.
 export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
-  if (facts.acknowledged) return;
+  if (facts.acknowledged) {
+    // FINDING 21: THE ACKNOWLEDGEMENT IS NOT A DISMISSAL, and it warns EVERY
+    // boot rather than the one it was typed for.
+    //
+    // It returned silently, so the flag's cost was paid once and then forgotten
+    // - and the flag lives in compose or in an env file, where it stays set for
+    // every restart afterwards. A facilitator who acknowledged a wipe in
+    // October is running an unguarded store in March with nothing to remind
+    // them, which is the same shape as the refusal this whole function replaced
+    // being routed around.
+    //
+    // It names the notice and the advice rather than summarising them, so the
+    // operator reads the same sentences the refusal would have shown - one
+    // place for what a wipe costs, which is why LEDGER_RESET_NOTICE is a
+    // constant at all.
+    console.warn(
+      `[chain-svc] LEDGER RESET ACKNOWLEDGED: this store starts without the idempotency and ` +
+        `retirement history a wipe removed. ${LEDGER_RESET_NOTICE}. ${FREEZE_RECOVERY_ADVICE}. ` +
+        `This warning repeats every boot for as long as the acknowledgement is set; clearing ` +
+        `it once the game is healthy is what makes the next wipe loud again.`,
+    );
+    return;
+  }
   if (!facts.intentsEmpty) return;
   // THE STORE IS STILL HERE. A store that survived the restart remembers the
   // wallets it spawned; a wiped one remembers nothing, because the file is

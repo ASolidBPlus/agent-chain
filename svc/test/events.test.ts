@@ -6,7 +6,8 @@ import { describe, it, expect } from 'bun:test';
 import { createServer, type Server } from 'node:http';
 import { EventTail } from '../src/events.ts';
 import { spendVia } from '../src/treasury.ts';
-import { Store } from '../src/store.ts';
+import { Store, MAX_BUFFERED_EVENTS } from '../src/store.ts';
+import type { Database } from 'bun:sqlite';
 import type { Chain } from '../src/chain.ts';
 import type { Config } from '../src/config.ts';
 import type { Abi } from 'viem';
@@ -1582,6 +1583,77 @@ describe('generic decoding', () => {
     const store = new Store(':memory:');
     await new EventTail({} as Config, chain, store).pollOnce();
     expect(asked).toBe(false);
+    store.close();
+  });
+});
+
+// FINDING 28: the buffer's eviction, and what it must never choose.
+//
+// `chain.anomaly` is the one event kind that means something went WRONG - a
+// double emission under an intent this store reserved. It is also, by
+// construction, the kind most likely to be in a buffer that is overflowing,
+// because whatever produced the flood produced it too. Evicting the oldest row
+// whatever it was made the detector's entire output the first thing discarded.
+describe('the outbox evicts, but never an anomaly', () => {
+  // Below the cap this path does not run at all, so the fixture has to fill it.
+  // Slow to write and fast to run: one transaction, 10k inserts.
+  function filled(store: Store, n: number): void {
+    const db = (store as unknown as { db: Database }).db;
+    db.transaction(() => {
+      const ins = db.query(`INSERT INTO outbox (kind, payload, created_at) VALUES (?, ?, ?)`);
+      for (let i = 0; i < n; i++) ins.run('chain.transfer', '{}', Date.now());
+    })();
+  }
+
+  it('keeps the anomaly and drops an ordinary event instead', () => {
+    const store = new Store(':memory:');
+    // The anomaly goes in FIRST, so it is the oldest row - the one the old
+    // eviction would have taken.
+    store.enqueueEvent('chain.anomaly', { kind: 'chain.anomaly', topic: '0xdead' });
+    filled(store, MAX_BUFFERED_EVENTS - 1);
+
+    // One more, which tips it over.
+    const evicted = store.enqueueEvent('chain.transfer', { kind: 'chain.transfer', txHash: '0x2' });
+    expect(evicted).toBe(1);
+
+    const db = (store as unknown as { db: Database }).db;
+    const anomalies = (db.query(`SELECT COUNT(*) AS n FROM outbox WHERE kind = 'chain.anomaly'`).get() as { n: number }).n;
+    // THE VALUE, not "greater than zero": the anomaly is still there, exactly
+    // once, and it was the oldest row in the buffer when the eviction ran.
+    expect(anomalies).toBe(1);
+    store.close();
+  });
+
+  // THE CONTROL: an ordinary oldest row IS evicted, so the row above cannot be
+  // passing because nothing is ever evicted.
+  it('control: an ordinary event at the front is evicted', () => {
+    const store = new Store(':memory:');
+    filled(store, MAX_BUFFERED_EVENTS);
+    const db = (store as unknown as { db: Database }).db;
+    const first = (db.query(`SELECT MIN(id) AS id FROM outbox`).get() as { id: number }).id;
+
+    expect(store.enqueueEvent('chain.transfer', { kind: 'chain.transfer', txHash: '0x3' })).toBe(1);
+
+    const stillThere = db.query(`SELECT 1 FROM outbox WHERE id = ?`).get(first);
+    expect(stillThere).toBeNull();
+    store.close();
+  });
+
+  // ANOMALIES ARE EXEMT FROM BEING CHOSEN, NOT FROM THE CAP. A buffer that is
+  // nothing but anomalies evicts none and grows - the right failure, because an
+  // operator with ten thousand anomalies queued has a problem silence would not
+  // fix, and the count returned says truthfully that nothing was removed.
+  it('reports zero rather than a number nobody removed, when only anomalies are there', () => {
+    const store = new Store(':memory:');
+    const db = (store as unknown as { db: Database }).db;
+    db.transaction(() => {
+      const ins = db.query(`INSERT INTO outbox (kind, payload, created_at) VALUES (?, ?, ?)`);
+      for (let i = 0; i < MAX_BUFFERED_EVENTS; i++) ins.run('chain.anomaly', '{}', Date.now());
+    })();
+
+    expect(store.enqueueEvent('chain.anomaly', { kind: 'chain.anomaly', topic: '0xbeef' })).toBe(0);
+    const n = (db.query(`SELECT COUNT(*) AS n FROM outbox`).get() as { n: number }).n;
+    expect(n).toBe(MAX_BUFFERED_EVENTS + 1);
     store.close();
   });
 });
