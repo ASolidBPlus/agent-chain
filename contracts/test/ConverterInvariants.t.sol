@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {Token} from "../src/Token.sol";
 import {Converter} from "../src/Converter.sol";
 
@@ -153,6 +153,15 @@ contract ConverterHandler is Test {
     /// revert: the treasury holds FREEZER_ROLE, and `setFrozen` is idempotent,
     /// so every call in the sequence succeeds and `fail_on_revert` is satisfied.
     ///
+    /// FROZEN ACTORS ACCUMULATE over a sequence - `attemptFrozenSend` freezes
+    /// one when none is frozen, and only `freeze(seed, false)` lifts it. So the
+    /// coverage I1-I4 lose is bounded: a frozen actor stops converting, and
+    /// with three actors and a fuzzed bool the sequence keeps unfreezing them.
+    /// Worth knowing rather than worth preventing - the alternative, reverting
+    /// the freeze after each attempt, would make the state unreachable by the
+    /// rest of the sequence, which is the defect this action was rewritten to
+    /// fix.
+    ///
     /// This is what makes the frozen state REACHABLE by the rest of the
     /// sequence. Without it `frozenSendAccepted` could only ever be zero because
     /// nothing was ever frozen - the counter would sit at 0 for the wrong
@@ -209,11 +218,7 @@ contract ConverterHandler is Test {
         // make the SEND succeed, which is the thing under test.
         if (who == address(0)) {
             for (uint256 i = 0; i < actors.length; i++) {
-                // REDUCED BEFORE THE ADDITION. `actorSeed + i` overflows when the
-            // fuzzer supplies type(uint256).max, and an overflow in a GUARDED
-            // action is a revert, which fail_on_revert correctly treats as a
-            // finding. Found by the fuzzer on its first shrink.
-            address candidate = actors[(actorSeed % actors.length + i) % actors.length];
+                address candidate = actors[(actorSeed % actors.length + i) % actors.length];
                 if (play.balanceOf(candidate) > 0) {
                     who = candidate;
                     vm.prank(treasury);
@@ -340,10 +345,6 @@ contract ConverterInvariantsTest is Test {
         assertEq(handler.frozenSendAccepted(), 0, "a frozen account's send was accepted");
     }
 
-    /// Runs ONCE at the end of each sequence, which is where a "was this ever
-    /// reached" question belongs: an `invariant_` must hold after EVERY call,
-    /// and "the path was exercised at least once" is false after call one by
-    /// construction. Asserting it as an invariant fails on the first faucet.
     /// I2: no A->B->A round trip the handler executed ever returned more than it
     /// put in — the money property the loop guard exists to guarantee.
     function invariant_noRoundTripReturnsMoreThanItPutIn() public view {

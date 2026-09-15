@@ -863,103 +863,6 @@ describe('a missing intent id is visible, not silent', () => {
 // reservation primitive is atomic - but the defect was never in the primitive,
 // it was the ORDER in signTransfer. Measured: moving only the over_stage_cap
 // check past the broadcast leaves the entire store-level suite green at 118/118
-// A REVERT AT GAS ESTIMATION IS A REVERT, NOT A CHAIN ERROR - on the transfer
-// path too.
-//
-// THE THIRD INSTANCE OF ONE DEFECT. admin-call's simulate had it, then the
-// wallet `call` gas-estimate path, and `asCallError` was written for both. This
-// path kept `asChainError` because nothing could reach it: `prepareTransactionRequest`
-// estimates gas, and until the token had a freeze, a well-formed transfer had
-// no contract-level revert available - the balance is checked before signing.
-//
-// Measured against a real Anvil before the fix, a frozen wallet's send answered
-//   {"error":"chain_error","detail":"Execution reverted with reason:
-//    custom error 0x4f2a367e: 000...8dab55de..."}
-// - a 502 saying the NODE is broken, carrying the AccountFrozen selector and
-// the frozen account's address to a wallet-scope caller.
-describe('a revert while signing a transfer', () => {
-  class RevertingSigner extends Treasury {
-    protected signerFor(): Signer {
-      return {
-        // The shape viem produces for a custom error at estimation. The message
-        // is what must NOT cross, so the fixture makes it recognisable: a test
-        // whose fake reason could not appear in a reply proves nothing about
-        // whether reasons appear in replies.
-        prepareTransactionRequest: async () => {
-          throw new Error(
-            'Execution reverted with reason: custom error 0x4f2a367e: 000000000000000000000000dead.',
-          );
-        },
-        signTransaction: async () => '0xsigned' as const,
-        sendRawTransaction: async () => {
-          throw new Error('the wire must not be reached: the estimate refused first');
-        },
-      };
-    }
-  }
-
-  async function reverting(): Promise<{ t: RevertingSigner; store: Store }> {
-    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
-    writeFileSync(
-      join(dir, 'orch%3Aa.json'),
-      JSON.stringify({ agentId: 'orch:a', max_per_tx: 100, max_per_stage: 500, allow: ['*'], deny: [], frozen: false }),
-    );
-    const store = new Store(':memory:');
-    const t = new RevertingSigner(
-      { ...config, policyDir: dir } as Config,
-      { viemChain: {}, deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}) } } as unknown as Chain,
-      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
-      store,
-      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }) } as unknown as Resolver,
-      DEFAULTS,
-      closedCallPolicy(),
-    );
-    return { t, store };
-  }
-
-  it('answers `revert`, not `chain_error`', async () => {
-    const { t, store } = await reverting();
-    let err: HttpError | undefined;
-    try {
-      await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-1' });
-    } catch (e) {
-      err = e as HttpError;
-    }
-    expect(err?.code).toBe('revert');
-    expect(err?.status).toBe(409);
-    expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
-    store.close();
-  });
-
-  it('does not carry the revert data to the caller', async () => {
-    // THE SELECTOR AND THE PAYLOAD, not the decoded name: viem gives a custom
-    // error as hex, so a check for `AccountFrozen` would pass on a reply
-    // carrying the whole thing. That exact mistake was in the compose smoke and
-    // it passed while the leak was live.
-    const { t, store } = await reverting();
-    let err: unknown;
-    try {
-      await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-2' });
-    } catch (e) {
-      err = e;
-    }
-    const wire = JSON.stringify(err);
-    expect(wire).not.toMatch(/0x4f2a367e/);
-    expect(wire).not.toMatch(/custom error/i);
-    expect(wire).not.toMatch(/0x[0-9a-f]{16,}/i);
-    store.close();
-  });
-
-  it('releases the reservation, because nothing reached the wire', async () => {
-    // An estimate is a READ. The stage hold comes back, or a frozen wallet
-    // would burn its stage budget on sends that never happened.
-    const { t, store } = await reverting();
-    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-3' }).catch(() => undefined);
-    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
-    store.close();
-  });
-});
-
 // while every concurrent send reaches the chain. This drives the whole of
 // signTransfer and counts BROADCASTS, which is the thing the cap has to bound.
 describe('concurrent signTransfer against a stage cap', () => {
@@ -1265,6 +1168,132 @@ describe('concurrent signTransfer against a stage cap', () => {
     await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '100', intentId: 'solo' });
     expect(t.broadcasts).toBe(1);
   }, 20_000);
+});
+
+// A REVERT AT GAS ESTIMATION IS A REVERT, NOT A CHAIN ERROR - on the transfer
+// path too.
+//
+// THE THIRD INSTANCE OF ONE DEFECT. admin-call's simulate had it, then the
+// wallet `call` gas-estimate path, and `asCallError` was written for both. This
+// path kept `asChainError` because nothing could reach it: `prepareTransactionRequest`
+// estimates gas, and until the token had a freeze, a well-formed transfer had
+// no contract-level revert available - the balance is checked before signing.
+//
+// Measured against a real Anvil before the fix, a frozen wallet's send answered
+//   {"error":"chain_error","detail":"Execution reverted with reason:
+//    custom error 0x4f2a367e: 000...8dab55de..."}
+// - a 502 saying the NODE is broken, carrying the AccountFrozen selector and
+// the frozen account's address to a wallet-scope caller.
+describe('a revert while signing a transfer', () => {
+  class RevertingSigner extends Treasury {
+    protected signerFor(): Signer {
+      return {
+        // The shape viem produces for a custom error at estimation. The message
+        // is what must NOT cross, so the fixture makes it recognisable: a test
+        // whose fake reason could not appear in a reply proves nothing about
+        // whether reasons appear in replies.
+        prepareTransactionRequest: async () => {
+          throw new Error(
+            'Execution reverted with reason: custom error 0x4f2a367e: 000000000000000000000000dead.',
+          );
+        },
+        signTransaction: async () => '0xsigned' as const,
+        sendRawTransaction: async () => {
+          throw new Error('the wire must not be reached: the estimate refused first');
+        },
+      };
+    }
+  }
+
+  async function reverting(): Promise<{ t: RevertingSigner; store: Store }> {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    writeFileSync(
+      join(dir, 'orch%3Aa.json'),
+      JSON.stringify({ agentId: 'orch:a', max_per_tx: 100, max_per_stage: 500, allow: ['*'], deny: [], frozen: false }),
+    );
+    const store = new Store(':memory:');
+    const t = new RevertingSigner(
+      { ...config, policyDir: dir } as Config,
+      { viemChain: {}, deployment: { treasury: '0x000000000000000000000000000000000000bEEF' }, treasury: '0x000000000000000000000000000000000000bEEF', modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] }, publicClient: { waitForTransactionReceipt: async () => ({}), readContract: async () => 100n * 10n ** 18n } } as unknown as Chain,
+      { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x' }) } as unknown as Keystore,
+      store,
+      { require: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }), lookup: async () => ({ address: '0x000000000000000000000000000000000000dEaD', canonical: null }) } as unknown as Resolver,
+      DEFAULTS,
+      closedCallPolicy(),
+    );
+    return { t, store };
+  }
+
+  it('answers `revert`, not `chain_error`', async () => {
+    const { t, store } = await reverting();
+    let err: HttpError | undefined;
+    try {
+      await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-1' });
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('revert');
+    expect(err?.status).toBe(409);
+    expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
+    store.close();
+  });
+
+  it('does not carry the revert data to the caller', async () => {
+    // THE SELECTOR AND THE PAYLOAD, not the decoded name: viem gives a custom
+    // error as hex, so a check for `AccountFrozen` would pass on a reply
+    // carrying the whole thing. That exact mistake was in the compose smoke and
+    // it passed while the leak was live.
+    const { t, store } = await reverting();
+    let err: unknown;
+    try {
+      await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-2' });
+    } catch (e) {
+      err = e;
+    }
+    const wire = JSON.stringify(err);
+    expect(wire).not.toMatch(/0x4f2a367e/);
+    expect(wire).not.toMatch(/custom error/i);
+    expect(wire).not.toMatch(/0x[0-9a-f]{16,}/i);
+    store.close();
+  });
+
+  // THE FOURTH INSTANCE, platform scope. `setBalance`'s SWEEP signs with the
+  // WALLET's key, so a downward reset against a frozen wallet reverts at gas
+  // estimation - and answered 502 chain_error with AccountFrozen's selector and
+  // the frozen address, to an OPERATOR who asked for a balance reset.
+  //
+  // Both the spec and this PR's body said the operator gets `revert`. They were
+  // describing the behaviour the send path has; nothing made it true here, and
+  // the evaluator measured it false. Four paths, one defect, and each was
+  // unreachable until something made a revert possible on it.
+  it('the sweep answers `revert` too, and carries no revert data', async () => {
+    const { t, store } = await reverting();
+    let err: HttpError | undefined;
+    try {
+      // ABOVE the target, so the sweep branch runs rather than the top-up: the
+      // two exits differ in which key signs, and only the sweep uses the
+      // wallet's. A fixture below target would take the fund path and pass
+      // while the sweep stayed broken.
+      await t.setBalance('orch:a', { amount: '1', intentId: 's-rev' });
+    } catch (e) {
+      err = e as HttpError;
+    }
+    expect(err?.code).toBe('revert');
+    expect(err?.detail).toBe('the call was mined and reverted; nothing changed');
+    const wire = JSON.stringify(err);
+    expect(wire).not.toMatch(/0x4f2a367e/);
+    expect(wire).not.toMatch(/custom error/i);
+    store.close();
+  });
+
+  it('releases the reservation, because nothing reached the wire', async () => {
+    // An estimate is a READ. The stage hold comes back, or a frozen wallet
+    // would burn its stage budget on sends that never happened.
+    const { t, store } = await reverting();
+    await t.signTransfer(asWallet('orch:a'), { to: 'bob.play', amount: '1', intentId: 'r-3' }).catch(() => undefined);
+    expect(store.spentThisStage('orch:a', store.currentStage(), 'play')).toBe(0n);
+    store.close();
+  });
 });
 
 // Harness spec S3. Set-balance is the one endpoint that can move money OUT of an

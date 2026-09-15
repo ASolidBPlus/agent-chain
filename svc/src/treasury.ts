@@ -597,7 +597,16 @@ export class Treasury {
       this.store.recordMemo({ txHash: hash, memo: reason, intentId, fromAgentId: agentId });
       return { txHash: hash };
     } catch (err) {
-      throw asChainError(err);
+      // THE FOURTH INSTANCE, and the first at PLATFORM scope since v0.4.0's
+      // admin-call fix. The sweep signs with the WALLET's own key, so a frozen
+      // wallet's downward set-balance reverts at gas estimation - and answered
+      // 502 chain_error carrying AccountFrozen's selector and the frozen
+      // address, to an operator who asked for a balance reset.
+      //
+      // The spec and this PR's body both said the operator gets `revert`. They
+      // were describing the behaviour the send path has; nothing made it true
+      // here, and it was measured false.
+      throw this.asCallError(err, `set-balance sweep for ${agentId}`);
     }
   }
 
