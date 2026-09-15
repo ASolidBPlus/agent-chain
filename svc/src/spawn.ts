@@ -20,7 +20,7 @@ import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
 import { defaultToken, requireNames, resolveToken, type TokenModule } from './modules.ts';
-import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS, isUnreadable,
+import { mergePolicy, readPolicyFile, isWalletKind, WALLET_KINDS, isUnreadable,
   type AgentPolicy, type PolicyDefaults, type PolicyRead, type WalletKind,
   assertPatternsUsable,
 } from './policy.ts';
@@ -94,28 +94,28 @@ function parseFundList(
 }
 
 export class Spawner {
-  private readonly policyDefaults: PolicyDefaults | null;
-
   constructor(
     private readonly config: Config,
     private readonly chain: Chain,
     private readonly keystore: Keystore,
     private readonly store: Store,
     private readonly resolver: Resolver,
-    policyDefaults?: PolicyDefaults | null,
-  ) {
-    // NULL WHEN NOBODY POINTED AT A FILE. Loading the shipped example would be
-    // this service deciding a deployment's game balance for it.
-    this.policyDefaults =
-      policyDefaults ??
-      (config.policyDefaultsPath
-        ? loadPolicyDefaults(
-            config.policyDefaultsPath,
-            chain.modules.names?.tld,
-            chain.modules.tokens.map((t) => t.key),
-          )
-        : null);
-  }
+    /// REQUIRED, AND NULL IS AN ANSWER - the shape Treasury has always had.
+    ///
+    /// It was optional, with a fallback that loaded `config.policyDefaultsPath`
+    /// whenever the argument was nullish. `??` cannot tell null from absent, so
+    /// a caller passing NULL to mean "no kind defaults" got the file instead
+    /// and the parameter's own `| null` was unsatisfiable. index.ts computes
+    /// the same ternary before constructing, so the fallback never ran in
+    /// production - it ran only for tests, where it quietly supplied the
+    /// defaults a test had asked to do without.
+    ///
+    /// Found by MUTATING the §1 write-path test, not by reading it: the test
+    /// passed, and passed under the mutant too. The spawner it built with
+    /// `null` wrote `allow: ["converter"]` from the example file, so the
+    /// caps-only document it exists to exercise was never written.
+    private readonly policyDefaults: PolicyDefaults | null,
+  ) {}
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is
   /// lost, the answer is `rotate`, not a lookup: chain-svc cannot reveal a
@@ -492,6 +492,18 @@ export class Spawner {
     },
   ): Promise<Record<string, unknown>> {
     assertCanonicalAgentId(agentId);
+    // THE WALLET MUST EXIST BEFORE ANY BRANCH, and this check used to sit BELOW
+    // the clear branch: `PATCH {clear: true}` on a wallet that was never
+    // spawned answered `{cleared: true}`. An operator clearing a typo'd id was
+    // told the rules were gone when nothing had been looked at, which is the
+    // one answer a clear must never give - it reads as "done" and the real
+    // wallet still has its file.
+    //
+    // `rm --force` made it silent on the filesystem side, so the only thing
+    // that could have said otherwise was this check, and it ran too late.
+    if (!this.store.spawnedAddress(agentId)) {
+      throw new HttpError('wallet_not_found', `no wallet for ${agentId}`);
+    }
     if (body.clear !== undefined) {
       if (body.clear !== true) {
         throw new HttpError('invalid_request', 'clear is either true or absent');
@@ -508,10 +520,6 @@ export class Spawner {
       await rm(join(this.config.policyDir, keyFileName(agentId)), { force: true });
       return { agentId, cleared: true };
     }
-    if (!this.store.spawnedAddress(agentId)) {
-      throw new HttpError('wallet_not_found', `no wallet for ${agentId}`);
-    }
-
     // ONE VALIDATOR FOR ONE DOCUMENT. This used to have its own - `assertCap`
     // and `assertPatternList` - while `POST /wallets` used `mergePolicy`, so
     // the two entry points to the same policy file enforced different rules:

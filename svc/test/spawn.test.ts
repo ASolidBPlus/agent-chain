@@ -5,12 +5,12 @@
 import { describe, it, expect } from 'bun:test';
 import { decodeFunctionData } from 'viem';
 import { TokenAbi } from '../src/abi.ts';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Spawner } from '../src/spawn.ts';
-import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS } from '../src/policy.ts';
+import { droppedPatternsLogged, loadPolicyDefaults, capToWei, WALLET_KINDS, type AgentPolicy } from '../src/policy.ts';
 import { Treasury, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { blankComments } from './support/source.ts';
@@ -1667,6 +1667,120 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const { s } = spawnerWith();
     expect(await codeOf(() => s.patchPolicy('orch:nobody', { max_per_tx: 5 }))).toBe('wallet_not_found');
   }, 20_000);
+
+  // THE WRITE PATH AND THE READ PATH AGREE ABOUT ONE DOCUMENT, which is the
+  // property the gate/parse fix restores and the one the security review found
+  // broken end to end.
+  //
+  // At 60da6e4 a spawn carrying a caps-only policy, on a deployment with no
+  // defaults file, WROTE a document `normalisePolicy` then threw on - so the
+  // read turned it into the unreadable marker and every spend refused. The
+  // service bricked the wallet at birth, with its own file.
+  //
+  // Driven through spawn and policyFor rather than through the two functions,
+  // because that is where the two halves meet: a unit test of either alone
+  // passed throughout.
+  it('reads back a caps-only policy it wrote at spawn, with no defaults loaded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    const store = new Store(':memory:');
+    const chain = {
+      viemChain: {},
+      deployment: {},
+      modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },
+      publicClient: { getBalance: async () => 10n ** 18n, waitForTransactionReceipt: async () => ({}) },
+      walletClient: { account: {}, sendTransaction: async () => '0xdead' },
+    } as unknown as Chain;
+    // NO KIND DEFAULTS, which is the condition: with defaults loaded the
+    // written document carries allow/deny from them and the old gate passed.
+    //
+    // This `null` did not mean that when the test was written. The constructor
+    // took the argument as optional and fell back with `??`, so null and absent
+    // were the same thing and the example defaults were loaded anyway - the
+    // document under test carried `allow: ["converter"]` and the mutant it was
+    // built to catch survived it. The parameter is now required and null is an
+    // answer; if that ever regresses, this test goes quiet again rather than
+    // failing - so what proves it is a mutant, not a reading: restore the old
+    // allow+deny gate in normalisePolicy and this test must go red.
+    const s = new Spawner(
+      { ...config, policyDir: dir } as Config,
+      chain,
+      { has: async () => false, create: async () => ({ address: '0x000000000000000000000000000000000000bEEF' }) } as unknown as Keystore,
+      store,
+      { lookup: async () => null } as unknown as Resolver,
+      null,
+    );
+
+    await s.spawn({ agentId: 'orch:capsonly', kind: 'agent', policy: { caps: { play: { max_per_tx: '500' } } } });
+
+    // The file exists, and what it says is what comes back.
+    const t = new Treasury(
+      { ...config, policyDir: dir } as Config,
+      chain,
+      exploding('keystore') as Keystore,
+      store,
+      exploding('resolver') as Resolver,
+      null,
+      closedCallPolicy(),
+    );
+    const read = await (t as unknown as { policyFor(a: string): Promise<AgentPolicy | null> }).policyFor('orch:capsonly');
+    expect(read?.caps?.play).toEqual({ max_per_tx: '500' });
+  }, 20_000);
+
+  // §1 + the security review's finding 23. `clear` DELETES A FILE, and the four
+  // states it can be asked to delete in are not the same operation.
+  describe('PATCH { clear: true }', () => {
+    it('refuses a wallet that was never spawned, rather than reporting success', () => {
+      // FOUND BY THE SECURITY REVIEW, and it was mine: the clear branch sat
+      // ABOVE the exists check, so clearing a typo'd id answered
+      // `{cleared: true}`. `rm --force` is silent by design, so nothing else
+      // could have said otherwise - and "done" is the one answer a clear must
+      // never give when it looked at nothing.
+      const { s } = spawnerWith();
+      return expect(codeOf(() => s.patchPolicy('orch:nobody', { clear: true }))).resolves.toBe(
+        'wallet_not_found',
+      );
+    });
+
+    it('deletes a file that is there', async () => {
+      const { s, dir } = spawnerWith();
+      await s.patchPolicy('orch:a', { max_per_tx: 100 });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(true);
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(false);
+    });
+
+    it('is not an error when there is no file', async () => {
+      // IDEMPOTENT. "This wallet has no rules of its own" is the state being
+      // asked for, and it is already true - refusing would make an operator
+      // check before every clear.
+      const { s } = spawnerWith();
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+    });
+
+    it('WORKS on an unreadable file, which is the way out of one', async () => {
+      // The row that matters: a PATCH over an unreadable file is refused, so
+      // clear is the only way back. It reads nothing, so there is nothing for a
+      // bad document to break.
+      const { s, dir } = spawnerWith();
+      writeFileSync(join(dir, 'orch%3Aa.json'), '{ this is not json');
+      expect(await s.patchPolicy('orch:a', { clear: true })).toEqual({ agentId: 'orch:a', cleared: true });
+      expect(existsSync(join(dir, 'orch%3Aa.json'))).toBe(false);
+    });
+
+    it('refuses any other field alongside it', async () => {
+      // "Delete the file and also set this" has two readings that differ in
+      // what the wallet ends up with, and neither is worth guessing.
+      const { s } = spawnerWith();
+      expect(await codeOf(() => s.patchPolicy('orch:a', { clear: true, max_per_tx: 5 }))).toBe(
+        'invalid_request',
+      );
+    });
+
+    it('refuses `clear: false` rather than treating it as absent', async () => {
+      const { s } = spawnerWith();
+      expect(await codeOf(() => s.patchPolicy('orch:a', { clear: false }))).toBe('invalid_request');
+    });
+  });
 
   // §3. THE REPLY SHAPE, which nothing in this suite asserted. Changing
   // `{frozen: true}` to `{retired: true}` broke no test - the only thing that
