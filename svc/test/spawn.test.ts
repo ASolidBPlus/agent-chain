@@ -23,12 +23,12 @@ import type { Resolver } from '../src/resolver.ts';
 import { closedCallPolicy } from '../src/calls.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play']);
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play']);
 
 const config = {
   policyDir: '/tmp/does-not-exist',
   rpcUrl: 'http://chain:8545',
-  policyDefaultsPath: join(PKG, 'policy-defaults.json'),
+  policyDefaultsPath: join(PKG, 'policy-defaults.example.json'),
 } as Config;
 
 /// Throws on any access EXCEPT the module view.
@@ -469,7 +469,7 @@ describe('POST /sign-transfer validation', () => {
 
 
 // The caps are game balance the owner tunes (ledger D8), so they live in
-// policy-defaults.json and NOT in a constant here. These tests assert the
+// policy-defaults.example.json and NOT in a constant here. These tests assert the
 // wiring - that the right entry is picked and a caller can override it - and
 // deliberately do not assert the numbers, which are the spec's to move
 // without breaking a build.
@@ -506,7 +506,7 @@ describe('policy defaults', () => {
   // A missing or malformed file must stop the service rather than quietly
   // producing a wallet with no caps at all.
   it('refuses to load a missing or malformed defaults file', () => {
-    expect(() => loadPolicyDefaults('/nope/policy-defaults.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
+    expect(() => loadPolicyDefaults('/nope/policy-defaults.example.json', 'play', ['play'])).toThrow(/cannot read policy defaults/);
   });
 
   // §4.7. A pattern naming a TLD can match nothing on a deployment that
@@ -517,7 +517,7 @@ describe('policy defaults', () => {
     // whatever another file left in it.
     droppedPatternsLogged.clear();
     const lines: string[] = [];
-    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
+    const defaults = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), undefined, ['play'], (m) => lines.push(m));
 
     expect(defaults.agent.deny).toEqual([]);
     // `converter` SURVIVES and `*.{tld}` does not, which is the rule working
@@ -546,7 +546,7 @@ describe('policy defaults', () => {
 
   it('does not repeat the dropped-pattern line on a second load in the same process', () => {
     const lines: string[] = [];
-    loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, ['play'], (m) => lines.push(m));
+    loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), undefined, ['play'], (m) => lines.push(m));
     expect(lines).toHaveLength(0);
 
     const bad = join(mkdtempSync(join(tmpdir(), 'policy-')), 'p.json');
@@ -1568,26 +1568,37 @@ describe('PATCH /wallets/:agentId/policy', () => {
     expect(p.caps.play).toEqual({ max_per_tx: 250, max_per_stage: 999 });
   }, 20_000);
 
-  it('flips frozen both ways, and the store agrees with the file', async () => {
-    const { s, store, dir } = spawnerWith();
-
-    await s.patchPolicy('orch:a', { frozen: true });
-    expect(store.isFrozen('orch:a')).toBe(true);
-    expect(read(dir).frozen).toBe(true);
-
-    await s.patchPolicy('orch:a', { frozen: false });
+  // §3. `frozen` LEFT THE PATCH BODY. These two rows asserted that a PATCH
+  // flipped the freeze both ways and that the STORE was the authority; the
+  // service-side lock is retirement now, written by `retire()` alone, and
+  // freezing a LIVE wallet is the Token contract's job through admin-call.
+  //
+  // REFUSED, NOT IGNORED. An ignored field is one somebody wires up later, and
+  // an operator who sends `{frozen: true}` expecting a wallet to stop spending
+  // must not get a 200 and a wallet that keeps spending.
+  it('refuses `frozen` rather than ignoring it, and names both replacements', async () => {
+    const { s, store } = spawnerWith();
+    let err: unknown;
+    try {
+      await s.patchPolicy('orch:a', { frozen: true });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as HttpError).code).toBe('invalid_request');
+    expect((err as HttpError).detail).toContain('DELETE');
+    expect((err as HttpError).detail).toContain('admin-call');
+    // AND NOTHING HAPPENED. A refusal that had already frozen the wallet would
+    // be the worst of both.
     expect(store.isFrozen('orch:a')).toBe(false);
-    expect(read(dir).frozen).toBe(false);
   }, 20_000);
 
-  // The store is what /sign-transfer consults, so this is the property that
-  // actually stops and restarts spending - the file is wallet-mcp's copy.
-  it('the freeze the next /sign-transfer honours is the STORE, not the file', async () => {
-    const { s, store } = spawnerWith();
-    await s.patchPolicy('orch:a', { frozen: true });
-    expect(store.isFrozen('orch:a')).toBe(true);
-    await s.patchPolicy('orch:a', { frozen: false });
-    expect(store.isFrozen('orch:a')).toBe(false);
+  it('does not write `frozen` into the document it stores', async () => {
+    // The field is gone from the written shape, not merely from the body -
+    // wallet-mcp stopped reading it, and a value nothing writes and nothing
+    // reads is the comment-contradicts-code defect in data form.
+    const { s, dir } = spawnerWith();
+    await s.patchPolicy('orch:a', { max_per_stage: 99 });
+    expect('frozen' in read(dir)).toBe(false);
   }, 20_000);
 
   // §5's durable rule: a deny entry names a canonical id or a platform name.

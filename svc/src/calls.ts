@@ -473,7 +473,7 @@ export class CallPolicy implements CallPolicySource {
     log: (line: string) => void,
     /// The kind defaults, for the load-time warning only. Optional because a
     /// test of the LOADER has no business needing them.
-    private readonly policyDefaults?: PolicyDefaults,
+    private readonly policyDefaults?: PolicyDefaults | null,
   ) {
     this.path = join(policyDir, 'calls.json');
     this.modules = modules;
@@ -507,7 +507,7 @@ export class CallPolicy implements CallPolicySource {
     try {
       this.cached = parseFile(readFileSync(this.path, 'utf8'), this.modules);
       this.complainedAbout = null;
-      warnAboutUnallowedContracts(this.cached.entries, this.policyDefaults, this.modules, this.log);
+      warnAboutUnallowedContracts(this.cached.entries, this.policyDefaults ?? undefined, this.modules, this.log);
       this.log(
         `[chain-svc] calls.json: ${this.cached.entries.length} entr${
           this.cached.entries.length === 1 ? 'y' : 'ies'

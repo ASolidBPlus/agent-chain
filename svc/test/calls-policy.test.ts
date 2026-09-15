@@ -525,7 +525,7 @@ describe('maxPerStage', () => {
 // CONTRACT KEY as the counterparty, so a kind whose allow list is not ["*"]
 // must name every contract its callers may pay through. `agent` and `burner`
 // carry ["*.{tld}"], which no contract key matches - which is why
-// policy-defaults.json names `converter` explicitly, and why an entry naming
+// the example defaults name `converter` explicitly, and why an entry naming
 // something else is worth saying out loud at load.
 //
 // A WARNING AND NOT A REFUSAL, and that is load-bearing: the defaults are one

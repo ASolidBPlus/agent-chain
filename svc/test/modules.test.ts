@@ -300,12 +300,12 @@ describe('spawning without a names module', () => {
     } as unknown as import('../src/chain.ts').Chain;
 
     const s = new Spawner(
-      { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.json'), rpcUrl: 'http://x' } as never,
+      { policyDir: dir, policyDefaultsPath: join(PKG, 'policy-defaults.example.json'), rpcUrl: 'http://x' } as never,
       chain,
       new Keystore(join(dir, 'keys'), 'secret-secret-secret-secret'),
       store,
       { lookup: async () => null, require: async () => null } as never,
-      loadPolicyDefaults(join(PKG, 'policy-defaults.json'), undefined, []),
+      loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), undefined, []),
     );
     return { s, store, registryCalls };
   }
@@ -373,12 +373,12 @@ describe('deny entries without a names module', () => {
 
     const resolver = new Resolver(chain, store);
     const t = new Treasury(
-      { policyDir: dir, policyDefaultsPath: join(PKG2, 'policy-defaults.json') } as never,
+      { policyDir: dir, policyDefaultsPath: join(PKG2, 'policy-defaults.example.json') } as never,
       chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: '0x9999999999999999999999999999999999999999' }) } as never,
       store,
       resolver,
-      loadPolicyDefaults(join(PKG2, 'policy-defaults.json'), undefined, []),
+      loadPolicyDefaults(join(PKG2, 'policy-defaults.example.json'), undefined, []),
       closedCallPolicy(),
     );
     return { t, store };

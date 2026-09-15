@@ -32,7 +32,7 @@ import { buildModules, type Modules } from '../src/modules.ts';
 import type { Deployment } from '../src/chain.ts';
 
 const PKG = join(import.meta.dir, '..');
-const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.json'), 'play', ['play', 'gold']);
+const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play', 'gold']);
 /// A real directory, because one test writes a per-wallet policy file into it -
 /// the shape a per-scenario override produces, which is the §7 trap.
 const POLICY_DIR = mkdtempSync(join(tmpdir(), 'call-policies-'));
@@ -655,7 +655,7 @@ describe('money', () => {
     // §7's trap, and the refusal a scenario author is most likely to misread.
     // A per-scenario policy override REPLACES the kind defaults rather than
     // extending them, so a scenario setting allow: ["acme:*"] silently drops
-    // the `converter` entry policy-defaults.json carries - and every call whose
+    // the `converter` entry policy-defaults.example.json carries - and every call whose
     // amount is in the default token is refused. The CODE is right;
     // "converter is not an allowed counterparty" sends an author looking at
     // wallets, so the DETAIL names the list to edit.

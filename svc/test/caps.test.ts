@@ -8,7 +8,7 @@
 //     in money policy. The alternative - an absent cap meaning "no limit" - is
 //     the one reading that costs money, and it is the reading a reader reaches
 //     for first.
-//   - `*` in policy-defaults.json is expanded to every DEPLOYED token key at
+//   - `*` in a kind-defaults file is expanded to every DEPLOYED token key at
 //     load, so a deployment that adds a token does not silently give every
 //     wallet an unbounded new currency, nor a bounded-by-nothing one.
 //   - an explicit key REPLACES the whole pair rather than merging field by

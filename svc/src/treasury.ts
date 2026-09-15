@@ -177,7 +177,7 @@ export class Treasury {
     private readonly keystore: Keystore,
     private readonly store: Store,
     private readonly resolver: Resolver,
-    private readonly policyDefaults: PolicyDefaults,
+    private readonly policyDefaults: PolicyDefaults | null,
     /// The generic call op's allowlist. Read per request through `snapshot()`,
     /// never held: the file is hub-set and may be rewritten between turns.
     private readonly calls: CallPolicySource,

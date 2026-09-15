@@ -94,7 +94,7 @@ function parseFundList(
 }
 
 export class Spawner {
-  private readonly policyDefaults: PolicyDefaults;
+  private readonly policyDefaults: PolicyDefaults | null;
 
   constructor(
     private readonly config: Config,
@@ -102,15 +102,19 @@ export class Spawner {
     private readonly keystore: Keystore,
     private readonly store: Store,
     private readonly resolver: Resolver,
-    policyDefaults?: PolicyDefaults,
+    policyDefaults?: PolicyDefaults | null,
   ) {
+    // NULL WHEN NOBODY POINTED AT A FILE. Loading the shipped example would be
+    // this service deciding a deployment's game balance for it.
     this.policyDefaults =
       policyDefaults ??
-      loadPolicyDefaults(
-        config.policyDefaultsPath,
-        chain.modules.names?.tld,
-        chain.modules.tokens.map((t) => t.key),
-      );
+      (config.policyDefaultsPath
+        ? loadPolicyDefaults(
+            config.policyDefaultsPath,
+            chain.modules.names?.tld,
+            chain.modules.tokens.map((t) => t.key),
+          )
+        : null);
   }
 
   /// 256 bits of randomness, handed back ONCE and kept only as a hash. If it is
@@ -166,7 +170,11 @@ export class Spawner {
     // document: `{allow, deny}` with the caps left alone is the harness's whole
     // use, and demanding all four made that the one shape that failed while
     // sending nothing succeeded.
-    const policy = mergePolicy(body.policy, this.policyDefaults[kind]);
+    // THE BASE IS THE KIND'S DEFAULTS WHEN THERE ARE ANY, and nothing when
+    // there are not. A spawn that supplies no `policy` against a deployment
+    // with no defaults produces a wallet with no rules - which is what "policy
+    // is opt-in" means at the point a wallet comes into existence.
+    const policy = mergePolicy(body.policy, this.policyDefaults?.[kind] ?? null);
 
     // A burner is deliberately an unnamed address the game has to trace, so a
     // named burner is a contradiction rather than a request to be helpful about.
@@ -252,7 +260,13 @@ export class Spawner {
       await this.registerIfAbsent(agentId, address);
       if (alias) await this.registerIfAbsent(alias, address);
     }
-    await this.writePolicyFile(agentId, policy, false);
+    // A FILE ONLY WHEN THE CALLER WROTE RULES. Until v0.8.0 every spawn wrote
+    // one, baking the kind defaults into a per-wallet document - so every
+    // wallet had "its own" policy that was really a snapshot of the kind's, and
+    // a later change to the kind defaults silently did not reach any existing
+    // wallet. A wallet spawned without `policy` now has no file and follows its
+    // kind's defaults live, or nothing if none are loaded.
+    if (body.policy !== undefined) await this.writePolicyFile(agentId, policy);
 
     // Minted before the marker: if the process dies between the two, the retry
     // re-runs this and issues a fresh token, rather than completing a spawn
@@ -471,6 +485,12 @@ export class Spawner {
     // is read against it rather than refused. A caller patching the old shape
     // is saying something about the default token; every other token's caps
     // come through from `current` untouched.
+    if (body.frozen !== undefined) {
+      throw new HttpError(
+        'invalid_request',
+        'frozen is not a policy field; retire the wallet with DELETE, or freeze it on chain with admin-call',
+      );
+    }
     if (isUnreadable(current)) {
       // A PATCH MERGES ONTO WHAT IS THERE, and this service cannot read what is
       // there. Merging onto a fallback would silently discard whatever the
@@ -489,14 +509,13 @@ export class Spawner {
     // was refused - the same asymmetry in the other direction.
     await this.assertDenyEntriesAreCanonical(next.deny ?? []);
 
-    const frozen = typeof body.frozen === 'boolean' ? body.frozen : this.store.isFrozen(agentId);
-    if (typeof body.frozen === 'boolean') {
-      if (body.frozen) this.store.freeze(agentId);
-      else this.store.unfreeze(agentId);
-    }
-
-    await this.writePolicyFile(agentId, next, frozen);
-    return { agentId, ...next, frozen };
+    // §3. `frozen` LEFT THIS BODY. The service-side lock is retirement, written
+    // by `retire()` alone to its own table - so a PATCH can no longer freeze or
+    // unfreeze, and freezing a LIVE wallet is the Token contract's, operated by
+    // admin-call. A body carrying `frozen` is refused above rather than
+    // ignored: an ignored field is one somebody wires up later.
+    await this.writePolicyFile(agentId, next);
+    return { agentId, ...next };
   }
 
   /// A deny entry must name a CANONICAL id or a PLATFORM name, never a vanity
@@ -543,8 +562,12 @@ export class Spawner {
   /// The per-agent policy file wallet-mcp reads (spec S5). Written atomically:
   /// wallet-mcp may read it at any moment, and a half-written file would parse
   /// as a missing policy rather than as an error.
-  private async writePolicyFile(agentId: string, caps: AgentPolicy, frozen: boolean): Promise<void> {
-    const policy = { agentId, ...caps, frozen };
+  /// `frozen` LEFT THE DOCUMENT at v0.8.0 (§3). Retirement writes its own
+  /// table and never a policy file, so a `frozen` field here would be a value
+  /// nothing writes and nothing reads - and wallet-mcp's local pre-check for it
+  /// is gone for the same reason.
+  private async writePolicyFile(agentId: string, caps: AgentPolicy): Promise<void> {
+    const policy = { agentId, ...caps };
     await mkdir(this.config.policyDir, { recursive: true });
     const target = join(this.config.policyDir, keyFileName(agentId));
     const temp = `${target}.tmp`;
