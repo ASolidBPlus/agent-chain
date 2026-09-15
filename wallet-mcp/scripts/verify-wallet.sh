@@ -89,8 +89,20 @@ _deploy() {
 }
 quietly "the deploy" _deploy
 mv "$DEPLOYMENTS/local.json.pending" "$DEPLOYMENTS/local.json"
+# KIND DEFAULTS ARE OPT-IN AS OF v0.8.0, and this line is what this script
+# needs to keep asserting what it asserts. Every cap and deny check below
+# depends on the agent kind having defaults; unset, `POLICY_DEFAULTS_FILE`
+# means NO kind defaults at all, so the wallet is unbounded, the deny list is
+# empty, and three checks report a broken guard on a service working exactly as
+# configured.
+#
+# Found by RUNNING this script rather than by reading it: v0.8.0 shipped, and
+# this and verify-money.sh had been red since, because a change to the meaning
+# of a default needs the list of everything that depends on one - not the
+# callers that happen to get exercised.
 ( cd "$SVC" && RPC_URL="$RPC" CHAIN_SVC_TOKEN="$TOKEN" KEYSTORE_SECRET=s ANVIL_MNEMONIC="$MNEMONIC" \
     DEPLOYMENTS_DIR="$DEPLOYMENTS" KEYSTORE_DIR="$WORK/k" POLICY_DIR="$WORK/policies" \
+    POLICY_DEFAULTS_FILE="$SVC/policy-defaults.example.json" \
     STORE_PATH="$WORK/s/db.sqlite" PORT="$PORT" bun run src/index.ts ) >"$WORK/svc.log" 2>&1 &
 SVC_PID=$!
 for _ in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done

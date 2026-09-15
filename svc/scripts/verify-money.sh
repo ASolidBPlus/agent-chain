@@ -136,9 +136,21 @@ quietly "the deploy" _deploy
 mv "$DEPLOYMENTS/local.json.pending" "$DEPLOYMENTS/local.json"
 echo "  deployed: $(python3 -c "import json;print([m for m in json.load(open('$DEPLOYMENTS/local.json'))['modules'] if m['kind']=='token'][0]['address'])")"
 
+# KIND DEFAULTS ARE OPT-IN AS OF v0.8.0, and this line is what this script
+# needs to keep asserting what it asserts. Every cap and deny check below
+# depends on the agent kind having defaults; unset, `POLICY_DEFAULTS_FILE`
+# means NO kind defaults at all, so the wallet is unbounded, the deny list is
+# empty, and three checks report a broken guard on a service working exactly as
+# configured.
+#
+# Found by RUNNING this script rather than by reading it: v0.8.0 shipped, and
+# this and verify-money.sh had been red since, because a change to the meaning
+# of a default needs the list of everything that depends on one - not the
+# callers that happen to get exercised.
 ( cd "$SVC" && RPC_URL="$RPC" CHAIN_SVC_TOKEN="$TOKEN" KEYSTORE_SECRET=verify-secret \
     ANVIL_MNEMONIC="$MNEMONIC" DEPLOYMENTS_DIR="$DEPLOYMENTS" KEYSTORE_DIR="$WORK/keystore" \
     POLICY_DIR="$WORK/policies" STORE_PATH="$WORK/store/db.sqlite" PORT="$PORT" \
+    POLICY_DEFAULTS_FILE="$SVC/policy-defaults.example.json" \
     bun run src/index.ts ) >"$WORK/svc.log" 2>&1 &
 SVC_PID=$!
 for _ in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
@@ -256,13 +268,26 @@ check "old token rejected"       "$(wcode "$P_TOKEN" "$U/balance/orch%3Apersona"
 check "new token works"          "$(wcode "$NEW" "$U/balance/orch%3Apersona")" "200"
 
 step "criterion 8 - retirement"
-check "delete"             "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"
-check "spend refused"      "$(wcode "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":1,"intentId":"z1"}')" "409"
+# RETIREMENT, NOT A FREEZE, as of v0.8.0 - and these three rows were asserting
+# the old shape against the new service, which is why they had been red since
+# that release with nobody to see it.
+#
+#   the reply       {"frozen": true}     ->  {"retired": true}
+#   a retired spend  409 wallet_frozen   ->  404 wallet_retired (a retired
+#                                            wallet is GONE, not busy)
+#   the policy file  carried `frozen`    ->  carries no such field, and a wallet
+#                                            spawned without rules has no file
+#                                            at all. The store's own table is
+#                                            the record now, so the row that
+#                                            read the file is replaced by the
+#                                            one that asks the service.
+check "delete"             "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['retired']")" "True"
+check "spend refused"      "$(wcode "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":1,"intentId":"z1"}')" "404"
 echo "    $(wbody "$SC_TOKEN" -X POST "$U/sign-transfer" -d '{"to":"alpha.play","vee":1,"intentId":"z2"}')"
 check "alias stops resolving" "$(code "$U/resolve/aIpha.play")" "404"
 check "canonical survives"    "$(code "$U/resolve/orch%3Ascammer")" "200"
-check "policy file frozen"    "$(python3 -c "import json;print(json.load(open('$WORK/policies/orch%3Ascammer.json'))['frozen'])")" "True"
-check "delete is idempotent"  "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['frozen']")" "True"
+check "the wallet row says retired" "$(api "$U/wallets/orch%3Ascammer" | jget "['retired']")" "True"
+check "delete is idempotent"  "$(api -X DELETE "$U/wallets/orch%3Ascammer" | jget "['retired']")" "True"
 
 step "verdict"
 
