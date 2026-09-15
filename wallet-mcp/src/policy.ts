@@ -111,7 +111,9 @@ export function isCapAmount(value: unknown): boolean {
 }
 
 export interface WalletPolicy {
-  agentId: string;
+  /// Present in every file chain-svc writes, and not required to read one: a
+  /// hand-written policy is still a policy.
+  agentId?: string;
   /// KEYED BY TOKEN KEY, never by symbol - chain-svc writes this file and its
   /// own bookkeeping stores the key. `resolveTokenOrRefusal` is where a key and
   /// a symbol meet, once.
@@ -122,27 +124,120 @@ export interface WalletPolicy {
   deny?: string[];
 }
 
-/// Read fresh on every send rather than cached: chain-svc rewrites this file to
-/// `frozen: true` when a wallet is retired, and a cached copy would keep
-/// spending for as long as the process lived.
-export function readPolicy(path: string): WalletPolicy | null {
+/// What a policy file read can say. THREE OUTCOMES, not two - mirroring
+/// chain-svc's `PolicyRead`, which this is the fast-path copy of:
+///
+///   a WalletPolicy   the file exists and parses - these are the rules
+///   null             no file - nobody wrote rules for this wallet
+///   { unreadable }   a file exists and is not a policy - written garbage
+///
+/// The third used to collapse into the second. That was safe only while an
+/// absent cap REFUSED downstream: the permissive answer here was bounded by a
+/// fail-closed answer further on. With absence now meaning no limit (§1),
+/// deferring on an unreadable file would make it the WIDEST policy a wallet can
+/// have, and a corrupt byte would unbound a wallet silently.
+export type PolicyRead = WalletPolicy | null | { unreadable: string };
+
+/// Is this read a marker rather than a policy? Mirrors chain-svc's predicate of
+/// the same name, down to the name.
+export function isUnreadable(r: PolicyRead): r is { unreadable: string } {
+  return r !== null && 'unreadable' in r;
+}
+
+/// Read fresh on every send rather than cached: chain-svc rewrites this file
+/// when a wallet's policy is patched or cleared, and a cached copy would keep
+/// enforcing rules that no longer exist.
+///
+/// `defaultTokenKey` is for a LEGACY file only - a top-level `max_per_tx` /
+/// `max_per_stage` pair with no `caps`, written before v0.5.0. A deployment with
+/// no token has nothing for such a pair to be about, so it is optional.
+export function readPolicy(path: string, defaultTokenKey?: string): PolicyRead {
+  let raw: string;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as WalletPolicy;
-    // A file with no `caps` is the PRE-MULTI-TOKEN shape, and it is treated as
-    // unreadable rather than migrated here. Two reasons, and the second is the
-    // one that matters: chain-svc already migrates it in memory and rewrites it,
-    // so a second migration in this package would be the same rule written
-    // twice; and returning null defers to chain-svc, which is the authority,
-    // instead of failing closed on every send until that rewrite happens. A
-    // wallet frozen by its own fast path during an ordinary upgrade is the
-    // failure this avoids. "I cannot read the rules" and "the rules say nothing
-    // about this token" are different, and only the second refuses.
-    const caps = (parsed as { caps?: unknown } | null)?.caps;
-    if (caps && typeof caps === 'object' && Array.isArray(parsed?.allow)) return parsed;
+    raw = readFileSync(path, 'utf8');
   } catch {
-    // Unreadable policy: see checkLocally - this is NOT treated as permission.
+    // ABSENT IS ABSENT. No file means nobody wrote rules for this wallet, and
+    // there is nothing for the fast path to object to. This is the only branch
+    // that returns null, and it is the only one that should.
+    return null;
   }
-  return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    // ONE STRING FOR EVERY SHAPE FAILURE, for the same reason: naming the field
+    // that was wrong would report the operator's document back through a
+    // persona-facing detail. Which field it was goes to the log.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { unreadable: 'not a policy document' };
+    }
+    const p = parsed as Record<string, unknown>;
+    if (!isNameList(p.allow) || !isNameList(p.deny)) {
+      return { unreadable: 'not a policy document' };
+    }
+
+    if (p.caps !== undefined) {
+      if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
+        return { unreadable: 'not a policy document' };
+      }
+      return withLists(p, { caps: p.caps as Record<string, TokenCaps> });
+    }
+
+    // THE LEGACY PAIR, read as the DEFAULT TOKEN'S caps - never as an unbounded
+    // policy. This package used to return null for such a file and defer, which
+    // was correct while null meant "defer"; under §1 null means NO RULES
+    // WRITTEN, so the same return would read a pre-v0.5.0 wallet's written
+    // bounds as no bounds at all. That is the two-layer divergence v0.6.0
+    // closed, arriving through the door §1 opened rather than the one it shut.
+    //
+    // EITHER HALF ALONE IS A POLICY, exactly as a half-written entry is in the
+    // new shape: `max_per_tx` alone bounds each transaction and leaves the stage
+    // unbounded. Spelling never decides what a document means (ruled).
+    if (p.max_per_tx !== undefined || p.max_per_stage !== undefined) {
+      // A legacy pair on a deployment with no token has nothing to be about.
+      // Same fixed string: the persona learns the file is unreadable, and the
+      // operator learns why from the log.
+      if (defaultTokenKey === undefined) {
+        return { unreadable: 'not a policy document' };
+      }
+      const legacy: TokenCaps = {};
+      if (p.max_per_tx !== undefined) legacy.max_per_tx = p.max_per_tx as TokenCaps['max_per_tx'];
+      if (p.max_per_stage !== undefined) legacy.max_per_stage = p.max_per_stage as TokenCaps['max_per_stage'];
+      return withLists(p, { caps: { [defaultTokenKey]: legacy } });
+    }
+
+    // A DOCUMENT WITH NO CAPS IN IT is a thing an operator can now write: rules
+    // about counterparties and none about amounts. It is not garbage and it is
+    // not absence - it is a policy that bounds nothing.
+    return withLists(p, {});
+  } catch {
+    // A FIXED STRING, NEVER THE PARSER'S MESSAGE. `no_cap_set` is
+    // persona-facing and its detail crosses with it, and bun's parse error
+    // QUOTES A FRAGMENT OF THE FILE: `JSON Parse error: Unexpected identifier
+    // "broken"`. A malformed policy could therefore put a counterparty name, a
+    // pattern or a number the operator never meant to publish in front of a
+    // model. The raw message belongs in the operator's log, which is the same
+    // split `revert` already makes.
+    //
+    // Exactly two classes, spelled the same on both sides, so a persona meeting
+    // an unreadable policy through either layer reads the same words.
+    return { unreadable: 'not valid JSON' };
+  }
+}
+
+/// The fields every branch above carries through, so none of them can forget
+/// one. `agentId` rides along when present; the lists keep written-versus-absent
+/// intact, because `allow: []` and no `allow` mean different things.
+function withLists(p: Record<string, unknown>, rest: Partial<WalletPolicy>): WalletPolicy {
+  return {
+    ...(typeof p.agentId === 'string' ? { agentId: p.agentId } : {}),
+    ...rest,
+    ...(p.allow === undefined ? {} : { allow: p.allow as string[] }),
+    ...(p.deny === undefined ? {} : { deny: p.deny as string[] }),
+  };
+}
+
+/// A list of names, or absent. Mirrors chain-svc's `isNameList`.
+function isNameList(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every((v) => typeof v === 'string'));
 }
 
 /// `*` matches anything, `*.{tld}` a suffix, `acme:*` a prefix; anything else is
@@ -216,9 +311,11 @@ export function veeToWei(vee: string, decimals: number): bigint {
 /// sentence is built the same way on both sides so they cannot drift into
 /// refusing for the same reason with different words.
 ///
-/// A TOKEN WITH NO ENTRY CANNOT BE SPENT. Silence fails CLOSED: an absent cap
-/// read as "no limit" is the one reading that costs money, and it is the reading
-/// a careless caller reaches for first.
+/// FAIL CLOSED ON GARBAGE, OPEN ON SILENCE (§1, reversing v0.5.0). A cap that
+/// is WRITTEN and unusable still refuses; a cap nobody wrote is no bound. The
+/// two reach different answers on purpose, and the paragraph this replaces said
+/// the opposite - it was the rule until the owner reversed it, and a comment
+/// kept past its ruling is how the next reader learns the wrong one.
 export function capsRefusal(
   policy: WalletPolicy,
   tokenKey: string,
@@ -258,15 +355,27 @@ export function capsRefusal(
 /// three is checkable by a value assertion. Passing the resolved token makes a
 /// mixed-source amount unrepresentable rather than merely tested for.
 export function checkLocally(
-  policy: WalletPolicy | null,
+  policy: PolicyRead,
   to: string,
   amount: string,
   token: { key: string; decimals: number },
 ): { reason: Refusal; detail?: string } | null {
-  // Unreadable, or a shape this version does not parse: let chain-svc decide
-  // rather than guess either way. NOT the same as a readable policy that says
-  // nothing about this token, which refuses below.
-  if (!policy) return null;
+  // NO FILE: nobody wrote rules for this wallet, so there is nothing local to
+  // object to. Not "approved" - chain-svc still decides - but this side has
+  // nothing to say. Under §1 this is the common case rather than the odd one.
+  if (policy === null) return null;
+
+  // A FILE THAT EXISTS AND IS NOT A POLICY refuses every spend, and says why.
+  // It used to fall into the branch above, which was safe only while an absent
+  // cap refused downstream; with absence meaning no limit, deferring here would
+  // make a corrupt file the widest policy a wallet can have.
+  //
+  // The REASON travels: an operator who mistyped a policy needs to know it was
+  // the FILE and not the amount, and a persona that reads "policy file
+  // unreadable" can say something useful to whoever can fix it.
+  if (isUnreadable(policy)) {
+    return { reason: 'no_cap_set', detail: `policy file unreadable: ${policy.unreadable}` };
+  }
 
   const capless = capsRefusal(policy, token.key);
   if (capless) return capless;

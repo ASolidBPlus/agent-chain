@@ -631,7 +631,11 @@ export class Wallet {
       return this.fail(resolved.error, resolved.detail);
     }
 
-    const local = checkLocally(readPolicy(this.config.policyFile), to, amount, token);
+    // The DEFAULT TOKEN'S KEY, for a legacy file's top-level cap pair. Read off
+    // the modules reply rather than assumed: a pre-v0.5.0 policy names no token,
+    // and which token it meant is a fact about the deployment.
+    const policy = readPolicy(this.config.policyFile, defaultTokenOf(this.modules)?.key);
+    const local = checkLocally(policy, to, amount, token);
     if (local) return this.fail(local.reason, local.detail);
 
     // The wire says `amount` and names its token, on both sides, since the
