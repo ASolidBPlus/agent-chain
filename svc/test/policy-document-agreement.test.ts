@@ -92,6 +92,34 @@ const DOCUMENTS: Array<{ what: string; body: unknown; expect: Expected }> = [
     body: { allow: [], deny: [] },
     expect: { allow: [], deny: [] },
   },
+
+  // ── THE SECURITY REVIEWER'S FOUR PROBES, as named rows ────────────────
+  //
+  // At 60da6e4 all four of these returned null from wallet-mcp's `readPolicy`,
+  // which under §1 reads as NO RULES WRITTEN - so a caps-only document's bound,
+  // a written deny-everyone, an unreadable file and a legacy pair each meant
+  // "unbounded" on the fast path while chain-svc enforced them. Named
+  // individually rather than folded into the rows above, because a probe that
+  // found a defect is worth keeping in the shape it was found in: the next
+  // reader can check the finding without reconstructing it.
+  {
+    what: 'a caps-only document with no lists (reviewer probe 1)',
+    body: { caps: { play: { max_per_tx: '100' } } },
+    expect: { caps: { play: { max_per_tx: '100' } } },
+  },
+  {
+    // The bare written empty list, with no `deny` beside it - the reviewer's
+    // exact document. `allow: []` denies everyone and is a decision someone
+    // made; read as null it denied no one.
+    what: 'a bare written empty allow list (reviewer probe 2)',
+    body: { allow: [] },
+    expect: { allow: [] },
+  },
+  {
+    what: 'a legacy pair with no lists at all (reviewer probe 4)',
+    body: { max_per_tx: '25', max_per_stage: '100' },
+    expect: { caps: { play: { max_per_tx: '25', max_per_stage: '100' } } },
+  },
   {
     what: '"unlimited" as a written bound',
     body: { allow: ['*'], deny: [], caps: { play: { max_per_tx: 'unlimited' } } },
