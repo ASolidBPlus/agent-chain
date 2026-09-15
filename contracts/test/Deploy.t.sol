@@ -191,6 +191,178 @@ contract DeployTest is Test {
         _clean(dir);
     }
 
+    // ── findings 7 / 17 / 18 / 19: the manifest is a cache, not an authority ─
+
+    /// A file written for ANOTHER CHAIN is refused, and says which.
+    function test_ACacheFromAnotherChainIsRefused() public {
+        string memory dir = _dir("chainid");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        // `vm.writeJson` at a key, not a string replace: the file is
+        // PRETTY-PRINTED, so `"chainId":31337` does not appear in it and a
+        // replace would silently do nothing - leaving a test that passes
+        // against an unmodified file.
+        vm.writeJson("1", path, ".chainId");
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ", path, " was written for chain 1; this is chain ", vm.toString(block.chainid)
+                )
+            )
+        );
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
+    /// A ROTATED DEPLOYER KEY is a different treasury, and the recorded modules'
+    /// admin roles belong to the old one - so continuing would produce a
+    /// deployment nobody present can administer.
+    function test_ACacheFromAnotherTreasuryIsRefused() public {
+        string memory dir = _dir("treasury");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address other = vm.addr(0xB0B);
+        vm.writeFile(path, vm.replace(json, vm.toString(treasury), vm.toString(other)));
+
+        Deploy again = _script();
+        // The FIRST refusal is the treasury one: it is checked before any
+        // address is derived, because a wrong treasury makes every derivation
+        // wrong too and the useful message is the cause, not the symptom.
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written by treasury ",
+                    vm.toString(other),
+                    "; this deployer is ",
+                    vm.toString(treasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            )
+        );
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
+    /// AN ADDRESS THIS MANIFEST COULD NOT PRODUCE is refused by derivation.
+    /// This is the check that makes the file a cache: before it, the script
+    /// believed whatever address the file named and looked only for code there.
+    function test_ATamperedAddressIsRefused() public {
+        string memory dir = _dir("tampered");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address real = vm.parseJsonAddress(json, ".modules[0].address");
+        // Somewhere with no code, so the failure is the DERIVATION and not the
+        // codehash check one branch further on.
+        address fake = address(0xDEAD);
+        vm.writeFile(path, vm.replace(json, vm.toString(real), vm.toString(fake)));
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play is recorded at ",
+                    vm.toString(fake),
+                    " but this manifest derives ",
+                    vm.toString(real),
+                    " - the file does not describe this deployment"
+                )
+            )
+        );
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
+    /// A RECORDED CODEHASH THAT NO LONGER MATCHES is refused BY NAME, with both
+    /// hashes - never a bare revert from inside `new`.
+    function test_AChangedCodehashIsRefusedByName() public {
+        string memory dir = _dir("codehash");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        address at = vm.parseJsonAddress(json, ".modules[0].address");
+        bytes32 recorded = vm.parseJsonBytes32(json, ".modules[0].codehash");
+        bytes32 wrong = keccak256("not this contract");
+        vm.writeFile(path, vm.replace(json, vm.toString(recorded), vm.toString(wrong)));
+
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play derives ",
+                    vm.toString(at),
+                    ", which already holds code with codehash ",
+                    vm.toString(at.codehash),
+                    "; the manifest records ",
+                    vm.toString(wrong)
+                )
+            )
+        );
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
+    /// A LEGACY FILE - no codehash field - is verified by derivation and
+    /// treasury, then REWRITTEN with codehashes. A promotion, not a pass.
+    function test_ALegacyCacheIsVerifiedThenPromoted() public {
+        string memory dir = _dir("legacy");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory path = string.concat(dir, "/local.json");
+        string memory json = vm.readFile(path);
+        bytes32 recorded = vm.parseJsonBytes32(json, ".modules[0].codehash");
+        // BUILT BY HAND rather than stripped by a string replace. The file is
+        // pretty-printed, so the field's on-disk spelling carries newlines and
+        // indentation that a naive replace misses - and a fixture that failed to
+        // strip the field would leave this test asserting the promotion path
+        // while exercising the ordinary one. The assertion below is what says
+        // the fixture is the shape this test is named for.
+        vm.writeFile(
+            path,
+            string.concat(
+                '{"schema":1,"chainId":',
+                vm.toString(block.chainid),
+                ',"treasury":"',
+                vm.toString(treasury),
+                '","modules":[{"kind":"token","key":"play","contract":"Token","address":"',
+                vm.toString(vm.parseJsonAddress(json, ".modules[0].address")),
+                '"},{"kind":"names","contract":"NameRegistry","address":"',
+                vm.toString(vm.parseJsonAddress(json, ".modules[1].address")),
+                '","tld":"play"}]}'
+            )
+        );
+        assertFalse(vm.keyExistsJson(vm.readFile(path), ".modules[0].codehash"), "the fixture must lack it");
+
+        Deploy again = _script();
+        again.deploy(dir, "", "1");
+        // Promotion writes through the same pending/promote path as a deploy.
+        _promote(dir);
+
+        string memory after_ = vm.readFile(string.concat(dir, "/local.json"));
+        assertTrue(vm.keyExistsJson(after_, ".modules[0].codehash"), "the promotion should add codehashes");
+        assertEq(vm.parseJsonBytes32(after_, ".modules[0].codehash"), recorded, "and the right ones");
+        _clean(dir);
+    }
+
     // ── the four shipped examples ───────────────────────────────────────────
 
     function test_TokenAndNames() public {
@@ -505,7 +677,13 @@ contract DeployTest is Test {
         _write(dir, _example("token-only.json"));
         d = _script();
         vm.expectRevert(
-            bytes("Deploy: local.json declares modules play,names; manifest asks for play - redeploy on a fresh chain or fix the manifest")
+            // QUALIFIED BY KIND on both sides (finding 18). `_effectiveKey` collapses a
+            // token to its bare key and a singleton to its bare kind, so a token
+            // keyed "names" and the names module both reduce to "names". The
+            // manifest's own uniqueness check refuses such a manifest - but the
+            // cache is a FILE, and a file is not required to have come from a
+            // manifest this script accepted.
+            bytes("Deploy: local.json declares modules token:play,names:; manifest asks for token:play - redeploy on a fresh chain or fix the manifest")
         );
         d.deploy(dir, "", "1");
 

@@ -120,65 +120,12 @@ contract Deploy is Script {
         // _deployContract, where @key references resolve to earlier addresses.
         _requireContractArtifacts(mods);
 
-        if (_alreadyDeployed(path, mods)) {
-            console.log("Deploy: local.json matches the manifest and every address has code - nothing to do");
-            return;
-        }
+        // THE CACHE, CHECKED RATHER THAN BELIEVED, and planned PER MODULE.
+        // In its own function because `deploy()` is already at the stack limit -
+        // the same reason `_deployContract` lives apart from it.
+        Plan memory plan = _plan(dir, path, manifestPath, mods, treasury, allowFreshDeploy);
+        if (plan.done) return;
 
-        // THE OTHER DIRECTION, and the dangerous one. The guard above handles
-        // "local.json survived, chain state was wiped". The reverse - local.json
-        // gone, chain intact - reaches here and would deploy a SECOND set of
-        // modules, orphaning the first along with every balance in the game. It
-        // is not a hypothetical: ./deployments is a bind mount and chain-state
-        // is a named volume, so they have independent lifetimes and either can
-        // outlive the other.
-        //
-        // Without local.json there is no address to check for code, so the
-        // question "has anything been deployed here?" cannot be answered
-        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
-        // what this replaces.
-        //
-        // The nonce answered a weaker question - has this account transacted
-        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
-        // whose deployer had done anything at all (a funding transfer, a
-        // probe, a previous run that reverted after its first transaction)
-        // refused a deployment that was perfectly safe. And a chain deployed
-        // from a DIFFERENT key read as untouched, because the nonce it checked
-        // was not the nonce that deployed anything - so the one case worth
-        // refusing, someone else's modules already live here, sailed through.
-        //
-        // An inferred signal cannot be made to mean what an operator meant. So
-        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
-        // statement that there is nothing here to orphan. Refusing costs one
-        // environment variable; being wrong the other way costs the game its
-        // money with no error at all.
-        //
-        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
-        // above failing. Those are different: local.json can be present and
-        // point at dead addresses (a wiped chain), which is the forward case
-        // and must still redeploy. Guarding on the weaker condition made this
-        // fire for that case too - so the message could be false, and, worse,
-        // it MASKED the forward guard: a mutant disabling the cache check was
-        // caught here instead, which means neither guard was independently
-        // tested. Two guards satisfied by one scenario is two guards you have
-        // not tested.
-        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
-        // wrong direction for a flag whose whole job is to be deliberate:
-        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
-        // accident, and the operator who wrote 0 meant the opposite.
-        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
-            revert(
-                string.concat(
-                    "Deploy: refusing to deploy with no ",
-                    path,
-                    ". A fresh deployment on a chain that already has modules would orphan them ",
-                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
-                    "state that this chain has nothing to orphan."
-                )
-            );
-        }
-
-        address[] memory addrs = new address[](mods.length);
         address namesAddr = address(0);
         address converterAddr = address(0);
         string memory tld = "";
@@ -186,16 +133,42 @@ contract Deploy is Script {
 
         vm.startBroadcast(deployerKey);
         for (uint256 i = 0; i < mods.length; i++) {
+            // PER-MODULE IDEMPOTENCY. A module already live at its derived
+            // address is left alone; only the empty ones are deployed. Without
+            // this a partially-wiped chain - one module gone, the rest intact -
+            // had no outcome at all: the run either redeployed everything, which
+            // reverts inside `new` at the first address that still holds code,
+            // or refused wholesale and left the gap unfilled.
+            //
+            // The address is the DERIVED one either way, so a skipped module and
+            // a deployed one are described identically afterwards.
+            if (!plan.needsDeploy[i]) {
+                console.log("Deploy: already deployed, skipping", mods[i].kind, plan.addrs[i]);
+                // THE WIRING BELOW STILL NEEDS THESE. A skipped names or
+                // converter module that left these at zero would make the
+                // treasury registration and the pair wiring silently do
+                // nothing - the failure mode of a guard that returns early
+                // without carrying its outputs forward.
+                if (_eq(mods[i].kind, KIND_NAMES)) {
+                    namesAddr = plan.addrs[i];
+                    tld = mods[i].tld;
+                } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                    converterAddr = plan.addrs[i];
+                } else if (_eq(mods[i].kind, KIND_TOKEN)) {
+                    haveToken = true;
+                }
+                continue;
+            }
             if (_eq(mods[i].kind, KIND_TOKEN)) {
                 Token t = new Token{salt: saltFor(mods[i].kind, mods[i].key)}(
                     mods[i].name, mods[i].symbol, treasury
                 );
                 if (mods[i].initialSupply > 0) t.mint(treasury, mods[i].initialSupply * 1e18);
-                addrs[i] = address(t);
+                plan.addrs[i] = address(t);
                 haveToken = true;
             } else if (_eq(mods[i].kind, KIND_NAMES)) {
                 NameRegistry r = new NameRegistry{salt: saltFor(mods[i].kind, "")}(treasury);
-                addrs[i] = address(r);
+                plan.addrs[i] = address(r);
                 namesAddr = address(r);
                 tld = mods[i].tld;
             } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
@@ -204,14 +177,14 @@ contract Deploy is Script {
                 // bare kind (one converter per deployment) so its address is
                 // deterministic like every other module's.
                 Converter c = new Converter{salt: saltFor(KIND_CONVERTER, "")}(treasury);
-                addrs[i] = address(c);
+                plan.addrs[i] = address(c);
                 converterAddr = address(c);
             } else {
                 // A custom contract, deployed by name with static-typed args. Kept
                 // in its own function so deploy()'s stack stays within limits.
                 // Registered contracts get NO role grants (spec S1.1); any role
                 // they need comes later through admin-call.
-                addrs[i] = _deployContract(manifestPath, i, mods, addrs, treasury);
+                plan.addrs[i] = _deployContract(manifestPath, i, mods, plan.addrs, treasury);
             }
         }
         // `treasury.<tld>` names the treasury FOR A TOKEN'S BENEFIT, so it is
@@ -219,7 +192,15 @@ contract Deploy is Script {
         // gets a registry with nothing in it, which is correct: there is no
         // money for the treasury to hold.
         if (namesAddr != address(0) && haveToken) {
-            NameRegistry(namesAddr).registerFor(string.concat("treasury.", tld), treasury, treasury);
+            // ONLY IF IT IS NOT ALREADY THERE. With per-module idempotency the
+            // registry can be a survivor while a token beside it is redeployed,
+            // and registering a name that already resolves is a refusal rather
+            // than a no-op - so the run would fail on its second pass over a
+            // registry it had just been right to keep.
+            string memory treasuryName = string.concat("treasury.", tld);
+            if (NameRegistry(namesAddr).resolve(treasuryName) == address(0)) {
+                NameRegistry(namesAddr).registerFor(treasuryName, treasury, treasury);
+            }
         }
         // Wire the converter LAST: each pair needs its two token addresses, and
         // the converter is the only holder of BURNER_ROLE on any token. The
@@ -227,8 +208,8 @@ contract Deploy is Script {
         // additional minter on each target, never a replacement.
         if (converterAddr != address(0)) {
             for (uint256 j = 0; j < pairs.length; j++) {
-                address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
-                address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
+                address src = _tokenAddrByKey(mods, plan.addrs, pairs[j].source);
+                address tgt = _tokenAddrByKey(mods, plan.addrs, pairs[j].target);
                 Converter(converterAddr).setPair(src, tgt, pairs[j].rate);
                 Token(src).grantRole(Token(src).BURNER_ROLE(), converterAddr);
                 Token(tgt).grantRole(Token(tgt).MINTER_ROLE(), converterAddr);
@@ -238,7 +219,7 @@ contract Deploy is Script {
 
         for (uint256 i = 0; i < mods.length; i++) {
             if (_eq(mods[i].kind, KIND_TOKEN)) {
-                Token t = Token(addrs[i]);
+                Token t = Token(plan.addrs[i]);
                 require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
                 // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
                 // script - so this asserts a property of the contract rather
@@ -289,7 +270,7 @@ contract Deploy is Script {
                     t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
                 );
             } else if (_eq(mods[i].kind, KIND_NAMES)) {
-                NameRegistry r = NameRegistry(addrs[i]);
+                NameRegistry r = NameRegistry(plan.addrs[i]);
                 require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
                 if (haveToken) {
                     require(
@@ -298,10 +279,10 @@ contract Deploy is Script {
                     );
                 }
             } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
-                Converter c = Converter(addrs[i]);
+                Converter c = Converter(plan.addrs[i]);
                 for (uint256 j = 0; j < pairs.length; j++) {
-                    address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
-                    address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
+                    address src = _tokenAddrByKey(mods, plan.addrs, pairs[j].source);
+                    address tgt = _tokenAddrByKey(mods, plan.addrs, pairs[j].target);
                     (,, bool exists) = c.pair(src, tgt);
                     require(exists, "Deploy: converter pair was not set");
                     require(
@@ -316,14 +297,14 @@ contract Deploy is Script {
             } else {
                 // A custom contract: it exists and has code. No roles are asserted
                 // because the deploy grants it none.
-                require(addrs[i].code.length > 0, "Deploy: contract has no code");
+                require(plan.addrs[i].code.length > 0, "Deploy: contract has no code");
             }
         }
 
-        _writeDeployment(dir, path, mods, addrs, treasury);
+        _writeDeployment(dir, path, mods, plan.addrs, treasury);
 
         for (uint256 i = 0; i < mods.length; i++) {
-            console.log("Deploy: module", mods[i].kind, addrs[i]);
+            console.log("Deploy: module", mods[i].kind, plan.addrs[i]);
         }
         console.log("Deploy: treasury    ", treasury);
     }
@@ -768,6 +749,35 @@ contract Deploy is Script {
 
     // ── local.json ──────────────────────────────────────────────────────────
 
+    /// THE CANONICAL CREATE2 DEPLOYER. Anvil predeploys it, and a salted `new`
+    /// inside a Script-derived contract under broadcast routes through it -
+    /// which is what makes an address the same under `forge test` and under
+    /// `forge script --broadcast`, and is why the cache re-derives against this
+    /// and not against the treasury. Measured in Create2Probe.t.sol's fourth
+    /// case; the same shape inside a TEST contract gives the broadcaster, which
+    /// is the wrong answer and the easy mistake.
+    address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+
+    /// What the cache records for one module.
+    struct CacheEntry {
+        address addr;
+        /// The module's runtime codehash at write time, or zero on a file
+        /// written before codehashes were recorded.
+        bytes32 codehash;
+    }
+
+    /// THE COMPARISON KEY, on both sides of every cache check: `kind:key`.
+    ///
+    /// `_effectiveKey` collapses to the bare key for tokens and contracts and to
+    /// the bare kind for the singletons, so a token keyed "names" and the names
+    /// module both reduce to "names". The manifest's own uniqueness check uses
+    /// that collapse and refuses such a manifest - but the cache is a FILE, and
+    /// a file is not required to have come from a manifest this script accepted.
+    /// Qualifying by kind makes the two unconfusable whatever the file says.
+    function _cacheKey(string memory kind, string memory key) internal pure returns (string memory) {
+        return string.concat(kind, ":", key);
+    }
+
     /// True only if the existing local.json lists EXACTLY the manifest's
     /// modules, in order, and every address still has code.
     ///
@@ -776,34 +786,291 @@ contract Deploy is Script {
     /// contracts were deployed under two different manifests, and nothing
     /// afterwards could tell which. The operator redeploys on a fresh chain or
     /// fixes the manifest; both are one deliberate act.
-    function _alreadyDeployed(string memory path, ModuleSpec[] memory mods) internal view returns (bool) {
-        if (!vm.exists(path)) return false;
+    /// What the cache says this run must do. Returned as ONE struct: `deploy()`
+    /// is at the stack limit, and five separate returns would put it over.
+    struct Plan {
+        address[] addrs;
+        bool[] needsDeploy;
+        /// The whole run is already done - nothing to deploy, and any promotion
+        /// already written.
+        bool done;
+    }
 
+    function _plan(
+        string memory dir,
+        string memory path,
+        string memory manifestPath,
+        ModuleSpec[] memory mods,
+        address treasury,
+        string memory allowFreshDeploy
+    ) internal returns (Plan memory plan) {
+        // THE CACHE, CHECKED RATHER THAN BELIEVED, and planned PER MODULE.
+        //
+        // Three outcomes per module, and the third is the one that used to be a
+        // bare revert: the derived address is empty, so deploy it; it holds the
+        // code this manifest describes, so skip it; or it holds SOMETHING ELSE,
+        // which is refused by name with both codehashes rather than failing
+        // inside a `new` with no indication of which module or why.
+        plan.addrs = new address[](mods.length);
+        plan.needsDeploy = new bool[](mods.length);
+        bool haveCache = vm.exists(path);
+        bool legacyCache = false;
+        bool anyToDeploy = false;
+
+        CacheEntry[] memory cached;
+        if (haveCache) (cached, legacyCache) = _readCache(path, mods, treasury);
+
+        for (uint256 i = 0; i < mods.length; i++) {
+            plan.addrs[i] = _expectedAddress(manifestPath, i, mods, plan.addrs, treasury);
+            if (haveCache && cached[i].addr != plan.addrs[i]) {
+                revert(
+                    string.concat(
+                        "Deploy: ",
+                        _cacheKey(mods[i].kind, mods[i].key),
+                        " is recorded at ",
+                        vm.toString(cached[i].addr),
+                        " but this manifest derives ",
+                        vm.toString(plan.addrs[i]),
+                        " - the file does not describe this deployment"
+                    )
+                );
+            }
+            if (plan.addrs[i].code.length == 0) {
+                plan.needsDeploy[i] = true;
+                anyToDeploy = true;
+            } else if (haveCache && !legacyCache && cached[i].codehash != plan.addrs[i].codehash) {
+                revert(_foreignCode(mods[i], plan.addrs[i], cached[i].codehash));
+            } else if (!haveCache) {
+                // No cache and the address is occupied: on a fresh chain this is
+                // a squat, and deploying would revert inside `new` with nothing
+                // to say which module or why.
+                revert(_foreignCode(mods[i], plan.addrs[i], bytes32(0)));
+            }
+        }
+
+        if (haveCache && !anyToDeploy) {
+            if (legacyCache) {
+                // A PROMOTION, NOT A PASS. The file verified by derivation and
+                // treasury, so it describes this deployment - it just predates
+                // codehashes. Rewriting it means the NEXT run can make the
+                // stronger check, and says so rather than silently upgrading.
+                console.log("Deploy: local.json verified and rewritten with codehashes");
+                _writeDeployment(dir, path, mods, plan.addrs, treasury);
+                plan.done = true;
+                return plan;
+            }
+            console.log("Deploy: local.json matches the manifest and every address has code - nothing to do");
+            plan.done = true;
+            return plan;
+        }
+
+        // THE OTHER DIRECTION, and the dangerous one. The guard above handles
+        // "local.json survived, chain state was wiped". The reverse - local.json
+        // gone, chain intact - reaches here and would deploy a SECOND set of
+        // modules, orphaning the first along with every balance in the game. It
+        // is not a hypothetical: ./deployments is a bind mount and chain-state
+        // is a named volume, so they have independent lifetimes and either can
+        // outlive the other.
+        //
+        // Without local.json there is no address to check for code, so the
+        // question "has anything been deployed here?" cannot be answered
+        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
+        // what this replaces.
+        //
+        // The nonce answered a weaker question - has this account transacted
+        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
+        // whose deployer had done anything at all (a funding transfer, a
+        // probe, a previous run that reverted after its first transaction)
+        // refused a deployment that was perfectly safe. And a chain deployed
+        // from a DIFFERENT key read as untouched, because the nonce it checked
+        // was not the nonce that deployed anything - so the one case worth
+        // refusing, someone else's modules already live here, sailed through.
+        //
+        // An inferred signal cannot be made to mean what an operator meant. So
+        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
+        // statement that there is nothing here to orphan. Refusing costs one
+        // environment variable; being wrong the other way costs the game its
+        // money with no error at all.
+        //
+        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
+        // above failing. Those are different: local.json can be present and
+        // point at dead addresses (a wiped chain), which is the forward case
+        // and must still redeploy. Guarding on the weaker condition made this
+        // fire for that case too - so the message could be false, and, worse,
+        // it MASKED the forward guard: a mutant disabling the cache check was
+        // caught here instead, which means neither guard was independently
+        // tested. Two guards satisfied by one scenario is two guards you have
+        // not tested.
+        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
+        // wrong direction for a flag whose whole job is to be deliberate:
+        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
+        // accident, and the operator who wrote 0 meant the opposite.
+        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
+            revert(
+                string.concat(
+                    "Deploy: refusing to deploy with no ",
+                    path,
+                    ". A fresh deployment on a chain that already has modules would orphan them ",
+                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
+                    "state that this chain has nothing to orphan."
+                )
+            );
+        }
+
+    }
+
+    /// The refusal for an address that holds code this deployment did not put
+    /// there. NAMED, with both codehashes, because the alternative is a revert
+    /// from inside `new` that says only that a creation failed.
+    function _foreignCode(ModuleSpec memory m, address at, bytes32 expected)
+        internal
+        view
+        returns (string memory)
+    {
+        return string.concat(
+            "Deploy: ",
+            _cacheKey(m.kind, m.key),
+            " derives ",
+            vm.toString(at),
+            ", which already holds code with codehash ",
+            vm.toString(at.codehash),
+            expected == bytes32(0)
+                ? " and no manifest records it - another deployment is using this address"
+                : string.concat("; the manifest records ", vm.toString(expected))
+        );
+    }
+
+    /// The address this manifest WOULD produce for module `i`, derived rather
+    /// than read: `saltFor` + the keccak of the init code + the canonical
+    /// CREATE2 deployer.
+    ///
+    /// This is what makes local.json a cache. Every fact in that file is now
+    /// checkable against the manifest and the compiled artefacts, so an edited,
+    /// copied or hand-written file cannot name an address this deployment could
+    /// not have produced - which is what it could do when the address was simply
+    /// believed.
+    ///
+    // `addrs` carries the EARLIER modules' addresses, for a custom contract
+    // whose constructor references one by @key. Forward references are already
+    // refused when the manifest is read, so by the time module i is derived
+    // every address it can name is known. (Plain comments: solc reads `@key` in
+    // a doc block as a natspec tag and refuses the file.)
+    function _expectedAddress(
+        string memory manifestPath,
+        uint256 i,
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        address treasury
+    ) internal returns (address) {
+        bytes memory initcode;
+        bytes32 salt;
+        if (_eq(mods[i].kind, KIND_TOKEN)) {
+            initcode = abi.encodePacked(
+                type(Token).creationCode, abi.encode(mods[i].name, mods[i].symbol, treasury)
+            );
+            salt = saltFor(mods[i].kind, mods[i].key);
+        } else if (_eq(mods[i].kind, KIND_NAMES)) {
+            initcode = abi.encodePacked(type(NameRegistry).creationCode, abi.encode(treasury));
+            salt = saltFor(mods[i].kind, "");
+        } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+            initcode = abi.encodePacked(type(Converter).creationCode, abi.encode(treasury));
+            salt = saltFor(KIND_CONVERTER, "");
+        } else {
+            initcode = abi.encodePacked(
+                vm.getCode(string.concat(mods[i].name, ".sol:", mods[i].name)),
+                _encodeContractArgs(vm.readFile(manifestPath), i, mods, addrs, treasury)
+            );
+            salt = saltFor(KIND_CONTRACT, mods[i].key);
+        }
+        return vm.computeCreate2Address(salt, keccak256(initcode), CREATE2_DEPLOYER);
+    }
+
+    /// Reads the cache and checks everything about it that does not need the
+    /// manifest's init code: the chain it was written for, the treasury that
+    /// wrote it, and that it describes exactly the modules being asked for.
+    ///
+    /// LOCAL.JSON IS A CACHE, NOT AN AUTHORITY. Everything here used to be
+    /// taken on trust: the file said an address and the script believed it,
+    /// checking only that SOMETHING had code there. So a file edited by hand,
+    /// copied from another deployment, or written for another chain was
+    /// indistinguishable from one this script produced - and the script would
+    /// wire a game's money to whatever it named.
+    ///
+    /// Reverts on every mismatch rather than returning false: a cache that
+    /// disagrees with the manifest is not a reason to redeploy silently, it is
+    /// a question for whoever wrote one of them.
+    function _readCache(string memory path, ModuleSpec[] memory mods, address treasury)
+        internal
+        view
+        returns (CacheEntry[] memory entries, bool legacy)
+    {
         string memory json = vm.readFile(path);
-        // A malformed local.json reverts here on purpose: silently redeploying
-        // over a file we could not read is how balances get orphaned.
+
+        // THE CHAIN IT WAS WRITTEN FOR. A manifest from another chain names
+        // addresses that mean nothing here - and on a chain where those
+        // addresses happen to hold code, means something worse than nothing.
+        uint256 recordedChain = vm.parseJsonUint(json, ".chainId");
+        if (recordedChain != block.chainid) {
+            revert(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written for chain ",
+                    vm.toString(recordedChain),
+                    "; this is chain ",
+                    vm.toString(block.chainid)
+                )
+            );
+        }
+
+        // THE TREASURY THAT WROTE IT. A rotated deployer key is a different
+        // treasury: the recorded modules' admin roles are held by the OLD one,
+        // so continuing would produce a deployment nobody present can administer.
+        address recordedTreasury = vm.parseJsonAddress(json, ".treasury");
+        if (recordedTreasury != treasury) {
+            revert(
+                string.concat(
+                    "Deploy: ",
+                    path,
+                    " was written by treasury ",
+                    vm.toString(recordedTreasury),
+                    "; this deployer is ",
+                    vm.toString(treasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            );
+        }
+
         uint256 n = 0;
         while (vm.keyExistsJson(json, string.concat(".modules[", vm.toString(n), "]"))) {
             n++;
         }
 
         string memory declared = "";
+        entries = new CacheEntry[](n);
+        legacy = false;
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".modules[", vm.toString(i), "]");
             string memory kind = vm.parseJsonString(json, string.concat(at, ".kind"));
-            string memory key =
-                vm.keyExistsJson(json, string.concat(at, ".key")) ? vm.parseJsonString(json, string.concat(at, ".key")) : "";
-            // An entry is identified by its key when it has one (token, contract),
-            // else by its kind (the singletons names/converter) - the same
-            // effective key _readManifest enforces unique.
-            declared = string.concat(
-                declared, i == 0 ? "" : ",", (_eq(kind, KIND_TOKEN) || _eq(kind, KIND_CONTRACT)) ? key : kind
-            );
+            string memory key = vm.keyExistsJson(json, string.concat(at, ".key"))
+                ? vm.parseJsonString(json, string.concat(at, ".key"))
+                : "";
+            declared = string.concat(declared, i == 0 ? "" : ",", _cacheKey(kind, key));
+
+            entries[i].addr = vm.parseJsonAddress(json, string.concat(at, ".address"));
+            if (vm.keyExistsJson(json, string.concat(at, ".codehash"))) {
+                entries[i].codehash = vm.parseJsonBytes32(json, string.concat(at, ".codehash"));
+            } else {
+                // A FILE FROM BEFORE CODEHASHES WERE RECORDED. Verified by
+                // address derivation and treasury like any other, then rewritten
+                // WITH codehashes - a promotion, not a pass.
+                legacy = true;
+            }
         }
 
         string memory asked = "";
         for (uint256 i = 0; i < mods.length; i++) {
-            asked = string.concat(asked, i == 0 ? "" : ",", _effectiveKey(mods[i]));
+            asked = string.concat(asked, i == 0 ? "" : ",", _cacheKey(mods[i].kind, mods[i].key));
         }
 
         if (!_eq(declared, asked)) {
@@ -817,14 +1084,6 @@ contract Deploy is Script {
                 )
             );
         }
-
-        // The file surviving is not enough - a wiped chain-state volume leaves
-        // local.json pointing at addresses with no code, and that must redeploy.
-        for (uint256 i = 0; i < n; i++) {
-            address a = vm.parseJsonAddress(json, string.concat(".modules[", vm.toString(i), "].address"));
-            if (a.code.length == 0) return false;
-        }
-        return n > 0;
     }
 
     function _writeDeployment(
@@ -847,6 +1106,11 @@ contract Deploy is Script {
             // record their fixed contract.
             string memory contractName =
                 isToken ? CONTRACT_TOKEN : isNames ? CONTRACT_NAMES : isContract ? mods[i].name : CONTRACT_CONVERTER;
+            // THE RUNTIME CODEHASH, recorded at write time so the skip path can
+            // ask whether the code at that address is still the code this
+            // manifest describes. Without it "the address has code" was the
+            // whole check, and ANY code passed it - including a different
+            // contract that happened to be deployed there first.
             string memory entry = string.concat(
                 '{"kind":"',
                 mods[i].kind,
@@ -855,6 +1119,8 @@ contract Deploy is Script {
                 contractName,
                 '","address":"',
                 vm.toString(addrs[i]),
+                '","codehash":"',
+                vm.toString(addrs[i].codehash),
                 '"',
                 isNames ? string.concat(',"tld":"', mods[i].tld, '"') : "",
                 "}"
