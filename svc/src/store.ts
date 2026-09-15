@@ -40,6 +40,7 @@ export type Reservation =
 
 import { migrate } from './migrate.ts';
 import type { DeploymentIdentity } from './deployment.ts';
+import { UNLIMITED, type StageCap } from './policy.ts';
 import type { WalletKind } from './policy.ts';
 
 export interface OutboundEvent {
@@ -543,17 +544,28 @@ export class Store {
     agentId: string;
     stage: string;
     amount: bigint;
-    /// The stage cap to test against, or NULL for no cap hold at all - which
-    /// is what a PLATFORM-scope transfer takes (harness spec S3). The intent is
-    /// still recorded, so idempotency and the IntentTransfer story are
-    /// unchanged; only the budget half is skipped, because the treasury has no
-    /// stage cap and an operator reset refused as over_stage_cap mid-game would
-    /// be a bad failure.
+    /// §1b. THE STAGE BOUND, IN THREE EXPLICIT STATES - because "no bound" and
+    /// "no stage" are different facts and used to share one sentinel:
     ///
-    /// This is the one place the primitive's two halves come apart, and it is a
-    /// PARAMETER rather than a second method so that both halves stay in one
-    /// transaction and the call site has to say which it wants.
-    capWei: bigint | null;
+    ///   { cap: bigint }      bound AND record. A wallet with a finite cap.
+    ///   { cap: 'unlimited' } RECORD WITHOUT BOUNDING. A wallet that chose no
+    ///                        bound; the spend is still an audit fact.
+    ///   null                 NEITHER. Platform scope, which has no stage at
+    ///                        all - the treasury's spends are nobody's budget,
+    ///                        and an operator reset refused as over_stage_cap
+    ///                        mid-game would be a bad failure.
+    ///
+    /// MEASURED BEFORE THIS EXISTED: the `stage_spend` write was guarded on the
+    /// cap itself, so recording and bounding were one branch and `capWei: null`
+    /// skipped both. An "unlimited" cap implemented that way would have made a
+    /// wallet's unlimited spends ABSENT FROM THE AUDIT TRAIL rather than
+    /// unbounded - and invisible, because every cap test passes when nothing is
+    /// over any cap.
+    ///
+    /// A DISCRIMINATED VALUE RATHER THAN A SENTINEL so the call site has to say
+    /// which "no bound" it means, and still a PARAMETER rather than a second
+    /// method so both halves stay in one transaction.
+    stageCap: StageCap;
     /// WHICH TOKEN this reservation is denominated in - the manifest KEY, which
     /// is what `stage_spend` and `intents` store. Required rather than
     /// defaulted to the first token: a caller that has not decided which
@@ -564,7 +576,7 @@ export class Store {
     /// `admin-call` intents and absent for `sign-transfer` and `fund`, which is
     /// why the three columns are nullable: null is the true value, not a gap.
     ///
-    /// A THIRD HALF OF THE SAME DECISION, for the same reason `capWei` is a
+    /// A THIRD HALF OF THE SAME DECISION, for the same reason `stageCap` is a
     /// parameter: "may this call happen" is one question, and counting it in a
     /// second transaction would admit a window where the intent is taken and
     /// the count is not, or the reverse.
@@ -580,8 +592,13 @@ export class Store {
       maxPerStage?: number;
     };
   }): Reservation {
-    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, capWei, call, token } =
+    const { intentId, topic, reservedAtBlock, idSource, agentId, stage, amount, stageCap, call, token } =
       args;
+    // The two halves, read off the three states once. `bound` is what refuses;
+    // `records` is whether the spend is an audit fact. They are equal for a
+    // finite cap and deliberately differ for the other two.
+    const bound = stageCap !== null && stageCap.cap !== UNLIMITED ? stageCap.cap : null;
+    const records = stageCap !== null;
 
     // ONE transaction covering BOTH the intent and the cap, because they are
     // one decision: "may this send happen". Two transactions would admit a
@@ -595,7 +612,7 @@ export class Store {
       // Re-read INSIDE the transaction: a value read before it began is the
       // same stale figure the check-then-act acted on.
       const current = this.spentThisStage(agentId, stage, token);
-      if (capWei !== null && current + amount > capWei) {
+      if (bound !== null && current + amount > bound) {
         return { outcome: 'over_stage_cap', txHash: null };
       }
 
@@ -624,7 +641,10 @@ export class Store {
           agentId,
           stage,
           amount.toString(),
-          capWei === null ? '0' : amount.toString(),
+          // HELD against the stage, so `release` refunds it. An unlimited cap
+          // records the spend, so it holds; platform scope records nothing, so
+          // it holds nothing.
+          records ? amount.toString() : '0',
           topic ?? null,
           reservedAtBlock === undefined ? null : reservedAtBlock.toString(),
           idSource ?? null,
@@ -644,7 +664,11 @@ export class Store {
           )
           .run(agentId, stage, call!.contract, call!.function, usedThisStage + 1);
       }
-      if (capWei !== null) {
+      // §1b. RECORDS, not bounds. An "unlimited" cap reaches here: the spend
+      // is an audit fact whether or not anything refuses it, and skipping this
+      // write along with the bound is the defect this three-state value exists
+      // to make impossible to write by accident.
+      if (records) {
         this.db
           .query(
             `INSERT INTO stage_spend (agent_id, stage, token, spent) VALUES (?, ?, ?, ?)
