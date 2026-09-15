@@ -102,7 +102,6 @@ contract Deploy is Script {
         address treasury = vm.addr(deployerKey);
 
         string memory path = string.concat(dir, "/local.json");
-        string memory manifestPath = string.concat(dir, "/manifest.json");
 
         // Retired rather than ignored. Silently dropping it would leave an
         // operator's supply setting doing nothing with no way to notice.
@@ -110,10 +109,16 @@ contract Deploy is Script {
             revert("Deploy: INITIAL_SUPPLY_VEE is retired; put initialSupply in the manifest");
         }
 
-        ModuleSpec[] memory mods = _readManifest(manifestPath);
+        // READ ONCE AND PASSED DOWN. It was re-read by `_readConverterPairs`,
+        // by `_deployContract` for every custom contract, and - once the cache
+        // check arrived - by `_expectedAddress` for every one again. N+2 reads
+        // of a file that cannot change mid-run, and N+2 chances to act on two
+        // different versions of it if it ever did.
+        string memory manifest = _readManifestFile(string.concat(dir, "/manifest.json"));
+        ModuleSpec[] memory mods = _readManifest(manifest);
         // Validated up front so a bad converter manifest fails fast, with the
         // readable message, before anything is broadcast.
-        ConverterPair[] memory pairs = _readConverterPairs(manifestPath, mods);
+        ConverterPair[] memory pairs = _readConverterPairs(manifest, mods);
         // Custom-contract artifacts are checked before broadcast so a missing one
         // is a readable refusal rather than a raw getCode revert mid-deploy. Their
         // constructor args are read from the manifest at deploy time in
@@ -123,7 +128,7 @@ contract Deploy is Script {
         // THE CACHE, CHECKED RATHER THAN BELIEVED, and planned PER MODULE.
         // In its own function because `deploy()` is already at the stack limit -
         // the same reason `_deployContract` lives apart from it.
-        Plan memory plan = _plan(dir, path, manifestPath, mods, treasury, allowFreshDeploy);
+        Plan memory plan = _plan(dir, path, manifest, mods, treasury, allowFreshDeploy);
         if (plan.done) return;
 
         address namesAddr = address(0);
@@ -184,7 +189,7 @@ contract Deploy is Script {
                 // in its own function so deploy()'s stack stays within limits.
                 // Registered contracts get NO role grants (spec S1.1); any role
                 // they need comes later through admin-call.
-                plan.addrs[i] = _deployContract(manifestPath, i, mods, plan.addrs, treasury);
+                plan.addrs[i] = _deployContract(manifest, i, mods, plan.addrs, treasury);
             }
         }
         // `treasury.<tld>` names the treasury FOR A TOKEN'S BENEFIT, so it is
@@ -375,11 +380,20 @@ contract Deploy is Script {
 
     // ── the manifest ────────────────────────────────────────────────────────
 
-    function _readManifest(string memory manifestPath) internal view returns (ModuleSpec[] memory) {
+    /// THE ONE READ. Separate from the parser so the not-found refusal can name
+    /// the path, which the parser no longer sees.
+    function _readManifestFile(string memory manifestPath) internal view returns (string memory) {
         if (!vm.exists(manifestPath)) {
-            revert(string.concat("Deploy: manifest: none found at ", manifestPath, "; a deployment must declare its modules"));
+            revert(
+                string.concat(
+                    "Deploy: manifest: none found at ", manifestPath, "; a deployment must declare its modules"
+                )
+            );
         }
-        string memory json = vm.readFile(manifestPath);
+        return vm.readFile(manifestPath);
+    }
+
+    function _readManifest(string memory json) internal view returns (ModuleSpec[] memory) {
 
         uint256 schema = vm.parseJsonUint(json, ".schema");
         if (schema != SCHEMA) {
@@ -494,7 +508,7 @@ contract Deploy is Script {
     /// string in (0, MAX_RATE]; and no pair may combine with its reverse to mint
     /// value on a round trip. Validated here so a bad manifest fails with a
     /// readable message rather than the contract's raw error.
-    function _readConverterPairs(string memory manifestPath, ModuleSpec[] memory mods)
+    function _readConverterPairs(string memory json, ModuleSpec[] memory mods)
         internal
         view
         returns (ConverterPair[] memory)
@@ -508,7 +522,6 @@ contract Deploy is Script {
         }
         if (convIdx == type(uint256).max) return new ConverterPair[](0);
 
-        string memory json = vm.readFile(manifestPath);
         string memory base = string.concat(".modules[", vm.toString(convIdx), "].pairs");
 
         uint256 n = 0;
@@ -670,13 +683,12 @@ contract Deploy is Script {
     /// address matches computeCreate2Address(salt, keccak256(initcode), 0x4e59)
     /// (measured). Its own function so deploy() stays within the stack limit.
     function _deployContract(
-        string memory manifestPath,
+        string memory json,
         uint256 idx,
         ModuleSpec[] memory mods,
         address[] memory addrs,
         address treasury
     ) internal returns (address deployed) {
-        string memory json = vm.readFile(manifestPath);
         bytes memory initcode = abi.encodePacked(
             vm.getCode(string.concat(mods[idx].name, ".sol:", mods[idx].name)),
             _encodeContractArgs(json, idx, mods, addrs, treasury)
@@ -863,7 +875,7 @@ contract Deploy is Script {
     function _plan(
         string memory dir,
         string memory path,
-        string memory manifestPath,
+        string memory manifest,
         ModuleSpec[] memory mods,
         address treasury,
         string memory allowFreshDeploy
@@ -885,7 +897,7 @@ contract Deploy is Script {
         if (haveCache) (cached, legacyCache) = _readCache(path, mods, treasury);
 
         for (uint256 i = 0; i < mods.length; i++) {
-            plan.addrs[i] = _expectedAddress(manifestPath, i, mods, plan.addrs, treasury);
+            plan.addrs[i] = _expectedAddress(manifest, i, mods, plan.addrs, treasury);
             if (haveCache && cached[i].addr != plan.addrs[i]) {
                 revert(
                     string.concat(
@@ -1020,7 +1032,7 @@ contract Deploy is Script {
     // every address it can name is known. (Plain comments: solc reads `@key` in
     // a doc block as a natspec tag and refuses the file.)
     function _expectedAddress(
-        string memory manifestPath,
+        string memory json,
         uint256 i,
         ModuleSpec[] memory mods,
         address[] memory addrs,
@@ -1042,7 +1054,7 @@ contract Deploy is Script {
         } else {
             initcode = abi.encodePacked(
                 vm.getCode(string.concat(mods[i].name, ".sol:", mods[i].name)),
-                _encodeContractArgs(vm.readFile(manifestPath), i, mods, addrs, treasury)
+                _encodeContractArgs(json, i, mods, addrs, treasury)
             );
             salt = saltFor(KIND_CONTRACT, mods[i].key);
         }
