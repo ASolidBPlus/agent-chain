@@ -8,9 +8,13 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, chmodSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/// This package's root, for the child script the two-process trial spawns.
+const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 import { Store } from '../src/store.ts';
 import { Keystore } from '../src/keystore.ts';
@@ -858,4 +862,124 @@ describe('the v6 -> v7 per-token rekey', () => {
     expect(() => new Store(dbPath()).close()).not.toThrow();
     expect(userVersion(dbPath())).toBe(SCHEMA_VERSION);
   });
+});
+
+// FINDING 5: the v6 -> v7 step BINDS the token key rather than interpolating it.
+//
+// The reviewer's three-key run: three tokens, spend recorded in the pre-v7
+// shape, migrated, and every row must come back under the DEFAULT key - the
+// first in manifest order - with nothing lost and nothing renamed.
+describe('the v6 -> v7 rekey binds its key', () => {
+  let dir: string;
+  const dbPath = () => join(dir, 'store.sqlite');
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'v7bind-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it('carries every row across under the default key', () => {
+    const s = new Store(dbPath());
+    s.recordDeployment({
+      chainId: '31337',
+      modules: [
+        { kind: 'token', key: 'play', address: '0xA' },
+        { kind: 'token', key: 'gold', address: '0xB' },
+        { kind: 'token', key: 'silver', address: '0xC' },
+      ],
+    });
+    s.close();
+
+    // A v6-shaped `stage_spend`: no token column, and rows to carry.
+    const db = new Database(dbPath());
+    db.exec(`
+      DROP TABLE stage_spend;
+      CREATE TABLE stage_spend (
+        agent_id TEXT NOT NULL,
+        stage    TEXT NOT NULL,
+        spent    TEXT NOT NULL,
+        PRIMARY KEY (agent_id, stage)
+      );
+      INSERT INTO stage_spend (agent_id, stage, spent) VALUES ('orch:a', 's1', '500');
+      INSERT INTO stage_spend (agent_id, stage, spent) VALUES ('orch:b', 's1', '700');
+      PRAGMA user_version = 6;
+    `);
+    db.close();
+
+    new Store(dbPath()).close();
+
+    const after = new Database(dbPath());
+    const rows = after.query(`SELECT agent_id, stage, token, spent FROM stage_spend ORDER BY agent_id`).all();
+    after.close();
+    // THE DEFAULT KEY, ON EVERY ROW, with the spend intact. A step that lost a
+    // row would give a wallet budget back; one that renamed it would make the
+    // spend unreadable by any query naming a token, which reads as "no spend
+    // recorded" and therefore as budget left.
+    expect(rows).toEqual([
+      { agent_id: 'orch:a', stage: 's1', token: 'play', spent: '500' },
+      { agent_id: 'orch:b', stage: 's1', token: 'play', spent: '700' },
+    ]);
+  });
+});
+
+// FINDING 13: two processes opening one store at once.
+//
+// WAL keeps a reader out of a writer's way; it does not make two WRITERS wait.
+// Without a busy timeout sqlite answers SQLITE_BUSY immediately, so the second
+// process threw during MIGRATION - the one moment the store is half-shaped. And
+// without `BEGIN IMMEDIATE` both read `user_version` as 6, both decide to
+// migrate, and the second discovers the conflict half way through its own
+// rewrite.
+describe('two processes may open one store at once', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'race-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  // TEN RUNS, because a race that fires one time in three passes once. Each run
+  // is a fresh store with work to do: a v6-shaped stage_spend, so both
+  // processes have a numbered step to race on rather than an empty migration.
+  it('ten trials, zero throws, and both find a migrated store', async () => {
+    const script = join(dir, 'open.ts');
+    writeFileSync(
+      script,
+      `import { Store } from ${JSON.stringify(join(PKG, 'src', 'store.ts'))};\n` +
+        `const s = new Store(process.argv[2]!);\n` +
+        `process.stdout.write(String(s.currentStage() !== undefined));\n` +
+        `s.close();\n`,
+    );
+
+    for (let i = 0; i < 10; i++) {
+      const path = join(dir, `store-${i}.sqlite`);
+      const seed = new Store(path);
+      seed.recordDeployment({ chainId: '31337', modules: [{ kind: 'token', key: 'play', address: '0xA' }] });
+      seed.close();
+      const db = new Database(path);
+      db.exec(`
+        DROP TABLE stage_spend;
+        CREATE TABLE stage_spend (
+          agent_id TEXT NOT NULL, stage TEXT NOT NULL, spent TEXT NOT NULL,
+          PRIMARY KEY (agent_id, stage)
+        );
+        PRAGMA user_version = 6;
+      `);
+      db.close();
+
+      // BOTH STARTED BEFORE EITHER IS AWAITED, so they overlap. Awaiting the
+      // first would serialise them and the test would measure nothing.
+      const [a, b] = await Promise.all([
+        Bun.spawn(['bun', 'run', script, path], { stdout: 'pipe', stderr: 'pipe' }),
+        Bun.spawn(['bun', 'run', script, path], { stdout: 'pipe', stderr: 'pipe' }),
+      ].map(async (p) => {
+        const proc = await p;
+        const [out, err, code] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        return { out, err, code };
+      }));
+
+      // NAMED, not counted: a failure has to say which process and why.
+      expect({ trial: i, code: a.code, err: a.err.split('\n')[0] }).toEqual({ trial: i, code: 0, err: '' });
+      expect({ trial: i, code: b.code, err: b.err.split('\n')[0] }).toEqual({ trial: i, code: 0, err: '' });
+      expect(userVersion(path)).toBe(SCHEMA_VERSION);
+    }
+  }, 120_000);
 });

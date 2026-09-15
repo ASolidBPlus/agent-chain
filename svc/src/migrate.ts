@@ -317,7 +317,25 @@ const NUMBERED: ReadonlyArray<{
         );
       }
 
-      const key = JSON.stringify(defaultKey);
+      // FINDING 5: THE KEY IS BOUND, NEVER INTERPOLATED.
+      //
+      // It went in through `JSON.stringify` into a `db.exec` string. A token key
+      // is operator input - it comes off the manifest - and JSON quoting is not
+      // SQL quoting: JSON escapes a quote as \" where SQL wants ''.
+      //
+      // NOT EXPLOITABLE TODAY, and that is exactly the reason to change it.
+      // `MANIFEST_KEY` is `^[a-z][a-z0-9]{0,15}$`, so a key cannot contain a
+      // quote and the two spellings never part company. The interpolation is
+      // therefore safe BECAUSE OF A RULE IN ANOTHER FILE - and it is the sort of
+      // rule that gets widened (a key with a dash, a key with a dot) by someone
+      // who has no reason to know a migration's string concatenation depends on
+      // it. Binding removes the coupling rather than the symptom.
+      //
+      // `db.exec` cannot take parameters, so the statements are split: the DDL
+      // and the drops stay in `exec`, and the two that carry the key become
+      // prepared statements. SAME TRANSACTION - the caller wraps every numbered
+      // step in one - so a crash between them leaves the store at v6 rather
+      // than half rekeyed.
       db.exec(`
         CREATE TABLE stage_spend_v7 (
           agent_id TEXT NOT NULL,
@@ -326,13 +344,17 @@ const NUMBERED: ReadonlyArray<{
           spent    TEXT NOT NULL,
           PRIMARY KEY (agent_id, stage, token)
         );
-        INSERT INTO stage_spend_v7 (agent_id, stage, token, spent)
-          SELECT agent_id, stage, ${key}, spent FROM stage_spend;
+      `);
+      db.query(
+        `INSERT INTO stage_spend_v7 (agent_id, stage, token, spent)
+           SELECT agent_id, stage, ?, spent FROM stage_spend`,
+      ).run(defaultKey);
+      db.exec(`
         DROP TABLE stage_spend;
         ALTER TABLE stage_spend_v7 RENAME TO stage_spend;
-        UPDATE intents SET token = ${key} WHERE token IS NULL;
-        PRAGMA user_version = 7;
       `);
+      db.query(`UPDATE intents SET token = ? WHERE token IS NULL`).run(defaultKey);
+      db.exec(`PRAGMA user_version = 7;`);
     },
   },
   {
@@ -417,6 +439,37 @@ export function migrate(
   createTables: () => void,
   createIndexes: () => void,
 ): void {
+  // FINDING 13: ONE WRITER AT A TIME, AND THE OTHER WAITS FOR A FINISHED STORE.
+  //
+  // `BEGIN IMMEDIATE` takes the write lock at the START of the transaction
+  // rather than at the first write. The difference is the whole fix: with a
+  // deferred transaction both processes read `user_version` as 6, both decide
+  // to migrate, and the second discovers the conflict half way through its own
+  // rewrite. With an immediate one the second process blocks on the lock (for
+  // `busy_timeout`, set in the Store constructor), and when it gets in it reads
+  // a version the first process already stamped - so it finds nothing to do.
+  //
+  // The whole of migrate() is inside it, INCLUDING the reads, because the read
+  // that must not be stale is `user_version` itself.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    migrateInTransaction(db, createTables, createIndexes);
+    db.exec('COMMIT');
+  } catch (err) {
+    // A ROLLBACK THAT ITSELF THROWS MUST NOT REPLACE THE REAL ERROR. The
+    // interesting failure is the one that got us here - a schema refusal names
+    // what an operator has to do - and "cannot rollback, no transaction is
+    // active" would bury it.
+    try { db.exec('ROLLBACK'); } catch { /* the transaction is already gone */ }
+    throw err;
+  }
+}
+
+function migrateInTransaction(
+  db: Database,
+  createTables: () => void,
+  createIndexes: () => void,
+): void {
   const version = (db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
 
   // Checked FIRST, before any write. An older binary against a newer store must
@@ -468,13 +521,24 @@ export function migrate(
   // reconciliation, so an entry can assume every table exists and every
   // additive column is present.
   //
-  // Each runs inside one transaction and stamps its own version as its last
-  // statement, so a crash between two entries leaves the store at the last
-  // COMPLETED version rather than half-way through one.
+  // Each stamps its own version as its last statement. The TRANSACTION is the
+  // outer one now (finding 13), so a crash leaves the store at the version it
+  // started from rather than at the last completed step - equally consistent,
+  // and it resumes because the steps are guarded on the schema.
   for (const step of NUMBERED) {
     if (version >= step.to) continue;
     if (!step.applies(db)) continue;
-    db.transaction(() => step.up(db))();
+    // NOT `db.transaction(...)` ANY MORE: the whole of `migrate` is already
+    // inside one (see above), and sqlite has no nested transactions - bun's
+    // wrapper would issue a SAVEPOINT at best and a second BEGIN at worst.
+    //
+    // The per-step atomicity it provided is now the outer transaction's. Not
+    // stronger, and not weaker: a crash used to leave the store at the last
+    // COMPLETED step and now leaves it at the version it started from. Both are
+    // consistent states and both resume correctly on the next boot, because
+    // every step is guarded on the SCHEMA rather than on the version - so
+    // redoing the ones that already applied is a no-op.
+    step.up(db);
   }
 
   // AFTER EVERYTHING, and the position moved at v8 rather than being tidied.

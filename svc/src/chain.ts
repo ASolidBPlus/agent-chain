@@ -21,6 +21,7 @@ import { ABIS } from './abi.ts';
 import {
   CONTRACT_NAME,
   MANIFEST_KEY,
+  RESERVED_MANIFEST_KEYS,
   MODULES,
   type ManifestKind,
   type ModuleKind,
@@ -198,6 +199,16 @@ export function loadDeployment(deploymentsDir: string): Deployment {
         throw new Error(
           `chain-svc: ${path} module key "${entry.key}" is not a manifest key ` +
             `(${MANIFEST_KEY.source})`,
+        );
+      }
+      // FINDING 5. Refused at LOAD, naming the column, because this is the last
+      // point an operator can change it: past here the key is written into
+      // `stage_spend.token` and `intents.token` as a value, and renaming a token
+      // after wallets have spent in it is a migration nobody wants to write.
+      if (RESERVED_MANIFEST_KEYS.has(entry.key)) {
+        throw new Error(
+          `chain-svc: ${path} module key "${entry.key}" is a column name in this store's schema; ` +
+            `pick another key`,
         );
       }
       claim(entry.key);

@@ -61,6 +61,18 @@ export class Store {
     this.db = new Database(path, { create: true });
     // WAL so a reader (/history) is never blocked by the events writer.
     this.db.exec('PRAGMA journal_mode = WAL');
+    // FINDING 13: WAIT FOR A BUSY WRITER RATHER THAN THROWING AT IT.
+    //
+    // WAL keeps readers out of a writer's way; it does not make two WRITERS
+    // wait. Without a busy timeout, sqlite answers SQLITE_BUSY IMMEDIATELY -
+    // so two processes opening this store at once (the service and a CLI, or a
+    // restart overlapping its predecessor) had the second one throw during
+    // MIGRATION, which is the one moment the store is half-shaped.
+    //
+    // Five seconds because the thing being waited for is a migration, not a
+    // request: a numbered step rewrites a table and then stamps a version, and
+    // a caller that gives up at 100ms gives up in the middle of that.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     // Ordering is migrate()'s to enforce, not this constructor's - see migrate.ts.
     migrate(this.db, () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS memos (
