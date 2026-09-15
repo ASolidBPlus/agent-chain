@@ -25,6 +25,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   capsFor,
+  isCap,
+  UNLIMITED,
   loadPolicyDefaults,
   mergePolicy,
   normalisePolicy,
@@ -81,6 +83,40 @@ describe('capsFor', () => {
 
   it('refuses even when the entry exists but is empty', () => {
     expect(() => capsFor({ ...policy, caps: { au: {} as never } }, 'au')).toThrow(HttpError);
+  });
+});
+
+// §1b. "unlimited" AS AN EXPLICIT CHOICE, and nothing else.
+//
+// The value space is the whole point. `"unlimited"` means someone decided; an
+// ABSENT cap means nobody did, and those stay different answers. Everything
+// else - a typo, an empty string, a null - is treated as ABSENT and refuses,
+// because the fail-OPEN implementation (`not a number -> no bound`) turns
+// `"unlimted"` into an uncapped wallet, and a typo is the likeliest way anyone
+// ever writes a non-numeric cap.
+describe('"unlimited" in isCap', () => {
+  it('accepts exactly "unlimited"', () => {
+    expect(isCap(UNLIMITED)).toBe(true);
+    expect(isCap('unlimited')).toBe(true);
+  });
+
+  it('refuses every OTHER non-numeric string, so a typo is not an uncapped wallet', () => {
+    // COMPARE TO A VALUE at each: these are the strings a broader predicate
+    // would have admitted, and each one of them is a wallet with no bound.
+    for (const bad of ['unlimted', 'UNLIMITED', 'Unlimited', 'unlimited ', ' unlimited', '', 'none', 'inf']) {
+      expect(isCap(bad)).toBe(false);
+    }
+  });
+
+  it('still accepts amounts, and still refuses zero and negatives', () => {
+    // The regex must remain the gate for everything that is not the one exact
+    // string - if the new clause had widened it, this row would pass anyway
+    // and the row above is what notices.
+    expect(isCap('25')).toBe(true);
+    expect(isCap('0')).toBe(false);
+    expect(isCap('-1')).toBe(false);
+    expect(isCap(null)).toBe(false);
+    expect(isCap(undefined)).toBe(false);
   });
 });
 

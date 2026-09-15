@@ -671,7 +671,7 @@ describe('the reservation records a sound lower bound', () => {
 });
 
 describe('the release rule', () => {
-  const args = { agentId: 'orch:a', stage: 's1', amount: 10n ** 18n, capWei: 10n ** 21n };
+  const args = { agentId: 'orch:a', stage: 's1', amount: 10n ** 18n, stageCap: { cap: 10n ** 21n } };
 
   // A send whose broadcast throws is INDISTINGUISHABLE from one that landed and
   // whose response was lost. Releasing here would re-authorise a transfer that
@@ -747,7 +747,7 @@ describe('the release rule', () => {
     const send = { fromAgentId: 'orch:a', to: 'bob.play', amount: '1', intentId: 'replay' };
     const seed = (store: Store) => {
       const stage = store.currentStage();
-      store.reserve({ token: 'play', intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, capWei: 10n ** 21n });
+      store.reserve({ token: 'play', intentId: 'replay', agentId: 'orch:a', stage, amount: 10n ** 18n, stageCap: { cap: 10n ** 21n } });
     };
 
     it('returns the ORIGINAL hash when the first send completed', async () => {

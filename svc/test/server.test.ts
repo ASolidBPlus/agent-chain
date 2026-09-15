@@ -556,7 +556,7 @@ describe('an intent is not an existence oracle', () => {
       agentId: 'beta:someoneelse',
       stage: store.currentStage(),
       amount: 1n,
-      capWei: 10n ** 21n,
+      stageCap: { cap: 10n ** 21n },
     });
   });
 
@@ -582,7 +582,7 @@ describe('an intent is not an existence oracle', () => {
       agentId: 'alpha:client',
       stage: store.currentStage(),
       amount: 1n,
-      capWei: 10n ** 21n,
+      stageCap: { cap: 10n ** 21n },
     });
     const res = await fetch(`${base}/intents/mine-alpha`, { headers: walletAuth });
     expect(res.status).toBe(200);

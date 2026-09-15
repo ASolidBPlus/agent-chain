@@ -300,7 +300,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-anom', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const tail = new EventTail({ token: 'tok' } as Config, chainWith([
       { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
@@ -334,7 +334,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-nosender', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const tail = new EventTail({ token: 'tok' } as Config, chainWith([
       { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' },
@@ -373,7 +373,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-late', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
 
     // Poll 1: head at block 1, the first emission.
@@ -436,7 +436,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'shared-key', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const SAME_WALLET = '0xWALLET';
 
@@ -489,7 +489,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'thrice', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const hashes = ['0xaaa', '0xbbb', '0xccc'];
     for (const [i, txHash] of hashes.entries()) {
@@ -516,7 +516,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 're-second', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const first = { args: { intentId: TOPIC, from: '0xW' }, transactionHash: '0xaaa' };
     const second = { args: { intentId: TOPIC, from: '0xW' }, transactionHash: '0xbbb' };
@@ -542,7 +542,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'replayed', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
     const log = { args: { intentId: TOPIC, from: '0xAAA1' }, transactionHash: '0xaaa' };
 
@@ -567,7 +567,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-foreign', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
 
     await new EventTail({ token: 'tok' } as Config,
@@ -596,7 +596,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: `i-${idSource}`, topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n, idSource,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n }, idSource,
     });
 
     await new EventTail({ token: 'tok' } as Config,
@@ -618,7 +618,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-ours', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
 
     await new EventTail({ token: 'tok' } as Config,
@@ -638,7 +638,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-case', topic: TOPIC, agentId: 'orch:mark',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
 
     await new EventTail({ token: 'tok' } as Config,
@@ -659,7 +659,7 @@ describe('the intent anomaly', () => {
     store.reserve({
       token: 'play',
       intentId: 'i-unknown', topic: TOPIC, agentId: 'orch:nowallet',
-      stage: 's1', amount: 1n, capWei: 10n ** 21n,
+      stage: 's1', amount: 1n, stageCap: { cap: 10n ** 21n },
     });
 
     await new EventTail({ token: 'tok' } as Config,
@@ -709,7 +709,7 @@ describe('sweepOnce', () => {
     store.reserve({
       token: 'play',
       intentId, topic: TOPIC2, agentId: 'orch:mark', stage: store.currentStage(),
-      amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: block,
+      amount: 10n ** 18n, stageCap: { cap: 10n ** 21n }, reservedAtBlock: block,
     });
 
   it('confirms an intent whose transfer landed, and KEEPS the hold', async () => {
@@ -766,7 +766,7 @@ describe('sweepOnce', () => {
       store.reserve({
         token: 'play',
         intentId: 'unlanded', topic: TOPIC2, agentId: 'orch:mark',
-        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, stageCap: { cap: 10n ** 21n },
       }).outcome,
     ).toBe('duplicate');
     store.close();
@@ -836,7 +836,7 @@ describe('sweepOnce', () => {
       store.reserve({
         token: 'play',
         intentId: 'ancient-by-clock', topic: TOPIC2, agentId: 'orch:mark',
-        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, stageCap: { cap: 10n ** 21n },
       }).outcome,
     ).toBe('duplicate');
     store.close();
@@ -880,7 +880,7 @@ describe('sweepOnce', () => {
     store.reserve({
       token: 'play',
       intentId: 'new-stage', topic: `0x${'ef'.repeat(32)}`, agentId: 'orch:mark',
-      stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
+      stage: store.currentStage(), amount: 10n ** 18n, stageCap: { cap: 10n ** 21n }, reservedAtBlock: 1n,
     });
     store.recordEmission({ topic: `0x${'ef'.repeat(32)}`, txHash: '0xbbb', from: WALLET, isExpectedEmitter: true });
 
@@ -904,7 +904,7 @@ describe('sweepOnce', () => {
       store.reserve({
         token: 'play',
         intentId: 'rolled', topic: TOPIC2, agentId: 'orch:mark',
-        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, stageCap: { cap: 10n ** 21n },
       }).outcome,
     ).toBe('duplicate');
     store.close();
@@ -933,7 +933,7 @@ describe('sweepOnce', () => {
       store.reserve({
         token: 'play',
         intentId: 'terminal', topic: TOPIC2, agentId: 'orch:mark',
-        stage: store.currentStage(), amount: 10n ** 18n, capWei: 10n ** 21n,
+        stage: store.currentStage(), amount: 10n ** 18n, stageCap: { cap: 10n ** 21n },
       }),
     ).toEqual({ outcome: 'duplicate', txHash: '0xaaa' });
     store.close();
@@ -1179,7 +1179,7 @@ describe('an IntentTransfer from a token we did not issue for', () => {
     store.reserve({
       token: 'play',
       intentId: 'gold-anomaly', topic: TOPIC, agentId: 'orch:a', stage: store.currentStage(),
-      amount: 10n ** 18n, capWei: 10n ** 21n, reservedAtBlock: 1n,
+      amount: 10n ** 18n, stageCap: { cap: 10n ** 21n }, reservedAtBlock: 1n,
     });
     return store;
   }
@@ -1432,7 +1432,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null, token: 'play',
+      stageCap: null, token: 'play',
       call: { contract: 'converter', function: 'convert', argsHash: 'h' },
     });
 
@@ -1463,7 +1463,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 0n,
-      capWei: null, token: 'play',
+      stageCap: null, token: 'play',
       call: { contract: 'play', function: 'transfer', argsHash: 'h' },
     });
 
@@ -1488,7 +1488,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 5n,
-      capWei: null,
+      stageCap: null,
       token: 'gold',
     });
 
@@ -1529,7 +1529,7 @@ describe('generic decoding', () => {
       agentId: 'orch:a',
       stage: store.currentStage(),
       amount: 5n,
-      capWei: null,
+      stageCap: null,
       token: 'play', // reserved in PLAY...
     });
 

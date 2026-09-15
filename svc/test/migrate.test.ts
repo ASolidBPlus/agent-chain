@@ -74,7 +74,7 @@ describe('schema migration', () => {
     const r = s.reserve({
       token: 'play',
       intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(),
-      amount: 10n, capWei: 100n, topic: '0xdead',
+      amount: 10n, stageCap: { cap: 100n }, topic: '0xdead',
     });
     s.close();
 
@@ -99,7 +99,7 @@ describe('schema migration', () => {
 
     const s = new Store(dbPath());
     const replay = s.reserve({
-      intentId: 'already-paid', agentId: 'orch:a', stage: 's1', amount: 5n, capWei: 100n, token: 'play',
+      intentId: 'already-paid', agentId: 'orch:a', stage: 's1', amount: 5n, stageCap: { cap: 100n }, token: 'play',
     });
     s.close();
 
@@ -188,7 +188,7 @@ describe('schema migration', () => {
     // nullable with no default: a default would turn "this was not a call" and
     // "we did not record it" into the same answer.
     const s1 = new Store(dbPath());
-    s1.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null, token: 'play' });
+    s1.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, stageCap: null, token: 'play' });
     s1.close();
 
     const db = new Database(dbPath());
@@ -302,7 +302,7 @@ describe('the facts the control is given', () => {
   it('intentsEmpty is true on a fresh store and false once an id is consumed', () => {
     const s = new Store(dbPath());
     expect(s.intentsEmpty()).toBe(true);
-    s.reserve({ intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(), amount: 1n, capWei: 10n, token: 'play' });
+    s.reserve({ intentId: 'i1', agentId: 'orch:a', stage: s.currentStage(), amount: 1n, stageCap: { cap: 10n }, token: 'play' });
     expect(s.intentsEmpty()).toBe(false);
     s.close();
   });
