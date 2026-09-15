@@ -887,6 +887,64 @@ contract Deploy is Script {
         // code this manifest describes, so skip it; or it holds SOMETHING ELSE,
         // which is refused by name with both codehashes rather than failing
         // inside a `new` with no indication of which module or why.
+        // Without local.json there is no address to check for code, so the
+        // question "has anything been deployed here?" cannot be answered
+        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
+        // what this replaces.
+        //
+        // The nonce answered a weaker question - has this account transacted
+        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
+        // whose deployer had done anything at all (a funding transfer, a
+        // probe, a previous run that reverted after its first transaction)
+        // refused a deployment that was perfectly safe. And a chain deployed
+        // from a DIFFERENT key read as untouched, because the nonce it checked
+        // was not the nonce that deployed anything - so the one case worth
+        // refusing, someone else's modules already live here, sailed through.
+        //
+        // An inferred signal cannot be made to mean what an operator meant. So
+        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
+        // statement that there is nothing here to orphan. Refusing costs one
+        // environment variable; being wrong the other way costs the game its
+        // money with no error at all.
+        //
+        // CHECKED BEFORE THE PER-MODULE LOOP, and the order is the message.
+        //
+        // With the manifest gone and the chain intact, BOTH refusals are true:
+        // there is no local.json, and the derived addresses are occupied. The
+        // loop's message would be the squat one - "another deployment is using
+        // this address" - which MISDESCRIBES it: that is our own deployment,
+        // whose manifest we lost. This one says restore the file, which is what
+        // the operator should do.
+        //
+        // So the squat message now fires only when the operator has said the
+        // chain is fresh AND an address is occupied anyway, which is exactly
+        // what it claims.
+        //
+        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
+        // below failing. Those are different: local.json can be present and
+        // point at dead addresses (a wiped chain), which is the forward case
+        // and must still redeploy. Guarding on the weaker condition made this
+        // fire for that case too - so the message could be false, and, worse,
+        // it MASKED the forward guard: a mutant disabling the cache check was
+        // caught here instead, which means neither guard was independently
+        // tested. Two guards satisfied by one scenario is two guards you have
+        // not tested.
+        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
+        // wrong direction for a flag whose whole job is to be deliberate:
+        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
+        // accident, and the operator who wrote 0 meant the opposite.
+        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
+            revert(
+                string.concat(
+                    "Deploy: refusing to deploy with no ",
+                    path,
+                    ". A fresh deployment on a chain that already has modules would orphan them ",
+                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
+                    "state that this chain has nothing to orphan."
+                )
+            );
+        }
+
         plan.addrs = new address[](mods.length);
         plan.needsDeploy = new bool[](mods.length);
         bool haveCache = vm.exists(path);
@@ -948,50 +1006,6 @@ contract Deploy is Script {
         // is a named volume, so they have independent lifetimes and either can
         // outlive the other.
         //
-        // Without local.json there is no address to check for code, so the
-        // question "has anything been deployed here?" cannot be answered
-        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
-        // what this replaces.
-        //
-        // The nonce answered a weaker question - has this account transacted
-        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
-        // whose deployer had done anything at all (a funding transfer, a
-        // probe, a previous run that reverted after its first transaction)
-        // refused a deployment that was perfectly safe. And a chain deployed
-        // from a DIFFERENT key read as untouched, because the nonce it checked
-        // was not the nonce that deployed anything - so the one case worth
-        // refusing, someone else's modules already live here, sailed through.
-        //
-        // An inferred signal cannot be made to mean what an operator meant. So
-        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
-        // statement that there is nothing here to orphan. Refusing costs one
-        // environment variable; being wrong the other way costs the game its
-        // money with no error at all.
-        //
-        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
-        // above failing. Those are different: local.json can be present and
-        // point at dead addresses (a wiped chain), which is the forward case
-        // and must still redeploy. Guarding on the weaker condition made this
-        // fire for that case too - so the message could be false, and, worse,
-        // it MASKED the forward guard: a mutant disabling the cache check was
-        // caught here instead, which means neither guard was independently
-        // tested. Two guards satisfied by one scenario is two guards you have
-        // not tested.
-        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
-        // wrong direction for a flag whose whole job is to be deliberate:
-        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
-        // accident, and the operator who wrote 0 meant the opposite.
-        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
-            revert(
-                string.concat(
-                    "Deploy: refusing to deploy with no ",
-                    path,
-                    ". A fresh deployment on a chain that already has modules would orphan them ",
-                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
-                    "state that this chain has nothing to orphan."
-                )
-            );
-        }
 
     }
 

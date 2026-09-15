@@ -15,11 +15,30 @@ RPC=${RPC:-http://127.0.0.1:8545}
 # it for a secret: the real ANVIL_MNEMONIC lives in the hub .env (spec S10) and
 # is generated with `cast wallet new-mnemonic`.
 MNEMONIC=${ANVIL_MNEMONIC:-"test test test test test test test test test test test junk"}
-CONTRACTS_DIR="$(cd "$(dirname "$0")/../contracts" && pwd)"
+# RESOLVED BEFORE ANY `cd`, both of them. `$0` is relative when the script is
+# invoked as `./docker/verify-chain.sh` - which is what the header tells you to
+# do - and the deploy section cd's into contracts/, after which
+# `$(dirname "$0")` names a directory that does not exist. The sibling script it
+# needs was then unfindable, and only in the one invocation the header
+# documents.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CONTRACTS_DIR="$(cd "$HERE/../contracts" && pwd)"
 
 step() { printf '\n=== %s\n' "$1"; }
 cleanup() { docker rm -f "$NAME" "$NAME-noq" "$NAME-argv" "$NAME-argv-control" >/dev/null 2>&1 || true; docker volume rm "$VOLUME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+
+# THE IMAGE MUST EXIST FIRST. Without it the two leading checks - "refuses
+# without a mnemonic", "refuses a truncated phrase" - PASS VACUOUSLY: `docker
+# run` fails because there is nothing to run, and a check that asserts a
+# non-zero exit cannot tell that from the refusal it is testing. The first two
+# rows of this script would report a working guard on an image that does not
+# exist.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+  echo "FAIL: no image $IMAGE - build it first:"
+  echo "  docker build -t $IMAGE docker -f docker/anvil.Dockerfile"
+  exit 1
+}
 
 cleanup
 rm -f "$CONTRACTS_DIR/../deployments/local.json"
@@ -114,7 +133,17 @@ if forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast >/tmp/re
   mv /tmp/local.json.hidden ../deployments/local.json
   echo "FAIL: redeployed with no local.json - the live token has been orphaned"; exit 1
 fi
-grep -oE "refusing to deploy[^\"]*" /tmp/redeploy.log | head -1
+# ASSERTED, NOT GREPPED FOR ITS EXIT STATUS. Under `set -e` a grep that finds
+# nothing kills the script with no FAIL line at all - so a CHANGED REFUSAL
+# MESSAGE looks identical to a crash, on correct behaviour. Capture, test, and
+# say which.
+refusal=$(grep -oE "Deploy: refusing to deploy with no [^\"]*" /tmp/redeploy.log | head -1 || true)
+if [ -z "$refusal" ]; then
+  echo "FAIL: it refused, but not with the no-manifest message. What it said:"
+  grep -oE "Deploy: [^\"]*" /tmp/redeploy.log | head -3
+  exit 1
+fi
+echo "$refusal"
 [ -f ../deployments/local.json ] && { echo "FAIL: it wrote a local.json anyway"; exit 1; }
 [ -f ../deployments/local.json.pending ] && { echo "FAIL: it wrote a pending manifest anyway"; exit 1; }
 echo "refused, and wrote nothing"
@@ -140,7 +169,7 @@ step "the one-shot never puts the mnemonic on a command line (finding 25)"
 # visible. It samples /proc via `docker top`, and a process that exits in
 # milliseconds may not be caught either way - which is exactly why it does not
 # gate: an unobserved run here would otherwise read as a pass.
-sh "$(dirname "$0")/test-mnemonic-argv.sh" || { echo "FAIL: the argv test failed"; exit 1; }
+sh "$HERE/test-mnemonic-argv.sh" || { echo "FAIL: the argv test failed"; exit 1; }
 
 docker run -d --rm --name "$NAME-argv" --entrypoint /bin/sh "$IMAGE" \
   -c "umask 077; f=\$(mktemp); printf '%s' '$MNEMONIC' > \$f; cast wallet private-key --mnemonic \$f >/dev/null; sleep 3" >/dev/null

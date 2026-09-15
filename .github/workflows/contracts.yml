@@ -28,15 +28,6 @@ on:
 permissions:
   contents: read
 
-# FFI OFF, STATED. Foundry's FFI lets a test shell out, and `forge test` runs
-# every file under test/ including any a dependency update drags in. foundry.toml
-# does not enable it, so this changes nothing today - which is the point: it
-# makes "this workflow does not execute arbitrary commands on our runner" a
-# property of the WORKFLOW rather than of a config file two directories away
-# that a future edit could flip without anyone reading this file.
-env:
-  FOUNDRY_FFI: false
-
 jobs:
   forge:
     runs-on: ubuntu-latest
@@ -50,6 +41,35 @@ jobs:
           # Pinned to the version the contracts were written and reviewed
           # against; foundry.toml pins solc and the EVM version to match.
           version: v1.8.1
+
+      # FFI STAYS OFF, CHECKED IN THE CONFIG RATHER THAN SET IN THE ENV.
+      #
+      # This was `FOUNDRY_FFI: false` in the job env, and that is INERT -
+      # measured by the reviewer with `ffi = true` inserted in
+      # [profile.default]: forge ran the shelled-out command on the runner with
+      # the variable set in every spelling. `--ffi` is ENABLE-ONLY and the env
+      # var is its binding, so there is no value of it that turns the feature
+      # off. A control that cannot fail closed is worse than none: it reads as a
+      # guarantee.
+      #
+      # So the guarantee is the one thing that can actually be asserted here -
+      # that the config does not enable it. FFI lets a test shell out, and
+      # `forge test` runs every file under test/ including any a dependency
+      # update drags in.
+      - name: refuse ffi in the config
+        working-directory: contracts
+        run: |
+          if grep -qE '^[[:space:]]*ffi[[:space:]]*=[[:space:]]*true' foundry.toml; then
+            echo "::error::ffi must not be enabled in CI - forge test would run arbitrary commands on the runner"
+            exit 1
+          fi
+          echo "ffi is not enabled in foundry.toml"
+
+      # The guard above is one line and its regression test is not, because the
+      # obvious way to write that test passes for the wrong reason - see the
+      # script.
+      - name: the ffi guard can fail
+        run: sh .github/scripts/test-ffi-guard.sh
 
       - name: forge test
         working-directory: contracts
