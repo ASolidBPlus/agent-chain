@@ -82,23 +82,30 @@ contract Deploy is Script {
         deploy(
             vm.envOr("DEPLOYMENTS_DIR", string("../deployments")),
             vm.envOr("INITIAL_SUPPLY_VEE", string("")),
-            vm.envOr("ALLOW_FRESH_DEPLOY", string(""))
+            vm.envOr("ALLOW_FRESH_DEPLOY", string("")),
+            vm.envUint("DEPLOYER_PRIVATE_KEY")
         );
     }
 
-    /// `allowFreshDeploy` is READ FROM THE ENV BY `run()` AND PASSED IN, exactly
-    /// as the retired supply variable is, rather than read here.
+    /// EVERY INPUT IS A PARAMETER; `run()` reads the environment and passes them
+    /// in. That includes the DEPLOYER KEY, which was read here.
     ///
     /// Not a style choice: `vm.setEnv` writes a PROCESS-WIDE variable and forge
-    /// runs test contracts in PARALLEL, so a test that unset this to exercise
-    /// the refusal unset it for every suite running beside it. Measured - six
-    /// unrelated deploy tests failed with this refusal, in a run where the only
+    /// runs test contracts in PARALLEL, so a test that changes one changes it
+    /// for every suite running beside it. Measured with `ALLOW_FRESH_DEPLOY` -
+    /// six unrelated deploy tests failed with its refusal, in a run whose only
     /// change was one test setting the variable to "". A parameter is a value
     /// one call has; an env var is a value the whole process shares.
-    function deploy(string memory dir, string memory retiredSupplyEnv, string memory allowFreshDeploy)
-        public
-    {
-        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
+    ///
+    /// The key is the same problem waiting: a KEY-ROTATION probe had to run in
+    /// its own forge process, because setting `DEPLOYER_PRIVATE_KEY` reached
+    /// every other suite. As a parameter, rotation is just a different argument.
+    function deploy(
+        string memory dir,
+        string memory retiredSupplyEnv,
+        string memory allowFreshDeploy,
+        uint256 deployerKey
+    ) public {
         address treasury = vm.addr(deployerKey);
 
         string memory path = string.concat(dir, "/local.json");

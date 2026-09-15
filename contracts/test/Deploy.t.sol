@@ -24,7 +24,11 @@ contract DeployTest is Test {
 
     function setUp() public {
         treasury = vm.addr(KEY);
-        vm.setEnv("DEPLOYER_PRIVATE_KEY", vm.toString(KEY));
+        // NO `vm.setEnv` HERE ANY MORE. Every input `deploy()` needs is a
+        // parameter; `run()` is the only thing that reads the environment. That
+        // is what lets a key-rotation case be a different ARGUMENT rather than
+        // a whole forge process - `vm.setEnv` is process-wide and forge runs
+        // test contracts in parallel.
         // UNIQUE PER RUN, not per second. `block.timestamp` is the same for two
         // runs in the same second, so a FAILING run - which leaves its directory
         // behind, because `_clean` never reaches - fed the next run a local.json
@@ -89,7 +93,7 @@ contract DeployTest is Test {
     /// Deploy and promote, which together are one successful run of the
     /// container's one-shot.
     function _deployed(Deploy d, string memory dir, string memory supply) internal returns (bool) {
-        d.deploy(dir, supply, "1");
+        d.deploy(dir, supply, "1", KEY);
         return _promote(dir);
     }
 
@@ -124,7 +128,7 @@ contract DeployTest is Test {
         // for every suite running beside this one - measured, six unrelated
         // deploy tests failed with this refusal. The flag is a parameter for
         // exactly that reason; the env read lives in `run()`.
-        d.deploy(dir, "", "");
+        d.deploy(dir, "", "", KEY);
 
         // Nothing was written: the refusal happens before any broadcast.
         assertFalse(vm.exists(string.concat(dir, "/local.json")), "local.json must not exist");
@@ -142,7 +146,7 @@ contract DeployTest is Test {
             string memory value = i == 0 ? "0" : i == 1 ? "true" : i == 2 ? "yes" : "  1";
             Deploy d = _script();
             vm.expectRevert(bytes(_freshRefusal(dir)));
-            d.deploy(dir, "", value);
+            d.deploy(dir, "", value, KEY);
         }
 
         // ...and the control: the exact string deploys, or the loop above would
@@ -180,7 +184,7 @@ contract DeployTest is Test {
         _write(dir, _example("token-and-names.json"));
 
         Deploy d = _script();
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
 
         assertTrue(
             vm.exists(string.concat(dir, "/local.json.pending")),
@@ -225,7 +229,7 @@ contract DeployTest is Test {
                 )
             )
         );
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -260,7 +264,7 @@ contract DeployTest is Test {
                 )
             )
         );
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -293,7 +297,7 @@ contract DeployTest is Test {
                 )
             )
         );
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -325,7 +329,7 @@ contract DeployTest is Test {
                 )
             )
         );
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -363,7 +367,7 @@ contract DeployTest is Test {
         assertFalse(vm.keyExistsJson(vm.readFile(path), ".modules[0].codehash"), "the fixture must lack it");
 
         Deploy again = _script();
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         // Promotion writes through the same pending/promote path as a deploy.
         _promote(dir);
 
@@ -454,7 +458,7 @@ contract DeployTest is Test {
                 )
             )
         );
-        d.deploy(dir2, "", "1");
+        d.deploy(dir2, "", "1", KEY);
         _clean(dir2);
     }
 
@@ -488,7 +492,7 @@ contract DeployTest is Test {
         // address, same codehash, same chain, same treasury in the file.
         Deploy again = _script();
         vm.expectRevert(bytes("Deploy: treasury lacks DEFAULT_ADMIN_ROLE"));
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -515,7 +519,68 @@ contract DeployTest is Test {
 
         Deploy again = _script();
         vm.expectRevert(bytes("Deploy: treasury lacks MINTER_ROLE"));
-        again.deploy(dir, "", "1");
+        again.deploy(dir, "", "1", KEY);
+        _clean(dir);
+    }
+
+    // ── the rotation cases, now possible in ONE forge process ───────────────
+
+    /// A ROTATED DEPLOYER KEY over an existing deployment is refused, and the
+    /// refusal names both treasuries.
+    ///
+    /// This test is the reason the key became a parameter. It needed its own
+    /// forge process while `deploy()` read `DEPLOYER_PRIVATE_KEY` from the
+    /// environment, because `vm.setEnv` is process-wide and forge runs test
+    /// contracts in parallel - the same trap that broke six unrelated tests
+    /// when `ALLOW_FRESH_DEPLOY` was read that way. As an argument, rotation is
+    /// just a different argument.
+    function test_ARotatedKeyIsRefusedOverAnExistingDeployment() public {
+        string memory dir = _dir("rotate");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        uint256 newKey = 0xB0B;
+        address newTreasury = vm.addr(newKey);
+        Deploy again = _script();
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: ",
+                    dir,
+                    "/local.json was written by treasury ",
+                    vm.toString(treasury),
+                    "; this deployer is ",
+                    vm.toString(newTreasury),
+                    " - the recorded modules' roles belong to the old key"
+                )
+            )
+        );
+        again.deploy(dir, "", "1", newKey);
+        _clean(dir);
+    }
+
+    /// AND THE CASE THAT MOTIVATED THE WHOLE FRESH-DEPLOY RULE: a rotated key
+    /// with the manifest GONE. Every derived address moves with the treasury -
+    /// it is a constructor argument - so nothing is occupied, the foreign-code
+    /// check has nothing to see, and without a guard this deploys a second set
+    /// beside the live one with the old token still holding the supply.
+    ///
+    /// The guard that stops it is the flag, and the container decides the flag
+    /// from the chain's block height rather than from the filesystem. Here,
+    /// where there is no chain to ask, the flag is simply absent.
+    function test_ARotatedKeyWithNoManifestRefusesWithoutTheFlag() public {
+        string memory dir = _dir("rotate-nomanifest");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+        vm.removeFile(string.concat(dir, "/local.json"));
+
+        Deploy again = _script();
+        vm.expectRevert(bytes(_freshRefusal(dir)));
+        again.deploy(dir, "", "", 0xB0B);
+
+        assertFalse(vm.exists(string.concat(dir, "/local.json.pending")), "nothing should be written");
         _clean(dir);
     }
 
@@ -696,7 +761,7 @@ contract DeployTest is Test {
         string memory dir = _dir("absent");
         Deploy d = _script();
         vm.expectRevert(bytes(string.concat("Deploy: manifest: none found at ", dir, "/manifest.json; a deployment must declare its modules")));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         vm.removeDir(dir, true);
     }
 
@@ -705,7 +770,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":2,"modules":[{"kind":"names","tld":"play"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest schema 2 unsupported"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -714,7 +779,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: at least one module is required"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -723,7 +788,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"oracle"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: unknown kind "oracle"'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -735,7 +800,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate key "play"'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -747,7 +812,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate symbol "PLAY"'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -756,7 +821,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"names","tld":"a"},{"kind":"names","tld":"b"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: more than one names module"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -765,7 +830,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"token","key":"play","name":"A","symbol":"play"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: token "play" has an invalid symbol'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -774,7 +839,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"token","key":"play","name":"A","symbol":"AAA","initialSupply":"1.5"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: token "play" has an invalid initialSupply'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -783,7 +848,7 @@ contract DeployTest is Test {
         _write(dir, '{"schema":1,"modules":[{"kind":"names","tld":"PLAY"}]}');
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: names module has an invalid tld"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -792,7 +857,7 @@ contract DeployTest is Test {
         _write(dir, _example("token-only.json"));
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: INITIAL_SUPPLY_VEE is retired; put initialSupply in the manifest"));
-        d.deploy(dir, "1000", "1");
+        d.deploy(dir, "1000", "1", KEY);
         _clean(dir);
     }
 
@@ -841,7 +906,7 @@ contract DeployTest is Test {
             // manifest this script accepted.
             bytes("Deploy: local.json declares modules token:play,names:; manifest asks for token:play - redeploy on a fresh chain or fix the manifest")
         );
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
 
         _clean(dir);
     }
@@ -921,7 +986,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: pair play->gold x gold->play mints value"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -936,7 +1001,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: converter pair target "gold" is not a token key'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -951,7 +1016,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: converter pair "play" converts to itself'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -968,7 +1033,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: more than one converter module"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -983,7 +1048,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes("Deploy: manifest: converter has no pairs"));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -1123,7 +1188,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: "@gold" is not deployed yet'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -1138,7 +1203,7 @@ contract DeployTest is Test {
         vm.expectRevert(
             bytes('Deploy: manifest: constructor arg type "string" is not supported; use an initialiser function')
         );
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -1150,7 +1215,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: no artifact for "NoSuchContract"'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 
@@ -1164,7 +1229,7 @@ contract DeployTest is Test {
         );
         Deploy d = _script();
         vm.expectRevert(bytes('Deploy: manifest: duplicate key "play"'));
-        d.deploy(dir, "", "1");
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 }
