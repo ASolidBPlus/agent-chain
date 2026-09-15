@@ -107,6 +107,23 @@ export function fixedCallPolicy(entries: CallEntry[]): CallPolicySource {
 /// digits only. `isCap` refuses a JSON number for the same reason.
 const WHOLE_UNITS = /^\d{1,30}$/;
 
+/// EVERY KEY AN ENTRY MAY CARRY. A key outside this set refuses the file, with
+/// the key named.
+///
+/// It was not checked, and v0.8.0 is what made that expensive. Absent `kinds`
+/// used to be a different thing from any-kind; now it MEANS any kind, so
+/// `"kindz": ["org"]` loads clean, logs "1 entry", and an entry its author
+/// restricted to orgs is callable by every wallet kind in the game. The typo
+/// WIDENS, silently, and the file still looks right to whoever wrote it.
+///
+/// The same reasoning as the `admin`, `perTxCap` and `uncapped` refusals, which
+/// keep their own messages because a key that was REMOVED deserves a sentence
+/// about what replaced it. This is the catch-all under them: a key nobody has
+/// ever heard of is a typo, and a typo in a security boundary is not a comment.
+const ENTRY_KEYS = [
+  'contract', 'function', 'kinds', 'read', 'amount', 'maxPerStage', 'intentArg', 'addressArgs',
+] as const;
+
 /// Function names that hand one address the right to spend another's balance.
 ///
 /// The ERC-20 pair, plus the two extensions a token is likely to carry. Listed
@@ -364,6 +381,19 @@ function parseEntry(raw: unknown, index: number, modules: Modules): CallEntry {
         `${where}: "${retired}" is retired; caps are per wallet per token in policy`,
       );
     }
+  }
+
+  // ...AND ANYTHING ELSE. Below the three named refusals above, because a key
+  // that was removed deserves a sentence about what replaced it; what is left
+  // is a key this loader has never had, which is a typo.
+  const unknown = Object.keys(e).filter((k) => !(ENTRY_KEYS as readonly string[]).includes(k));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${where}: unknown ${unknown.length === 1 ? 'key' : 'keys'} ` +
+        `${unknown.map((k) => `"${k}"`).join(', ')}. An entry may carry ` +
+        `${ENTRY_KEYS.join(', ')}. A misspelled "kinds" would leave the entry callable by ` +
+        `ANY kind, since v0.8.0 reads an absent one that way.`,
+    );
   }
 
   let intentArg: number | undefined;

@@ -346,6 +346,56 @@ describe('kinds', () => {
     expect(logged.join('\n')).toMatch(/"admin" was removed at v0.8.0/);
   });
 
+  // THE TYPO THAT WIDENS. v0.8.0 made an absent `kinds` mean ANY kind, so a
+  // misspelled one stops being a no-op and becomes a grant: the entry its author
+  // restricted to orgs is callable by every wallet kind, the file loads clean and
+  // the boot line says "1 entry". Before v0.8.0 the same typo was harmless.
+  it('refuses an entry key the loader has never had, naming it', async () => {
+    write(only({ ...CONVERT, kindz: ['org'] }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/unknown key "kindz"/);
+  });
+
+  it('names every unknown key, not the first', async () => {
+    write(only({ ...CONVERT, kindz: ['org'], reed: true }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(0);
+    expect(logged.join('\n')).toMatch(/unknown keys "kindz", "reed"/);
+  });
+
+  // THE CONTROL ON THE CATCH-ALL. A removed key must keep its OWN message -
+  // "admin was removed at v0.8.0, here is what replaced it" is worth more to
+  // the operator holding a stale file than "unknown key". If the generic check
+  // ever floats above the named ones, this row says so.
+  it('a REMOVED key still gets its own message, not the generic one', async () => {
+    for (const [field, pattern] of [
+      ['admin', /"admin" was removed at v0.8.0/],
+      ['perTxCap', /"perTxCap" is retired/],
+      ['uncapped', /"uncapped" is retired/],
+    ] as Array<[string, RegExp]>) {
+      logged = [];
+      write(only({ ...CONVERT, [field]: field === 'admin' ? true : 1 }));
+      const p = await policy();
+      expect(p.snapshot().entries).toHaveLength(0);
+      expect(logged.join('\n')).toMatch(pattern);
+      expect(logged.join('\n')).not.toMatch(/unknown key/);
+    }
+  });
+
+  // ...and the control on THAT control: the known eight all load together, so
+  // the rows above cannot be passing because the loader refuses everything.
+  it('accepts an entry carrying every key it may carry', async () => {
+    write(only({
+      contract: 'converter', function: 'convert', kinds: ['org'], read: false,
+      amount: { arg: 2, token: { arg: 0 } }, maxPerStage: 20, intentArg: 3,
+      addressArgs: { 0: 'token', 1: 'token' },
+    }));
+    const p = await policy();
+    expect(p.snapshot().entries).toHaveLength(1);
+    expect(logged.join('\n')).not.toMatch(/unknown/);
+  });
+
   it('refuses a kind that is not a wallet kind', async () => {
     write(only({ ...CONVERT, kinds: ['org', 'wizard'] }));
     const p = await policy();
