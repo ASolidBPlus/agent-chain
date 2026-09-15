@@ -142,7 +142,6 @@ const CONVERT: CallEntry = {
   contract: 'converter',
   function: 'convert',
   kinds: ['org', 'agent'],
-  admin: false,
   read: false,
   amount: { arg: 2, token: { arg: 0 } },
   // No `perTxCap`: retired. The bound for whichever token the {arg} form
@@ -157,7 +156,6 @@ const DONATE: CallEntry = {
   contract: 'converter',
   function: 'donate',
   kinds: ['agent'],
-  admin: false,
   read: false,
   addressArgs: { 0: 'name' },
   abiFunction: abiFunction('donate'),
@@ -170,7 +168,6 @@ const UNRULED: CallEntry = {
   contract: 'converter',
   function: 'donate',
   kinds: ['agent'],
-  admin: false,
   read: false,
   addressArgs: {},
   abiFunction: abiFunction('donate'),
@@ -180,7 +177,6 @@ const QUOTE: CallEntry = {
   contract: 'converter',
   function: 'quote',
   kinds: ['agent'],
-  admin: false,
   read: true,
   addressArgs: { 0: 'token', 1: 'token' },
   abiFunction: abiFunction('quote'),
@@ -198,7 +194,6 @@ const SEED: CallEntry = {
   contract: 'converter',
   function: 'seed',
   kinds: [],
-  admin: true,
   read: false,
   amount: { arg: 1, token: { arg: 0 } },
   addressArgs: { 0: 'token' },
@@ -209,7 +204,6 @@ const SET_PAIR: CallEntry = {
   contract: 'converter',
   function: 'setPair',
   kinds: [],
-  admin: true,
   read: false,
   addressArgs: {},
   abiFunction: abiFunction('setPair'),
@@ -900,15 +894,56 @@ describe('admin-call', () => {
     ).toBe('bad_args');
   });
 
-  it('refuses an entry that is not marked admin', async () => {
-    // The hub's powers are written down too. Platform scope could bypass a
-    // list; requiring the entry is what puts them on the record.
+  // §2. FLIPPED at v0.8.0. This asserted that the hub could only call a
+  // function the allowlist marked `admin`, so its powers were "on the record".
+  // The platform IS the game: the allowlist describes the shape of the PERSONA
+  // surface, and an operator is not on it.
+  //
+  // An entry, WHEN ONE EXISTS, is still USED rather than bypassed - `convert`
+  // has one here, so its `intentArg` is injected and its `amount` rule feeds
+  // the event, and the call looks the same whoever made it.
+  it('uses a persona entry when one exists, rather than bypassing it', async () => {
+    const { t, store } = await harness();
+    await t.adminCall({ contract: 'converter', function: 'convert', args: [PLAY, GOLD, '1'], intentId: 'a-4' });
+    // THE ENTRY'S intentArg WAS INJECTED: `convert` declares slot 3, and the
+    // platform passed three arguments. A bypass would have encoded three.
+    expect(adminArgs[0]).toHaveLength(4);
+    // ...and the entry's amount rule fed the event.
+    const ev = store.dueEvents(10).map((e) => JSON.parse(e.payload) as Record<string, unknown>)
+      .find((e) => e.kind === 'hub.call')!;
+    expect(ev.amount).toEqual({ value: '1', token: 'play' });
+  });
+
+  it('calls a function with NO entry at all', async () => {
+    // "Any function of any registered contract." `setPaused` has no entry in
+    // this fixture, so nothing about it was written down anywhere.
+    // An EMPTY allowlist: the persona surface is closed entirely, and the
+    // platform still reaches `donate`. That is the §2 rule at its starkest -
+    // an absent calls.json means personas can call nothing, and means nothing
+    // at all about what an operator may do.
+    const { t } = await harness([]);
+    await t.adminCall({ contract: 'converter', function: 'donate', args: [PLAY], intentId: 'a-11' });
+    expect(written).toEqual([CONV]);
+  });
+
+  it('refuses a function that is not on the contract at all', async () => {
+    // "Any function" is any function THIS CONTRACT HAS. The registry is the
+    // authority, and the refusal is the same one a missing entry used to give.
     const { t } = await harness();
     expect(
-      await codeOf(() =>
-        t.adminCall({ contract: 'converter', function: 'convert', args: [PLAY, GOLD, '1'], intentId: 'a-4' }),
-      ),
+      await codeOf(() => t.adminCall({ contract: 'converter', function: 'nosuch', args: [], intentId: 'a-12' })),
     ).toBe('function_not_allowed');
+  });
+
+  it('refuses an entry-less VIEW, because a view is read and not called', async () => {
+    // "Any function" must not mean signing a transaction to learn something
+    // `POST /read` answers for free.
+    const { t } = await harness([]);
+    expect(
+      await codeOf(() =>
+        t.adminCall({ contract: 'converter', function: 'quote', args: [PLAY, GOLD, '1'], intentId: 'a-13' }),
+      ),
+    ).toBe('invalid_request');
   });
 
   it('answers a simulated revert with revert, not chain_error', async () => {
@@ -1397,7 +1432,6 @@ describe('the read size bound', () => {
         contract: 'converter',
         function: 'quote',
         kinds: ['agent'],
-        admin: false,
         read: true,
         addressArgs: { 0: 'token', 1: 'token' },
         abiFunction: {

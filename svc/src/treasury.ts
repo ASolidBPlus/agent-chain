@@ -20,6 +20,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { createHash, randomUUID } from 'node:crypto';
 import { TokenAbi } from './abi.ts';
 import { validateArgs, type EncodableArg, type WireAddress } from './callargs.ts';
+import { assertRailAllows } from './calls.ts';
 import type { Allowlist, CallEntry, CallPolicySource } from './calls.ts';
 import type { Chain } from './chain.ts';
 import { asChainError, ZERO_FEES } from './chain.ts';
@@ -1161,6 +1162,28 @@ export class Treasury {
   /// written against the contract - while the caller's `args` array has the
   /// intentArg slot missing. Every refusal quotes the CALLER's index, because
   /// that is the one they can act on.
+  /// One function of a registered contract, from the registry's own ABI.
+  ///
+  /// The allowlist's `parseEntry` resolves this at LOAD for an entry; an
+  /// entry-less `admin-call` has nowhere to have done that, so it happens here
+  /// and refuses the same two ways: not a function of this contract, or a name
+  /// that does not identify one.
+  private static registryFunction(
+    contract: { key: string; abi: unknown },
+    name: string,
+  ): { stateMutability?: string; inputs?: readonly unknown[] } {
+    const matches = (contract.abi as ReadonlyArray<Record<string, unknown>>).filter(
+      (f) => f.type === 'function' && f.name === name,
+    );
+    if (matches.length === 0) {
+      throw new HttpError('function_not_allowed', `${name} is not a function of ${contract.key}`);
+    }
+    if (matches.length > 1) {
+      throw new HttpError('invalid_request', `"${name}" is overloaded in ${contract.key}; not supported`);
+    }
+    return matches[0]! as { stateMutability?: string; inputs?: readonly unknown[] };
+  }
+
   private static callerInputs(entry: CallEntry): {
     inputs: AbiParameter[];
     /// caller index -> ABI index.
@@ -1418,7 +1441,6 @@ export class Treasury {
     if (!entry) refuse();
     if (want === 'read' && !entry!.read) refuse();
     if (want !== 'read' && entry!.read) refuse();
-    if (want === 'admin' && !entry!.admin) refuse();
     return entry!;
   }
 
@@ -1477,7 +1499,8 @@ export class Treasury {
     //    "this wallet was spawned before chain-svc recorded kinds", which stays
     //    the true answer to a different question.
     const kind = this.store.walletRow(fromAgentId)?.kind ?? 'agent';
-    if (!entry.kinds.includes(kind)) {
+    // ABSENT `kinds` means any kind may call it. A written list still binds.
+    if (entry.kinds !== undefined && !entry.kinds.includes(kind)) {
       throw new HttpError('function_not_allowed', `${entry.function} is not callable on ${contract.key}`);
     }
 
@@ -1754,12 +1777,50 @@ export class Treasury {
       throw new HttpError('invalid_request', 'contract must be a string');
     }
     const contract = requireContract(this.chain.modules, body.contract);
-    const entry = this.entryFor(snapshot, contract.key, body.function, 'admin');
+    if (typeof body.function !== 'string') {
+      throw new HttpError('invalid_request', 'function must be a string');
+    }
+    const fnName = body.function;
+
+    // §2. ANY FUNCTION OF ANY REGISTERED CONTRACT, with or without an entry.
+    // THE PLATFORM IS THE GAME; the allowlist describes the shape of the
+    // PERSONA surface, and an operator is not on it.
+    //
+    // An entry, WHEN ONE EXISTS, is still USED rather than bypassed: its
+    // `intentArg` is injected and its `amount` rule feeds the event, so the
+    // same call made through an allowlisted function looks the same whoever
+    // made it. Bypassing a present entry would make the hub's events a
+    // different shape from a persona's for no reason anyone chose.
+    const entry = snapshot.find(contract.key, fnName) ?? null;
+    const abiFunction = entry
+      ? entry.abiFunction
+      : Treasury.registryFunction(contract, fnName);
+
+    // The rail's own rules, which are not permissions and hold for the platform
+    // exactly as for a persona. An ENTRY has already met them at load; a
+    // function reached without one meets them here, at request time, which is
+    // the only place it can.
+    if (!entry) {
+      try {
+        assertRailAllows(fnName, abiFunction as never, `admin-call ${fnName} on ${contract.key}`);
+      } catch (err) {
+        throw new HttpError('invalid_request', err instanceof Error ? err.message : String(err));
+      }
+      const mut = (abiFunction as { stateMutability?: string }).stateMutability;
+      if (mut === 'view' || mut === 'pure') {
+        // "Any function" must not mean signing a transaction to read one.
+        throw new HttpError('invalid_request', 'a view is read, not called; use POST /read');
+      }
+    } else if (entry.read) {
+      throw new HttpError('invalid_request', 'a view is read, not called; use POST /read');
+    }
 
     const supplied = Array.isArray(body.args) ? body.args : null;
     if (supplied === null) throw new HttpError('bad_args', 'args must be an array');
-    const { inputs } = Treasury.callerInputs(entry);
-    const shaped = validateArgs(inputs, supplied, 'platform');
+    const { inputs } = entry
+      ? Treasury.callerInputs(entry)
+      : { inputs: (abiFunction as { inputs?: readonly unknown[] }).inputs ?? [] };
+    const shaped = validateArgs(inputs as never, supplied, 'platform');
 
     // §4. THE SAME `amount` THE AGENT EVENT CARRIES, so the feed reader sees one
     // shape for both. Informational only here: §3.3 gives the hub no cap, so
@@ -1770,7 +1831,10 @@ export class Treasury {
     // resolution and the whole-units-to-smallest-units scaling happen once in
     // the codebase. `calls.json` accepts an `amount` on an admin entry, so this
     // is reachable rather than defensive.
-    const money = this.callMoney(entry, shaped, supplied);
+    // NO ENTRY MEANS NO AMOUNT RULE, so the event carries no `amount`. The
+    // platform passed every argument itself and nothing here knows which of
+    // them is money.
+    const money = entry ? this.callMoney(entry, shaped, supplied) : null;
     // The scaled amount is what the contract is called with - the same
     // write-back the agent path does at its call site, and for the same reason:
     // the validator read the wire's "40" as 40n, which is right for an ordinary
@@ -1811,11 +1875,11 @@ export class Treasury {
       // idempotency half only - so this is a coordinate, not a claim that
       // anything was held in that currency.
       token: defaultToken(this.chain.modules).key,
-      call: { contract: contract.key, function: entry.function, argsHash },
+      call: { contract: contract.key, function: fnName, argsHash },
     });
     if (reservation.outcome === 'duplicate') {
       const first = this.store.intentCall(intentId);
-      if (first && (first.contract !== contract.key || first.function !== entry.function || first.argsHash !== argsHash)) {
+      if (first && (first.contract !== contract.key || first.function !== fnName || first.argsHash !== argsHash)) {
         throw new HttpError(
           'invalid_request',
           `intent_id reused with a different call: ${intentId} was reserved for ` +
@@ -1830,7 +1894,9 @@ export class Treasury {
       );
     }
 
-    const finalArgs = Treasury.withIntentArg(entry, shaped, intentId);
+    // WITH AN ENTRY the server fills the intent slot; WITHOUT one the platform
+    // passed every argument itself, including any bytes32 intent it wanted.
+    const finalArgs = entry ? Treasury.withIntentArg(entry, shaped, intentId) : shaped;
     let hash: `0x${string}`;
     try {
       hash = await this.chain.walletClient.writeContract({
@@ -1838,7 +1904,7 @@ export class Treasury {
         chain: this.chain.viemChain,
         address: contract.address,
         abi: contract.abi,
-        functionName: entry.function,
+        functionName: fnName,
         args: finalArgs as never,
         ...ZERO_FEES,
       });
@@ -1855,7 +1921,7 @@ export class Treasury {
       // consumes the intent id, so a retry needs a fresh one. The hub generates
       // one per request unless it supplies its own, so in practice this is the
       // operator repeating a command rather than reconciling anything.
-      const classified = this.asCallError(err, `admin-call ${entry.function} on ${contract.key}`);
+      const classified = this.asCallError(err, `admin-call ${fnName} on ${contract.key}`);
       // THE OPERATOR'S REFUSED ACTION REACHES THE FEED TOO (ruled).
       // `status: "refused"` is a third value beside ok and reverted, and it is
       // not decoration: nothing was mined, so a null hash under "reverted"
@@ -1866,7 +1932,7 @@ export class Treasury {
         this.store.enqueueEvent('hub.call', {
           kind: 'hub.call',
           contract: contract.key,
-          function: entry.function,
+          function: fnName,
           args: supplied,
           intent_id: intentId,
           txHash: null,
@@ -1883,7 +1949,7 @@ export class Treasury {
     this.store.enqueueEvent('hub.call', {
       kind: 'hub.call',
       contract: contract.key,
-      function: entry.function,
+      function: fnName,
       args: supplied,
       intent_id: intentId,
       txHash: hash,
@@ -1892,7 +1958,7 @@ export class Treasury {
     });
     if (reverted) {
       console.warn(
-        `[chain-svc] admin-call ${entry.function} on ${contract.key} reverted ` +
+        `[chain-svc] admin-call ${fnName} on ${contract.key} reverted ` +
           `(intent ${intentId}, tx ${hash})`,
       );
       throw new HttpError('revert', 'the call was mined and reverted; nothing changed');
@@ -1922,7 +1988,7 @@ export class Treasury {
     if (!platform) {
       const agentId = walletPrincipal(principal, undefined);
       const kind = this.store.walletRow(agentId)?.kind ?? 'agent';
-      if (!entry.kinds.includes(kind)) {
+      if (entry.kinds !== undefined && !entry.kinds.includes(kind)) {
         throw new HttpError('function_not_allowed', `${entry.function} is not readable on ${contract.key}`);
       }
     }

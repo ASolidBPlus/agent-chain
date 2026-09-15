@@ -499,13 +499,20 @@ async function getCalls({ services, principal }: RouteContext): Promise<unknown>
   const platform = principal.scope === 'platform';
   const kind = platform ? null : services.store.walletRow(principal.agentId!)?.kind ?? 'agent';
 
-  const visible = snapshot.entries.filter((e) => (platform ? true : kind && e.kinds.includes(kind)));
+  // ABSENT `kinds` means ANY kind, so an entry without them is visible to every
+  // wallet. `kinds: []` cannot occur - it is refused at load.
+  const visible = snapshot.entries.filter(
+    (e) => platform || (kind !== null && (e.kinds === undefined || e.kinds.includes(kind))),
+  );
   return {
     calls: visible.map((e) => ({
       contract: e.contract,
       function: e.function,
       read: e.read,
-      ...(platform ? { admin: e.admin, kinds: e.kinds } : {}),
+      // `admin` left the entry shape at v0.8.0. `kinds` is NULL rather than
+      // absent when the entry writes none, so a platform reader can tell "any
+      // kind" from a field this reply forgot to include.
+      ...(platform ? { kinds: e.kinds ?? null } : {}),
       params: (e.abiFunction.inputs as ReadonlyArray<{ name?: string; type: string }>).flatMap(
         (input, i) => {
           // The slot the SERVER fills is not a parameter this caller has: a
