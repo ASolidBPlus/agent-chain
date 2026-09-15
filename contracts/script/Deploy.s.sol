@@ -129,7 +129,21 @@ contract Deploy is Script {
         // In its own function because `deploy()` is already at the stack limit -
         // the same reason `_deployContract` lives apart from it.
         Plan memory plan = _plan(dir, path, manifest, mods, treasury, allowFreshDeploy);
-        if (plan.done) return;
+        if (plan.done) {
+            // THE SKIP PATH ASSERTS TOO, and this is the whole of residual B.
+            //
+            // Roles are STORAGE. The codehash proves the code at an address is
+            // the code this manifest describes and says nothing about who
+            // administers it - so a treasury that had renounced DEFAULT_ADMIN
+            // and MINTER, or handed them to someone else, got "nothing to do"
+            // on every compose restart. The modules were the right contracts at
+            // the right addresses, administered by a stranger.
+            //
+            // Read-only, no broadcast: this asks the chain questions and
+            // changes nothing.
+            _assertDeployment(mods, plan.addrs, pairs, treasury);
+            return;
+        }
 
         address namesAddr = address(0);
         address converterAddr = address(0);
@@ -222,153 +236,8 @@ contract Deploy is Script {
         }
         vm.stopBroadcast();
 
-        for (uint256 i = 0; i < mods.length; i++) {
-            if (_eq(mods[i].kind, KIND_TOKEN)) {
-                Token t = Token(plan.addrs[i]);
-                require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
-                // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
-                // script - so this asserts a property of the contract rather
-                // than confirming its own work, which is the more useful
-                // direction: a constructor that stopped granting it would fail
-                // the deploy instead of producing a chain where no freeze is
-                // possible and nothing says so until the first one is tried.
-                require(t.hasRole(t.FREEZER_ROLE(), treasury), "Deploy: treasury lacks FREEZER_ROLE");
-                // BURNER_ROLE is held by the CONVERTER alone when a deployment
-                // has one, and by NOBODY otherwise. AccessControl has no member
-                // enumeration, so that is asserted against the address that could
-                // plausibly hold it: the treasury, which is this token's
-                // DEFAULT_ADMIN and the only account this script grants to. The
-                // converter's own grants are asserted in its branch below.
-                //
-                // THERE WAS A SECOND ASSERTION HERE, against `address(this)`,
-                // and finding it cost a compose smoke. `forge script
-                // --broadcast` REFUSES `address(this)` in a script contract -
-                // "script contracts are ephemeral and their addresses should not
-                // be relied upon" - while `forge test` allows it. So it passed
-                // locally and reverted the deploy inside the container, which is
-                // the only place it ran for real. Do not reinstate it here.
-                //
-                // It was also asking the wrong question: under broadcast the
-                // deployer is the treasury EOA and the script contract holds
-                // nothing, so the check could only ever have been vacuous. The
-                // exhaustive "nobody holds it" claim lives in Token.t.sol, where
-                // there is no broadcast and the addresses are real.
-                require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
-                // THE CONVERTER MUST NEVER FREEZE. Nothing grants it
-                // FREEZER_ROLE, so this is asserting something no line of code
-                // makes true - which is the reason to assert it rather than the
-                // reason not to. The grants a few lines up hand the converter
-                // BURNER and MINTER on the tokens it converts between; a fifth
-                // grant added there later would be one word from being a
-                // contract that can freeze the accounts it burns from, and this
-                // is what would notice.
-                //
-                // Checked rather than assumed, mirroring the BURNER-not-treasury
-                // assertion directly above.
-                if (converterAddr != address(0)) {
-                    require(
-                        !t.hasRole(t.FREEZER_ROLE(), converterAddr),
-                        "Deploy: converter must not hold FREEZER_ROLE"
-                    );
-                }
-                require(
-                    t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
-                );
-                // FINDING 20. WHO ADMINISTERS THIS TOKEN, asserted rather than
-                // assumed. DEFAULT_ADMIN_ROLE is the role that grants every
-                // other one, so an unintended holder is not a smaller problem
-                // than an unintended MINTER - it is the same problem with one
-                // extra step.
-                //
-                // The three negatives are the ones a mistake would produce. The
-                // CONVERTER is granted BURNER and MINTER a few lines up, and a
-                // fourth grant added there later would be one word from an admin
-                // that can grant itself anything. `address(0)` is what an
-                // uninitialised admin argument looks like, and it is a hole
-                // nobody holds and everybody can see. The SCRIPT address cannot
-                // be asserted here - `forge script --broadcast` refuses
-                // `address(this)` in a script contract, which cost a compose
-                // smoke once already - so Token.t.sol makes the exhaustive
-                // claim where the addresses are real and there is no broadcast.
-                require(
-                    t.hasRole(t.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
-                );
-                require(
-                    !t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(0)),
-                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
-                );
-                if (converterAddr != address(0)) {
-                    require(
-                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), converterAddr),
-                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE"
-                    );
-                }
-            } else if (_eq(mods[i].kind, KIND_NAMES)) {
-                NameRegistry r = NameRegistry(plan.addrs[i]);
-                require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
-                // FINDING 20, the registry's half. A registry whose admin is not
-                // the treasury is a registry someone else can hand names out of,
-                // and a name is what every payment in this system resolves
-                // through.
-                require(
-                    r.hasRole(r.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
-                );
-                require(
-                    !r.hasRole(r.DEFAULT_ADMIN_ROLE(), address(0)),
-                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
-                );
-                if (converterAddr != address(0)) {
-                    require(
-                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), converterAddr),
-                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE on the registry"
-                    );
-                }
-                if (haveToken) {
-                    require(
-                        r.resolve(string.concat("treasury.", tld)) == treasury,
-                        "Deploy: treasury name does not resolve"
-                    );
-                }
-            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
-                Converter c = Converter(plan.addrs[i]);
-                // FINDING 20, the converter's half. RATE_ADMIN sets the rate at
-                // which one token becomes another - the exchange rate of the
-                // game's economy - so the question of who holds it is the
-                // question of who can print value by moving a number.
-                require(
-                    c.hasRole(c.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
-                );
-                require(
-                    c.hasRole(c.RATE_ADMIN_ROLE(), treasury), "Deploy: treasury lacks RATE_ADMIN_ROLE"
-                );
-                require(
-                    !c.hasRole(c.DEFAULT_ADMIN_ROLE(), address(0)),
-                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
-                );
-                require(
-                    !c.hasRole(c.RATE_ADMIN_ROLE(), address(0)),
-                    "Deploy: address(0) must not hold RATE_ADMIN_ROLE"
-                );
-                for (uint256 j = 0; j < pairs.length; j++) {
-                    address src = _tokenAddrByKey(mods, plan.addrs, pairs[j].source);
-                    address tgt = _tokenAddrByKey(mods, plan.addrs, pairs[j].target);
-                    (,, bool exists) = c.pair(src, tgt);
-                    require(exists, "Deploy: converter pair was not set");
-                    require(
-                        Token(src).hasRole(Token(src).BURNER_ROLE(), address(c)),
-                        "Deploy: converter lacks BURNER_ROLE on a source token"
-                    );
-                    require(
-                        Token(tgt).hasRole(Token(tgt).MINTER_ROLE(), address(c)),
-                        "Deploy: converter lacks MINTER_ROLE on a target token"
-                    );
-                }
-            } else {
-                // A custom contract: it exists and has code. No roles are asserted
-                // because the deploy grants it none.
-                require(plan.addrs[i].code.length > 0, "Deploy: contract has no code");
-            }
-        }
+        // ASSERTED ON BOTH PATHS. See `_assertDeployment`.
+        _assertDeployment(mods, plan.addrs, pairs, treasury);
 
         _writeDeployment(dir, path, mods, plan.addrs, treasury);
 
@@ -1006,6 +875,189 @@ contract Deploy is Script {
         // is a named volume, so they have independent lifetimes and either can
         // outlive the other.
         //
+
+    }
+
+    /// Every role and wiring claim this deployment makes, checked against the
+    /// chain. READ-ONLY, and run on BOTH paths.
+    ///
+    /// It used to sit below the skip return, so a chain that had already been
+    /// deployed was never re-checked - and roles are STORAGE, which no codehash
+    /// can see. A treasury that had renounced DEFAULT_ADMIN and MINTER, or
+    /// handed them to someone else, got "nothing to do" on every compose
+    /// restart: the modules were the right contracts at the right addresses,
+    /// administered by a stranger.
+    ///
+    /// The wiring facts are derived from `mods` and `addrs` rather than passed
+    /// in, so the function needs nothing the skip path does not have.
+    function _assertDeployment(
+        ModuleSpec[] memory mods,
+        address[] memory addrs,
+        ConverterPair[] memory pairs,
+        address treasury
+    ) internal view {
+        address namesAddr = address(0);
+        address converterAddr = address(0);
+        string memory tld = "";
+        bool haveToken = false;
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_NAMES)) {
+                namesAddr = addrs[i];
+                tld = mods[i].tld;
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                converterAddr = addrs[i];
+            } else if (_eq(mods[i].kind, KIND_TOKEN)) {
+                haveToken = true;
+            }
+        }
+
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_TOKEN)) {
+                Token t = Token(addrs[i]);
+                require(t.hasRole(t.MINTER_ROLE(), treasury), "Deploy: treasury lacks MINTER_ROLE");
+                // FREEZER_ROLE is granted by Token's CONSTRUCTOR, not by this
+                // script - so this asserts a property of the contract rather
+                // than confirming its own work, which is the more useful
+                // direction: a constructor that stopped granting it would fail
+                // the deploy instead of producing a chain where no freeze is
+                // possible and nothing says so until the first one is tried.
+                require(t.hasRole(t.FREEZER_ROLE(), treasury), "Deploy: treasury lacks FREEZER_ROLE");
+                // BURNER_ROLE is held by the CONVERTER alone when a deployment
+                // has one, and by NOBODY otherwise. AccessControl has no member
+                // enumeration, so that is asserted against the address that could
+                // plausibly hold it: the treasury, which is this token's
+                // DEFAULT_ADMIN and the only account this script grants to. The
+                // converter's own grants are asserted in its branch below.
+                //
+                // THERE WAS A SECOND ASSERTION HERE, against `address(this)`,
+                // and finding it cost a compose smoke. `forge script
+                // --broadcast` REFUSES `address(this)` in a script contract -
+                // "script contracts are ephemeral and their addresses should not
+                // be relied upon" - while `forge test` allows it. So it passed
+                // locally and reverted the deploy inside the container, which is
+                // the only place it ran for real. Do not reinstate it here.
+                //
+                // It was also asking the wrong question: under broadcast the
+                // deployer is the treasury EOA and the script contract holds
+                // nothing, so the check could only ever have been vacuous. The
+                // exhaustive "nobody holds it" claim lives in Token.t.sol, where
+                // there is no broadcast and the addresses are real.
+                require(!t.hasRole(t.BURNER_ROLE(), treasury), "Deploy: treasury must not hold BURNER_ROLE");
+                // THE CONVERTER MUST NEVER FREEZE. Nothing grants it
+                // FREEZER_ROLE, so this is asserting something no line of code
+                // makes true - which is the reason to assert it rather than the
+                // reason not to. The grants a few lines up hand the converter
+                // BURNER and MINTER on the tokens it converts between; a fifth
+                // grant added there later would be one word from being a
+                // contract that can freeze the accounts it burns from, and this
+                // is what would notice.
+                //
+                // Checked rather than assumed, mirroring the BURNER-not-treasury
+                // assertion directly above.
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.FREEZER_ROLE(), converterAddr),
+                        "Deploy: converter must not hold FREEZER_ROLE"
+                    );
+                }
+                require(
+                    t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
+                );
+                // FINDING 20. WHO ADMINISTERS THIS TOKEN, asserted rather than
+                // assumed. DEFAULT_ADMIN_ROLE is the role that grants every
+                // other one, so an unintended holder is not a smaller problem
+                // than an unintended MINTER - it is the same problem with one
+                // extra step.
+                //
+                // The three negatives are the ones a mistake would produce. The
+                // CONVERTER is granted BURNER and MINTER a few lines up, and a
+                // fourth grant added there later would be one word from an admin
+                // that can grant itself anything. `address(0)` is what an
+                // uninitialised admin argument looks like, and it is a hole
+                // nobody holds and everybody can see. The SCRIPT address cannot
+                // be asserted here - `forge script --broadcast` refuses
+                // `address(this)` in a script contract, which cost a compose
+                // smoke once already - so Token.t.sol makes the exhaustive
+                // claim where the addresses are real and there is no broadcast.
+                require(
+                    t.hasRole(t.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_NAMES)) {
+                NameRegistry r = NameRegistry(addrs[i]);
+                require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
+                // FINDING 20, the registry's half. A registry whose admin is not
+                // the treasury is a registry someone else can hand names out of,
+                // and a name is what every payment in this system resolves
+                // through.
+                require(
+                    r.hasRole(r.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !r.hasRole(r.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE on the registry"
+                    );
+                }
+                if (haveToken) {
+                    require(
+                        r.resolve(string.concat("treasury.", tld)) == treasury,
+                        "Deploy: treasury name does not resolve"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
+                Converter c = Converter(addrs[i]);
+                // FINDING 20, the converter's half. RATE_ADMIN sets the rate at
+                // which one token becomes another - the exchange rate of the
+                // game's economy - so the question of who holds it is the
+                // question of who can print value by moving a number.
+                require(
+                    c.hasRole(c.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    c.hasRole(c.RATE_ADMIN_ROLE(), treasury), "Deploy: treasury lacks RATE_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.RATE_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold RATE_ADMIN_ROLE"
+                );
+                for (uint256 j = 0; j < pairs.length; j++) {
+                    address src = _tokenAddrByKey(mods, addrs, pairs[j].source);
+                    address tgt = _tokenAddrByKey(mods, addrs, pairs[j].target);
+                    (,, bool exists) = c.pair(src, tgt);
+                    require(exists, "Deploy: converter pair was not set");
+                    require(
+                        Token(src).hasRole(Token(src).BURNER_ROLE(), address(c)),
+                        "Deploy: converter lacks BURNER_ROLE on a source token"
+                    );
+                    require(
+                        Token(tgt).hasRole(Token(tgt).MINTER_ROLE(), address(c)),
+                        "Deploy: converter lacks MINTER_ROLE on a target token"
+                    );
+                }
+            } else {
+                // A custom contract: it exists and has code. No roles are asserted
+                // because the deploy grants it none.
+                require(addrs[i].code.length > 0, "Deploy: contract has no code");
+            }
+        }
 
     }
 

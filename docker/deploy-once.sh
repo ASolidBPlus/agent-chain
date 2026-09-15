@@ -15,13 +15,23 @@
 set -eu
 
 DEPLOYMENTS="${DEPLOYMENTS_DIR:-/deployments}"
+CONTRACTS="${CONTRACTS_DIR:-/contracts}"
 RPC="${RPC_URL:-http://chain:8545}"
 LOCAL="$DEPLOYMENTS/local.json"
 PENDING="$LOCAL.pending"
 # Written on the first successful promotion and never removed. Its ABSENCE is
-# what "this volume has never held a deployment" means - a question the script
-# cannot answer from the chain, and used to guess at from the deployer's nonce.
-MARKER="$DEPLOYMENTS/.deployed-once"
+# what "this chain has never held a deployment" means - a question the script
+# cannot answer from the chain itself, and used to guess at from the deployer's
+# nonce.
+#
+# IT LIVES IN THE CHAIN-STATE VOLUME, NOT BESIDE THE MANIFEST. Under
+# ./deployments it shared one lifetime with local.json, so losing the bind mount
+# lost both - and with the deployer key rotated as well, every derived address
+# MOVES (the treasury is a constructor argument), so nothing is occupied, the
+# foreign-code check sees nothing, and a second set of modules deploys beside
+# the live one with the old token still holding the supply. Two absences that
+# always vanish together cannot be two independent questions.
+MARKER="${MARKER_FILE:-/state/.deployed-once}"
 
 if [ -z "${ANVIL_MNEMONIC:-}" ]; then
   echo "deploy: ANVIL_MNEMONIC is unset - it derives the treasury key" >&2
@@ -46,9 +56,13 @@ rm -f "$PENDING"
 # neither is this script's call to make.
 ALLOW=""
 if [ ! -f "$MARKER" ] && [ ! -f "$LOCAL" ]; then
-  echo "deploy: no $MARKER and no $LOCAL - treating this as a fresh volume"
+  echo "deploy: no $MARKER and no $LOCAL - treating this as a fresh chain"
   ALLOW=1
 fi
+
+# The marker's directory has to exist before the promotion can write it. The
+# state volume is anvil's and is mounted here read-write for this one file.
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
 
 # THE PHRASE NEVER REACHES ARGV (finding 25).
 #
@@ -83,7 +97,9 @@ if [ ! -s "$MNEMONIC_FILE" ]; then
 fi
 
 KEY=$(cast wallet private-key --mnemonic "$MNEMONIC_FILE")
-cd /contracts
+# Overridable so the script can be run outside the container - which was one of
+# the reasons for lifting it out of the compose block, and is what its tests do.
+cd "$CONTRACTS"
 
 # `set -e` would exit here on a non-zero status, which is the wrong shape: a
 # failed deploy must still reach the cleanup below rather than leave a .pending

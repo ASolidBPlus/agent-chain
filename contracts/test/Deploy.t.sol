@@ -458,6 +458,67 @@ contract DeployTest is Test {
         _clean(dir2);
     }
 
+    // ── finding 20, residual B: the skip path asserts too ───────────────────
+
+    /// ROLES ARE STORAGE, and no codehash can see them. A second run over an
+    /// intact chain used to answer "nothing to do" without looking at who
+    /// administers the modules it found.
+    ///
+    /// The reviewer's case: a treasury that has handed DEFAULT_ADMIN to someone
+    /// else. The contracts are right, at the right addresses, with the right
+    /// code - and administered by a stranger. Every compose restart said
+    /// nothing was wrong.
+    function test_TheSkipPathNoticesRolesHandedToAStranger() public {
+        string memory dir = _dir("roles-skip");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        address token = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        address stranger = vm.addr(0xBADA55);
+
+        // The treasury gives its admin away and keeps nothing. Done as the
+        // treasury, because that is who could actually do it.
+        vm.startPrank(treasury);
+        Token(token).grantRole(Token(token).DEFAULT_ADMIN_ROLE(), stranger);
+        Token(token).renounceRole(Token(token).DEFAULT_ADMIN_ROLE(), treasury);
+        vm.stopPrank();
+
+        // Nothing about the CODE changed, so the cache is entirely happy: same
+        // address, same codehash, same chain, same treasury in the file.
+        Deploy again = _script();
+        vm.expectRevert(bytes("Deploy: treasury lacks DEFAULT_ADMIN_ROLE"));
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
+    /// The same path, for a role this script GRANTS rather than one the
+    /// constructor sets - so the two halves of finding 20 are both exercised on
+    /// the skip path and not only the one that happens to be first.
+    function test_TheSkipPathNoticesARenouncedMinter() public {
+        string memory dir = _dir("minter-skip");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        address token = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        // THE ROLE IS READ BEFORE THE PRANK. `vm.prank` applies to the NEXT
+        // CALL, and `MINTER_ROLE()` is a call - so `vm.prank(t);
+        // c.renounceRole(c.MINTER_ROLE(), t)` spends the prank on the getter and
+        // runs the renounce unpranked, which OZ answers with
+        // AccessControlBadConfirmation. The same shape as `vm.expectRevert`
+        // arming against a constructor, which this file already warns about one
+        // helper up.
+        bytes32 minter = Token(token).MINTER_ROLE();
+        vm.prank(treasury);
+        Token(token).renounceRole(minter, treasury);
+
+        Deploy again = _script();
+        vm.expectRevert(bytes("Deploy: treasury lacks MINTER_ROLE"));
+        again.deploy(dir, "", "1");
+        _clean(dir);
+    }
+
     // ── the four shipped examples ───────────────────────────────────────────
 
     function test_TokenAndNames() public {
