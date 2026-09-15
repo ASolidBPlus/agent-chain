@@ -134,6 +134,11 @@ check "contracts" \
 step "spawn an org wallet with 100 PLAY, and a burner"
 ORG=$(api -X POST "$BASE/wallets" -d '{"agentId":"orch:org","kind":"org","fundVee":"100"}' | jget "['walletToken']")
 BURNER=$(api -X POST "$BASE/wallets" -d '{"agentId":"orch:burn","kind":"burner","fundVee":"10"}' | jget "['walletToken']")
+# A NAMED DESTINATION for the freeze section's sends. `orch:burn` is a BURNER and
+# registers no name by design, so a send to it fails at resolution with
+# `unknown_name` - which looks exactly like a freeze refusal if you are only
+# checking that the send failed. Cost one red smoke run to notice.
+api -X POST "$BASE/wallets" -d '{"agentId":"orch:dest","kind":"agent"}' >/dev/null
 check "org balance before" "$(wbody "$ORG" "$BASE/balance/orch:org" | jget "['vee']")" "100"
 
 step "the menu a persona reads"
@@ -288,6 +293,99 @@ else:
 PYEOF
 )" \
   "setPair/None"
+
+step "the on-chain send freeze"
+# §5.3. The freeze is a CONTRACT primitive operated by admin-call, so every
+# assertion here goes through the ordinary ops - no new endpoint exists to test.
+#
+# The wallet's ADDRESS, not its name: `setFrozen` is an admin entry and admin
+# entries pass raw addresses (an operator writing a hub script has the address;
+# the name resolution is for personas). `frozen` is the persona-facing READ and
+# takes a name, which is why its entry carries addressArgs and setFrozen's does
+# not - the asymmetry is the two audiences, not an oversight.
+ORG_ADDR=$(api "$BASE/wallets/orch:org" | jget "['address']")
+check "the org has an address to freeze" "$(printf %s "$ORG_ADDR" | head -c2)" "0x"
+
+FRZ=$(body -X POST "$BASE/admin-call" -d "{\"contract\":\"play\",\"function\":\"setFrozen\",\"args\":[\"$ORG_ADDR\",true],\"intentId\":\"smoke-freeze\"}")
+check "setFrozen returned a tx" "$(echo "$FRZ" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+
+# The persona-facing READ, by NAME, answering the state the operator just set.
+check "read frozen(name) is true" \
+  "$(wbody "$ORG" -X POST "$BASE/read" -d '{"contract":"play","function":"frozen","args":[{"name":"orch:org"}]}' | jget "['result']")" \
+  "True"
+
+# A SIGNED SEND FROM THE FROZEN WALLET. This is the consequence §3 says is
+# stated and not hidden: it comes back as the existing `revert` refusal, not as
+# `frozen` with a reason, because chain-svc does not read the freeze before
+# signing. The rejection happens at gas estimation, like the paused-pair case.
+SEND=$(wbody "$ORG" -X POST "$BASE/sign-transfer" -d '{"to":"orch:dest","amount":"1","intentId":"smoke-frozen-send"}')
+# PRINTED, not only asserted. The leak this section found was invisible until
+# the reply was shown: the assertions said "not a revert" and "no reason", and
+# the second was grepping for a string that could never appear. A verbatim line
+# costs nothing on a green run and is the thing that shows a reply changing
+# shape underneath assertions that still pass.
+echo "    send reply: $SEND"
+check "a frozen wallet's send is a revert" "$(echo "$SEND" | jget "['error']")" "revert"
+# THE REASON MUST NOT CROSS. Greps for the DECODED name only ('AccountFrozen')
+# would pass on a reply carrying the raw selector and its hex payload, which is
+# what viem produces for a custom error - the contract's internal state talking,
+# in a form that looks like noise rather than like a leak.
+check "no revert data in the reply" "$(echo "$SEND" | grep -ci 'custom error\|0x[0-9a-f]\{16,\}' || true)" "0"
+
+# A BURN IS A SPEND: the Converter takes the source token out of supply, so a
+# frozen account cannot convert either. This is the contract-to-contract bypass
+# the primitive exists to close, and it is the reason the hook is in `_update`
+# rather than in `transfer`.
+CONV=$(wbody "$ORG" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"smoke-frozen-convert"}')
+check "a frozen wallet's convert is a revert" "$(echo "$CONV" | jget "['error']")" "revert"
+
+# RECEIVING IS UNAFFECTED. A freeze bars SENDING and nothing else, so the
+# operator can still fund a frozen wallet - which is the first thing an operator
+# wants to do to one. (`mint`'s own exemption, from == address(0), is asserted in
+# Token.t.sol; there is no mint entry in this allowlist.)
+FUND=$(body -X POST "$BASE/fund" -d '{"to":"orch:org","amount":"5","reason":"while frozen","intentId":"smoke-frozen-fund"}')
+check "a frozen wallet still receives" "$(echo "$FUND" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+
+# THE FEED CARRIES BOTH: the operator's action as hub.call, and the contract's
+# own event through the generic chain.event decoding already shipped. No new
+# event kind.
+# WAIT FOR THE POLLER, bounded, rather than sleeping a guessed interval.
+# `hub.call` is enqueued synchronously by the treasury; a `chain.event` comes
+# from the event tail's 1s poll, so checking the outbox immediately tests the
+# clock rather than the decoding. Cost one red run: hub.call True, Frozen False.
+for _ in $(seq 1 20); do
+  FOUND=$(python3 - <<PYEOF
+import json, sqlite3
+db = sqlite3.connect("$WORK/store/db.sqlite")
+rows = [json.loads(r[0]) for r in db.execute("SELECT payload FROM outbox")]
+print(any(r.get("kind") == "chain.event" and r.get("event") == "Frozen" for r in rows))
+PYEOF
+)
+  [ "$FOUND" = "True" ] && break
+  sleep 0.5
+done
+
+check "the feed carries hub.call setFrozen and the Frozen event" \
+  "$(python3 - <<PYEOF
+import json, sqlite3
+db = sqlite3.connect("$WORK/store/db.sqlite")
+rows = [json.loads(r[0]) for r in db.execute("SELECT payload FROM outbox ORDER BY id")]
+hub = any(r.get("kind") == "hub.call" and r.get("function") == "setFrozen" for r in rows)
+ev = any(r.get("kind") == "chain.event" and r.get("event") == "Frozen" for r in rows)
+print("%s/%s" % (hub, ev))
+PYEOF
+)" \
+  "True/True"
+
+# UNFREEZE RESTORES IT. Compare to a value on both sides of the same operation,
+# or "the send failed" proves nothing about the freeze being why.
+UNF=$(body -X POST "$BASE/admin-call" -d "{\"contract\":\"play\",\"function\":\"setFrozen\",\"args\":[\"$ORG_ADDR\",false],\"intentId\":\"smoke-unfreeze\"}")
+check "setFrozen(false) returned a tx" "$(echo "$UNF" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
+check "read frozen(name) is false again" \
+  "$(wbody "$ORG" -X POST "$BASE/read" -d '{"contract":"play","function":"frozen","args":[{"name":"orch:org"}]}' | jget "['result']")" \
+  "False"
+AFTER=$(wbody "$ORG" -X POST "$BASE/sign-transfer" -d '{"to":"orch:dest","amount":"1","intentId":"smoke-thawed-send"}')
+check "the send succeeds once thawed" "$(echo "$AFTER" | python3 -c "import sys,json;print(str(json.load(sys.stdin).get('txHash','')).startswith('0x'))")" "True"
 
 printf '\n'
 if [ "$FAIL" = 0 ]; then
