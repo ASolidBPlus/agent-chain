@@ -440,10 +440,10 @@ describe('what may be called', () => {
     expect(store.walletRow('orch:old')!.kind).toBeNull();
   });
 
-  it('refuses a frozen wallet before it signs anything', async () => {
+  it('refuses a RETIRED wallet before it signs anything', async () => {
     const { t, store } = await harness();
     store.freeze('orch:a');
-    expect(await codeOf(() => t.call(asWallet('orch:a'), convertBody()))).toBe('wallet_frozen');
+    expect(await codeOf(() => t.call(asWallet('orch:a'), convertBody()))).toBe('wallet_retired');
     expect(t.signed).toHaveLength(0);
   });
 

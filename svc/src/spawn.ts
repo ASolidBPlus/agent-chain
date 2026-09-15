@@ -299,11 +299,12 @@ export class Spawner {
   /// then this - and chain-svc deliberately does not tail the `agent.deleted`
   /// admin log line: it is a log record, not a subscribable event, and coupling
   /// to it would duplicate what hub-core will own.
-  async retire(agentId: string): Promise<{ frozen: true }> {
+  async retire(agentId: string): Promise<{ retired: true }> {
     assertCanonicalAgentId(agentId);
 
-    // Freeze first. If clearing the aliases fails halfway, the wallet is
-    // already unable to spend - the safe order.
+    // Mark retired FIRST. If clearing the aliases fails halfway, the wallet is
+    // already unable to spend - the safe order, and the reason this table is
+    // written here and nowhere else.
     this.store.freeze(agentId);
     // §3. RETIREMENT NO LONGER WRITES A POLICY FILE. It used to rewrite the
     // wallet's file with `frozen: true` stamped in, preserving whatever caps
@@ -323,7 +324,7 @@ export class Spawner {
         await this.send('setTargetFor', [alias, '0x0000000000000000000000000000000000000000']);
       }
     }
-    return { frozen: true };
+    return { retired: true };
   }
 
   private parseKind(value: unknown): WalletKind {

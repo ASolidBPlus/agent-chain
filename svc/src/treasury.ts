@@ -580,7 +580,7 @@ export class Treasury {
   ///
   /// AND ONE INVARIANT IT CHANGES, stated because a reviewer should meet it
   /// here rather than discover it: this does NOT go through `signTransfer`, so
-  /// it skips the `isFrozen` check. `isFrozen` therefore stops being the single
+  /// it skips the `isRetired` check. `isRetired` therefore stops being the single
   /// gate every outbound transfer passes. That is intended - freezing stops an
   /// AGENT spending, not an operator resetting - but it is no longer true that
   /// "nothing leaves a frozen wallet".
@@ -798,8 +798,8 @@ export class Treasury {
 
     // The store is the single truth for frozen (spec S4); the per-agent policy
     // file is only wallet-mcp's local fast-path copy, and loses any disagreement.
-    if (this.store.isFrozen(fromAgentId)) {
-      throw new HttpError('wallet_frozen', `${fromAgentId} is frozen`);
+    if (this.store.isRetired(fromAgentId)) {
+      throw new HttpError('wallet_retired', `${fromAgentId} is retired`);
     }
 
     // Caps are a BOUNDARY here, not just game balance (ruled). The same
@@ -1489,8 +1489,8 @@ export class Treasury {
 
     // 3. FROZEN. The store is the single truth; wallet-mcp's copy is a
     //    courtesy and loses any disagreement.
-    if (this.store.isFrozen(fromAgentId)) {
-      throw new HttpError('wallet_frozen', `${fromAgentId} is frozen`);
+    if (this.store.isRetired(fromAgentId)) {
+      throw new HttpError('wallet_retired', `${fromAgentId} is retired`);
     }
 
     // 4. KIND. A pre-v4 wallet has a null kind and is read as `agent` HERE, at

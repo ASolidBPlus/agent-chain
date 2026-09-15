@@ -430,14 +430,14 @@ describe('POST /wallets fund: [{token, amount}]', () => {
 });
 
 describe('POST /sign-transfer validation', () => {
-  it('refuses a frozen wallet before loading its key', async () => {
+  it('refuses a RETIRED wallet before loading its key', async () => {
     const store = new Store(':memory:');
     store.freeze('orch:scammer');
     const t = treasury(store);
 
     expect(
       await codeOf(() => t.signTransfer(asWallet('orch:scammer'), { to: 'alpha.play', amount: 1 })),
-    ).toBe('wallet_frozen');
+    ).toBe('wallet_retired');
     store.close();
   });
 
@@ -1589,7 +1589,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
     expect((err as HttpError).detail).toContain('admin-call');
     // AND NOTHING HAPPENED. A refusal that had already frozen the wallet would
     // be the worst of both.
-    expect(store.isFrozen('orch:a')).toBe(false);
+    expect(store.isRetired('orch:a')).toBe(false);
   }, 20_000);
 
   it('does not write `frozen` into the document it stores', async () => {
@@ -1660,8 +1660,33 @@ describe('PATCH /wallets/:agentId/policy', () => {
   }, 20_000);
 
   it('refuses to patch a wallet that does not exist', async () => {
+    // A VALID FIELD, so this tests what its name says. It used to send
+    // `{frozen: true}` as an arbitrary payload; `frozen` is now refused in its
+    // own right, and the row would have passed on whichever refusal came first
+    // - a test that cannot tell which of two guards answered it.
     const { s } = spawnerWith();
-    expect(await codeOf(() => s.patchPolicy('orch:nobody', { frozen: true }))).toBe('wallet_not_found');
+    expect(await codeOf(() => s.patchPolicy('orch:nobody', { max_per_tx: 5 }))).toBe('wallet_not_found');
+  }, 20_000);
+
+  // §3. THE REPLY SHAPE, which nothing in this suite asserted. Changing
+  // `{frozen: true}` to `{retired: true}` broke no test - the only thing that
+  // reads it is the compose smoke, which needs Docker and so says nothing in
+  // CI. A reply shape a consumer parses deserves a test that runs everywhere.
+  it('replies { retired: true }, not { frozen: true }', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', 'agent');
+    const dir = mkdtempSync(join(tmpdir(), 'policy-'));
+    const s = new Spawner(
+      { ...config, policyDir: dir } as Config,
+      { modules: { tokens: [], names: undefined } } as unknown as Chain,
+      exploding('keystore') as Keystore,
+      store,
+      { aliasesOf: async () => [], clearAliases: async () => undefined } as unknown as Resolver,
+      DEFAULTS,
+    );
+    expect(await s.retire('orch:a')).toEqual({ retired: true });
+    expect(store.isRetired('orch:a')).toBe(true);
+    store.close();
   }, 20_000);
 });
 

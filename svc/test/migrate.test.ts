@@ -416,8 +416,15 @@ describe('the reset notice', () => {
   // check. Emptying FREEZE_RECOVERY_ADVICE survived every other test in this
   // file until this one existed.
   it('the recovery advice tells the operator what to actually do', () => {
-    expect(FREEZE_RECOVERY_ADVICE).toContain('re-freeze');
+    // §3. The service-side lock is RETIREMENT, so the advice says re-retire.
+    expect(FREEZE_RECOVERY_ADVICE).toContain('re-retire');
     expect(FREEZE_RECOVERY_ADVICE).toContain('no record of what it was');
+    // AND IT NAMES THE OTHER LOCK, which this wipe does NOT destroy. Without
+    // this line the advice would read as "everything protective is gone", and
+    // an operator would re-do work the chain still remembers - or, worse,
+    // believe a frozen attacker can spend again when it cannot.
+    expect(FREEZE_RECOVERY_ADVICE).toContain('admin-call');
+    expect(FREEZE_RECOVERY_ADVICE).toContain('a wipe cannot touch it');
   });
 
   it('names both costs, as consequences rather than actions', () => {

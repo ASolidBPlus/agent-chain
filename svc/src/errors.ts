@@ -20,7 +20,16 @@ export type ErrorCode =
   /// either candidate is the vanity-squat phishing primitive.
   | 'ambiguous_name'
   | 'unknown_intent'
-  | 'wallet_frozen'
+  /// §3. The wallet was RETIRED. Operator-facing and WITHHELD from personas: a
+  /// retired wallet has no persona left to read it.
+  ///
+  /// It replaces `wallet_frozen`, and the rename is the point rather than
+  /// cosmetic. The service-side lock was called a freeze while only retirement
+  /// wrote it, so the word promised a reversible state the code never had -
+  /// and a reader looking for the unfreeze found `PATCH { frozen: false }`,
+  /// which is gone. Freezing a LIVE wallet is the Token contract's, through
+  /// admin-call, and IS reversible.
+  | 'wallet_retired'
   | 'over_max_per_tx'
   /// §1b. The wallet's policy sets NO cap for this token, so no amount can be
   /// spent - as distinct from `over_max_per_tx`, where a smaller one could.
@@ -115,7 +124,9 @@ export const STATUS: Record<ErrorCode, number> = {
   unknown_token: 404,
   function_not_allowed: 403,
   bad_args: 400,
-  wallet_frozen: 409,
+  // 404, not 409: a retired wallet is gone, not in a conflicting state. The
+  // 409 said "try again when this resolves", and nothing resolves.
+  wallet_retired: 404,
   // Mined and reverted. Shares 409 with the policy refusals for the same
   // reason: the request was well formed and authorised, and something on the
   // far side said no. Retrying it unchanged cannot help.

@@ -456,7 +456,6 @@ describe('the disclosure decision', () => {
         'no_cap_set',
         'over_stage_cap',
         'counterparty_denied',
-        'wallet_frozen',
         'invalid_name',
         'invalid_amount',
         'bad_args',

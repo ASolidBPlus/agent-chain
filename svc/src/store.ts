@@ -459,7 +459,7 @@ export class Store {
     this.db.query(`DELETE FROM frozen WHERE agent_id = ?`).run(agentId);
   }
 
-  isFrozen(agentId: string): boolean {
+  isRetired(agentId: string): boolean {
     return this.db.query(`SELECT 1 AS present FROM frozen WHERE agent_id = ?`).get(agentId) != null;
   }
 

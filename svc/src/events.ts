@@ -235,8 +235,10 @@ export class EventTail {
             : `${anomaly.emissions} IntentTransfer events for one intent id. chain-svc broadcasts ` +
               `at most once per reservation, so this means the reservation was bypassed - most ` +
               `likely a second chain-svc with a separate store writing to this chain, or an ` +
-              `out-of-band transfer reusing the id. The money moved; freeze the named wallet and ` +
-              `inspect the other sender. Senders: ${senders}.`,
+              `out-of-band transfer reusing the id. The money moved; FREEZE THE NAMED WALLET ON ` +
+              `CHAIN with admin-call setFrozen - the service-side lock is retirement now, and ` +
+              `a frozen account cannot send even to someone holding its key, which is the case ` +
+              `this advice is for. Then inspect the other sender. Senders: ${senders}.`,
       });
   }
 

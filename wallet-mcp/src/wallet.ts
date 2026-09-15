@@ -120,7 +120,7 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   no_cap_set: 'no_cap_set',
   over_stage_cap: 'over_stage_cap',
   counterparty_denied: 'counterparty_denied',
-  wallet_frozen: 'frozen',
+
   unknown_name: 'unknown_name',
   ambiguous_name: 'ambiguous_name',
   // The send MAY have happened. The model must be able to tell this apart from
@@ -167,6 +167,14 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // - but this is declared rather than left to that, because "no route reaches
   // it" is a property of today's routes and this map is the standing answer.
   treasury_insufficient: null,
+  // §3. A RETIRED WALLET HAS NO PERSONA LEFT TO READ THIS. The refusal is
+  // operator-facing: retirement is an act performed ON a wallet, and the thing
+  // it retires is the thing that would have been told. Withheld rather than
+  // disclosed for that reason and not because it is sensitive.
+  //
+  // It replaces `wallet_frozen`, which WAS persona-facing - so the closed set
+  // goes from fifteen to fourteen, and the disclosure test says fourteen.
+  wallet_retired: null,
   // Infrastructure: tells a persona only "it did not happen", which the generic
   // reason already says.
   chain_error: null,

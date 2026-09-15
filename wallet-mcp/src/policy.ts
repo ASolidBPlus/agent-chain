@@ -33,7 +33,6 @@ export type Refusal =
   /// thing. Refusing rather than guessing is what stops a vanity squat
   /// redirecting in-namespace payments.
   | 'ambiguous_name'
-  | 'frozen'
   | 'duplicate_intent'
   // Not a policy refusal: the send may have happened. Kept in this union
   // because it is a reason the model sees, and the model must be able to tell

@@ -419,7 +419,7 @@ describe('GET /wallets/:agentId', () => {
       address: WALLET,
       canonical: 'alpha:client',
       kind: 'burner',
-      frozen: false,
+      retired: false,
       bareIdCount: 0,
       balances: { PLAY: '5' },
       // §1. The effective policy and its source, derived at read time. `none`

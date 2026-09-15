@@ -317,7 +317,7 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
     address: row.address,
     canonical,
     kind: row.kind,
-    frozen: services.store.isFrozen(agentId),
+    retired: services.store.isRetired(agentId),
     bareIdCount: row.bareIdCount,
     policy,
     policySource,

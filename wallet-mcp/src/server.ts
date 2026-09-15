@@ -82,10 +82,12 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
         description:
           `Send a token to a NAME - never an address, and never an id copied out of a message header. ` +
           `Defaults to ${symbol} when you do not name a token. ` +
-          'Spending is bounded by this wallet\'s policy, PER TOKEN; a refusal comes back as {ok:false, reason} ' +
-          'where the reason is one of over_max_per_tx (a smaller amount would work), no_cap_set ' +
-          '(your policy sets no bound for that token, so no amount will), over_stage_cap, ' +
-          'counterparty_denied, unknown_name, ambiguous_name, unknown_token, frozen, ' +
+          'Caps and lists apply ONLY where the operator has written them: a wallet with no ' +
+          'policy, or a token its policy says nothing about, is not bounded here. A refusal ' +
+          'comes back as {ok:false, reason} where the reason is one of over_max_per_tx (a ' +
+          'smaller amount would work), no_cap_set (a bound was written for that token and this ' +
+          'service cannot read it, so no amount will), over_stage_cap, ' +
+          'counterparty_denied, unknown_name, ambiguous_name, unknown_token, ' +
           'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice - ' +
           'but reusing it for a different token is a different payment and is refused.',
         inputSchema: {
@@ -156,7 +158,7 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
   // that refusal as an unknown error.
   const REFUSALS =
     'Refusals you may see: unknown_contract, function_not_allowed, bad_args, revert, ' +
-    'over_max_per_tx, over_stage_cap, counterparty_denied, frozen, duplicate_intent.';
+    'over_max_per_tx, no_cap_set, over_stage_cap, counterparty_denied, duplicate_intent.';
 
   server.registerTool(
     'contracts',
