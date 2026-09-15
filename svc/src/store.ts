@@ -1209,6 +1209,31 @@ export class Store {
       } | null;
       if (!row) return;
 
+      // FINDING 12: A HELD INTENT WITH NO TOKEN IS NOT RELEASABLE, and the
+      // check has to run BEFORE the delete.
+      //
+      // The refund below already declined to give back a hold whose currency
+      // the row does not name - correctly, since releasing it against a guess
+      // would credit budget in a currency it was never taken in. But the DELETE
+      // ran first, so the intent id was freed while its hold stayed consumed:
+      // the wallet lost the budget permanently AND the id became reusable,
+      // which is the worse half. The reservation stays whole instead.
+      //
+      // Reachable only for a row written before v7 whose backfill did not reach
+      // it - which the migration refuses to produce - so this is a guard on a
+      // state the code says cannot exist, kept because the cost of being wrong
+      // about that is a silent permanent debit. Logged by ID so an operator who
+      // meets it has something to act on.
+      const heldWei = BigInt(row.held_wei);
+      if (heldWei > 0n && row.token === null) {
+        console.warn(
+          `[chain-svc] intent ${intentId} of ${agentId} holds ${row.held_wei} wei in a currency ` +
+            `its row does not name, so it cannot be released; the reservation is left standing. ` +
+            `This row predates the per-token rekey and needs an operator.`,
+        );
+        return;
+      }
+
       // The `tx_hash IS NULL` here is REDUNDANT with the SELECT above, which
       // already returned for a completed intent - deliberately kept, because it
       // is the statement that would do the damage if the guard above ever moved
@@ -1219,15 +1244,17 @@ export class Store {
         .query(`DELETE FROM intents WHERE agent_id = ? AND intent_id = ? AND tx_hash IS NULL`)
         .run(agentId, intentId);
 
-      const held = BigInt(row.held_wei);
+      const held = heldWei;
       // THE TOKEN COMES FROM THE ROW, like every other coordinate `release`
       // uses. A caller supplying it could give back a hold against a currency
       // it was never taken in - which would leave the real hold standing and
       // credit budget in another.
       //
-      // Null only on a row written before v7 whose backfill did not reach it,
-      // which the migration refuses to produce; the hold is then left alone
-      // rather than released against a guess.
+      // Null with a hold cannot reach here any more - the guard above returns
+      // before the delete - so this pair is now "a zero hold, or a token to
+      // release it in". Kept as a pair rather than narrowed to `held > 0n`,
+      // because it is the statement that would do the damage if that guard ever
+      // moved, exactly as the redundant `tx_hash IS NULL` below it is.
       if (held > 0n && row.token !== null) {
         this.releaseStageSpend(row.agent_id, row.stage, row.token, held);
       }

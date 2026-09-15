@@ -402,5 +402,34 @@ export function asChainError(err: unknown): HttpError {
   const message = err instanceof Error ? err.message : String(err);
   const unreachable =
     /fetch failed|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|HttpRequestError/i.test(message);
-  return new HttpError(unreachable ? 'chain_unreachable' : 'chain_error', message.split('\n')[0]);
+  const code = unreachable ? 'chain_unreachable' : 'chain_error';
+
+  // FINDING 11: TWO AUDIENCES, TWO STRINGS - the split `asCallError` already
+  // makes for a revert, made here for everything else.
+  //
+  // The detail used to be viem's own first line, which carries whatever the
+  // node said: RPC urls, internal addresses, encoded calldata, the shape of the
+  // deployment. `chain_error` and `chain_unreachable` are persona-facing and
+  // their detail crosses with them, so that text reached a model through a
+  // refusal. A persona can do nothing with it in any case - the remedy for both
+  // codes is "tell an operator" - so the fixed sentence loses a persona nothing
+  // and the operator loses nothing either, because the raw line is right here
+  // in the log.
+  // THE WHOLE MESSAGE, not its first line, and this is a deliberate departure
+  // from `asCallError`'s shape next door.
+  //
+  // For a REVERT, viem puts the reason on line one, so the first line IS the
+  // diagnostic and `asCallError` loses nothing by taking it. For a transport
+  // error it does not: line one is "fetch failed" and the URL, the method and
+  // the request body are on the lines after it. Logging only the first line
+  // would hand the operator exactly what the persona already has - the fixed
+  // string in different words - and the split would buy nobody anything.
+  //
+  // Caught by the control on the test below, which asserted the raw text
+  // reaches the log and found that it did not.
+  console.warn(`[chain-svc] ${code}: ${message}`);
+  return new HttpError(
+    code,
+    code === 'chain_unreachable' ? 'node unreachable' : 'chain call failed',
+  );
 }

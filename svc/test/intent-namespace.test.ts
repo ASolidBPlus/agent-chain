@@ -448,3 +448,40 @@ describe('a broadcast puts the row\'s topic on chain, never a fresh derivation',
     s.close();
   });
 });
+
+// FINDING 12: a held intent whose row does not name a currency is not
+// releasable, and the check has to run BEFORE the delete.
+describe('release will not free an id whose hold it cannot give back', () => {
+  /// A row with a hold and a NULL token - the shape a pre-v7 backfill could
+  /// leave behind, which the migration now refuses to produce. Written straight
+  /// to the table because `reserve` cannot express it any more, which is the
+  /// point: this guards a state the code says cannot exist, and the cost of
+  /// being wrong about that is a silent permanent debit.
+  function heldWithNoToken(): Store {
+    const s = new Store(':memory:');
+    put(s, ALICE, ID, 100n);
+    const db = (s as unknown as { db: Database }).db;
+    db.query(`UPDATE intents SET token = NULL, held_wei = ? WHERE agent_id = ? AND intent_id = ?`)
+      .run('100', ALICE, ID);
+    return s;
+  }
+
+  it('leaves the reservation standing rather than freeing the id', () => {
+    const s = heldWithNoToken();
+    s.release(ALICE, ID);
+    // THE ID IS STILL TAKEN. Before, the DELETE ran first and the refund then
+    // declined - correctly - to give back a hold in a currency the row does not
+    // name. So the wallet lost the budget permanently AND the id became
+    // reusable, which is the worse half.
+    expect(put(s, ALICE, ID, 100n).outcome).toBe('duplicate');
+    s.close();
+  });
+
+  it('control: an ordinary held intent IS released, so the row above can fail', () => {
+    const s = new Store(':memory:');
+    put(s, ALICE, ID, 100n);
+    s.release(ALICE, ID);
+    expect(put(s, ALICE, ID, 100n).outcome).toBe('reserved');
+    s.close();
+  });
+});

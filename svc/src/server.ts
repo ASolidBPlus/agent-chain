@@ -798,7 +798,20 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
       // The detail may name a key file path or an RPC URL; log it, never ship it.
       console.error('chain-svc: unhandled error', err);
     }
-    return send(res, httpError.status, errorBody(httpError), deprecated ? { ...DEPRECATION_HEADERS } : {});
+    // FINDING 10: `internal_error` SHIPS `{error}` AND NOTHING ELSE.
+    //
+    // `toHttpError` already strips an unknown throwable to a bare 500 - but a
+    // 500 CONSTRUCTED here keeps whatever detail it was given, and five of them
+    // are in the keystore: "key file is not valid JSON", "key file could not be
+    // decrypted", "refusing to overwrite an existing key file". Each tells an
+    // unauthenticated-for-this-wallet caller something true about the state of
+    // the file holding somebody's key, and none of it is actionable by anyone
+    // but an operator - who has the log line above, with the throwable itself.
+    //
+    // At the BOUNDARY rather than at each construction, so a sixth one written
+    // next year is covered without anybody remembering this rule.
+    const wire = httpError.code === 'internal_error' ? new HttpError('internal_error') : httpError;
+    return send(res, wire.status, errorBody(wire), deprecated ? { ...DEPRECATION_HEADERS } : {});
   }
 }
 

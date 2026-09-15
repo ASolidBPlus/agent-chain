@@ -983,3 +983,74 @@ describe('per-token reads', () => {
     s.close();
   });
 });
+
+// FINDING 10: an `internal_error` crossing the wire carries its CODE and
+// nothing else.
+//
+// `toHttpError` already reduces an unknown throwable to a bare 500. What it
+// cannot reach is a 500 somebody CONSTRUCTED with a detail - and the keystore
+// has five, each describing the state of the file that holds a wallet's key:
+// not valid JSON, could not be decrypted, refusing to overwrite an existing
+// one. True, unactionable by the caller, and a fact about somebody's key
+// material.
+//
+// ASSERTED AT THE BOUNDARY, over a real request, because that is where the rule
+// lives. A row asserting what `errorBody` does with an object somebody hands it
+// would be a rule asserted one layer below where it lives - deletable without a
+// test noticing - and would spend its assertion on the shape this exists to
+// prevent.
+describe('internal_error ships no detail', () => {
+  const KEYSTORE_DETAILS = [
+    'refusing to overwrite an existing key file',
+    'key file is not valid JSON',
+    'unsupported key file version 2',
+    'key file could not be decrypted',
+    'key file address does not match its private key',
+  ];
+
+  // A wallet the row lookup can find, so the request reaches the handler that
+  // throws rather than stopping at `unknown_name` - which answered 404 and made
+  // every row below pass for the wrong reason until it was looked at.
+  beforeAll(() => {
+    store.markSpawned('alpha:client', WALLET, 'agent');
+  });
+
+  it.each(KEYSTORE_DETAILS)('a handler throwing "%s" answers with the code alone', async (detail) => {
+    const boom = createChainSvcServer({
+      ...services,
+      spawner: {
+        ...services.spawner,
+        effectivePolicy: async () => { throw new HttpError('internal_error', detail); },
+      },
+    } as unknown as Services);
+    await new Promise<void>((r) => boom.listen(0, r));
+    const port = (boom.address() as { port: number }).port;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/wallets/${encodeURIComponent('alpha:client')}`, {
+        headers: auth,
+      });
+      const text = await res.text();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual({ error: 'internal_error' });
+      // ON THE BYTES as well as the parsed object: a detail arriving under
+      // another key, or twice, is still a leak, and `toEqual` on one shape
+      // would not see it. The first three words are enough to catch any of the
+      // five without asserting the whole sentence back.
+      expect(text).not.toContain(detail.split(' ').slice(0, 3).join(' '));
+    } finally {
+      await new Promise<void>((r) => boom.close(() => r()));
+    }
+  });
+
+  // THE CONTROL: an ordinary refusal still carries its detail. Without this the
+  // rows above would pass on a boundary that stripped EVERY detail from every
+  // code, which would be a different and much worse service.
+  it('control: a refusal that is not internal_error keeps its detail', async () => {
+    const res = await fetch(`${base}/resolve/nobody.play`, { headers: auth });
+    expect(res.status).toBe(404);
+    const body = await res.json() as { error: string; detail?: string };
+    expect(body.error).toBe('unknown_name');
+    expect(typeof body.detail).toBe('string');
+    expect(body.detail!.length).toBeGreaterThan(0);
+  });
+});
