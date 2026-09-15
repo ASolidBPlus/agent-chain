@@ -81,11 +81,23 @@ contract Deploy is Script {
     function run() external {
         deploy(
             vm.envOr("DEPLOYMENTS_DIR", string("../deployments")),
-            vm.envOr("INITIAL_SUPPLY_VEE", string(""))
+            vm.envOr("INITIAL_SUPPLY_VEE", string("")),
+            vm.envOr("ALLOW_FRESH_DEPLOY", string(""))
         );
     }
 
-    function deploy(string memory dir, string memory retiredSupplyEnv) public {
+    /// `allowFreshDeploy` is READ FROM THE ENV BY `run()` AND PASSED IN, exactly
+    /// as the retired supply variable is, rather than read here.
+    ///
+    /// Not a style choice: `vm.setEnv` writes a PROCESS-WIDE variable and forge
+    /// runs test contracts in PARALLEL, so a test that unset this to exercise
+    /// the refusal unset it for every suite running beside it. Measured - six
+    /// unrelated deploy tests failed with this refusal, in a run where the only
+    /// change was one test setting the variable to "". A parameter is a value
+    /// one call has; an env var is a value the whole process shares.
+    function deploy(string memory dir, string memory retiredSupplyEnv, string memory allowFreshDeploy)
+        public
+    {
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address treasury = vm.addr(deployerKey);
 
@@ -123,28 +135,45 @@ contract Deploy is Script {
         //
         // Without local.json there is no address to check for code, so the
         // question "has anything been deployed here?" cannot be answered
-        // directly. The deployer's nonce answers a WEAKER question honestly:
-        // this account has transacted on this chain before, so this is not the
-        // cold start the redeploy path assumes. Refusing costs an operator one
-        // deliberate command; being wrong the other way costs the game its
+        // directly. THE DEPLOYER'S NONCE USED TO STAND IN FOR IT, and that is
+        // what this replaces.
+        //
+        // The nonce answered a weaker question - has this account transacted
+        // here - and it answered it WRONG IN BOTH DIRECTIONS. A fresh chain
+        // whose deployer had done anything at all (a funding transfer, a
+        // probe, a previous run that reverted after its first transaction)
+        // refused a deployment that was perfectly safe. And a chain deployed
+        // from a DIFFERENT key read as untouched, because the nonce it checked
+        // was not the nonce that deployed anything - so the one case worth
+        // refusing, someone else's modules already live here, sailed through.
+        //
+        // An inferred signal cannot be made to mean what an operator meant. So
+        // this asks the operator instead: ALLOW_FRESH_DEPLOY=1 is a deliberate
+        // statement that there is nothing here to orphan. Refusing costs one
+        // environment variable; being wrong the other way costs the game its
         // money with no error at all.
         //
-        // Conditioned on the FILE BEING ABSENT, not merely on _alreadyDeployed
-        // being false. Those are different: local.json can be present and point
-        // at dead addresses (a wiped chain), which is the forward case above and
-        // must still redeploy. Guarding on the weaker condition made this fire
-        // for that case too - so the message could be false, and, worse, this
-        // check masked the forward one: a mutant disabling _alreadyDeployed was
+        // Conditioned on the FILE BEING ABSENT, not merely on the cache check
+        // above failing. Those are different: local.json can be present and
+        // point at dead addresses (a wiped chain), which is the forward case
+        // and must still redeploy. Guarding on the weaker condition made this
+        // fire for that case too - so the message could be false, and, worse,
+        // it MASKED the forward guard: a mutant disabling the cache check was
         // caught here instead, which means neither guard was independently
         // tested. Two guards satisfied by one scenario is two guards you have
         // not tested.
-        if (!vm.exists(path) && vm.getNonce(treasury) > 0) {
+        // EXACTLY "1", not any truthy-looking value. A permissive reading is the
+        // wrong direction for a flag whose whole job is to be deliberate:
+        // `ALLOW_FRESH_DEPLOY=0` meaning "yes" is what a compose file does by
+        // accident, and the operator who wrote 0 meant the opposite.
+        if (!vm.exists(path) && !_eq(allowFreshDeploy, "1")) {
             revert(
                 string.concat(
-                    "Deploy: refusing to redeploy. No local.json, but the deployer has already ",
-                    "transacted on this chain - a fresh deployment would orphan the existing ",
-                    "modules and every balance in them. Restore deployments/local.json, or wipe ",
-                    "the chain-state volume if this chain really is disposable."
+                    "Deploy: refusing to deploy with no ",
+                    path,
+                    ". A fresh deployment on a chain that already has modules would orphan them ",
+                    "and every balance in them. Restore the file, or set ALLOW_FRESH_DEPLOY=1 to ",
+                    "state that this chain has nothing to orphan."
                 )
             );
         }
@@ -847,6 +876,19 @@ contract Deploy is Script {
         );
 
         vm.createDir(dir, true);
-        vm.writeJson(out, path);
+        // WRITTEN AS `.pending`, PROMOTED BY THE CALLER ON SUCCESS.
+        //
+        // `forge script` runs the whole thing in SIMULATION first, and will run
+        // it in simulation ALONE when `--broadcast` is absent. A simulated run
+        // computes real addresses from real init code and then mines nothing -
+        // so writing local.json here meant a simulation could hand every
+        // service downstream a manifest of contracts that do not exist, with no
+        // error anywhere and nothing to distinguish it from a real deploy.
+        //
+        // The script cannot tell the two apart from inside. The caller can: the
+        // broadcast's exit status is the fact, and `docker/deploy-once.sh` moves
+        // this file into place only when that status is zero.
+        vm.writeJson(out, string.concat(path, ".pending"));
+        console.log("Deploy: wrote", string.concat(path, ".pending"));
     }
 }

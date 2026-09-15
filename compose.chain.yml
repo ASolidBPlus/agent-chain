@@ -49,16 +49,18 @@ services:
     volumes:
       - ./contracts:/contracts
       - ./deployments:/deployments
-    entrypoint: ["/bin/sh", "-c"]
+      - ./docker/deploy-once.sh:/deploy-once.sh:ro
     # Account 0 of the mnemonic is the deployer and the treasury (spec S2), so
-    # the key is derived here rather than being a second secret to keep in step.
-    command:
-      - |
-        set -eu
-        KEY=$$(cast wallet private-key --mnemonic "$$ANVIL_MNEMONIC")
-        cd /contracts
-        DEPLOYER_PRIVATE_KEY=$$KEY DEPLOYMENTS_DIR=/deployments \
-          forge script script/Deploy.s.sol:Deploy --rpc-url http://chain:8545 --broadcast
+    # the key is derived in the script rather than being a second secret to keep
+    # in step.
+    #
+    # THE SCRIPT IS A FILE, NOT AN INLINE BLOCK. It writes the manifest to
+    # `local.json.pending` and promotes it only after a successful broadcast, so
+    # a simulation cannot leave the rest of the system believing in contracts
+    # that were never mined - which is more logic than a `command:` block can
+    # carry reviewably, and it is also the file someone will run by hand when a
+    # promotion fails.
+    entrypoint: ["/bin/sh", "/deploy-once.sh"]
 
   chain-svc:
     build:
