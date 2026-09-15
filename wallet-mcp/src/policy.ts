@@ -129,20 +129,39 @@ export interface WalletPolicy {
 ///
 ///   a WalletPolicy   the file exists and parses - these are the rules
 ///   null             no file - nobody wrote rules for this wallet
-///   { unreadable }   a file exists and is not a policy - written garbage
+///   { unreadable,
+///     reason }       a file exists and is not a policy - written garbage
 ///
 /// The third used to collapse into the second. That was safe only while an
 /// absent cap REFUSED downstream: the permissive answer here was bounded by a
 /// fail-closed answer further on. With absence now meaning no limit (§1),
 /// deferring on an unreadable file would make it the WIDEST policy a wallet can
 /// have, and a corrupt byte would unbound a wallet silently.
-export type PolicyRead = WalletPolicy | null | { unreadable: string };
+/// THE MARKER CARRIES TWO STRINGS, FOR TWO AUDIENCES, and that split is a
+/// disclosure control rather than a convenience:
+///
+///   `unreadable`  the PERSONA'S. Always the same words, whatever went wrong.
+///   `reason`      the OPERATOR'S. Goes to the log sink and nowhere a persona
+///                 can read it.
+///
+/// Why they cannot be one string: bun's parse error QUOTES the offending token,
+/// so `{"deny": treasuryOnly}` comes back as `Unexpected identifier
+/// "treasuryOnly"`. `no_cap_set` is persona-facing and its detail crosses with
+/// it, so a single string would put an operator's counterparty name, pattern or
+/// amount in front of a model. Naming the failing FIELD would do the same,
+/// which is why the shape failures use the fixed string too.
+export type PolicyRead = WalletPolicy | null | { unreadable: string; reason: string };
 
 /// Is this read a marker rather than a policy? Mirrors chain-svc's predicate of
 /// the same name, down to the name.
-export function isUnreadable(r: PolicyRead): r is { unreadable: string } {
+export function isUnreadable(r: PolicyRead): r is { unreadable: string; reason: string } {
   return r !== null && 'unreadable' in r;
 }
+
+/// The one sentence a persona ever reads about an unreadable policy file.
+/// Spelled identically on both sides so the same fault reads the same whichever
+/// layer refuses it.
+const UNREADABLE = 'policy file unreadable';
 
 /// Read fresh on every send rather than cached: chain-svc rewrites this file
 /// when a wallet's policy is patched or cleared, and a cached copy would keep
@@ -167,16 +186,16 @@ export function readPolicy(path: string, defaultTokenKey?: string): PolicyRead {
     // that was wrong would report the operator's document back through a
     // persona-facing detail. Which field it was goes to the log.
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return { unreadable: 'not a policy document' };
+      return { unreadable: UNREADABLE, reason: 'not a policy document' };
     }
     const p = parsed as Record<string, unknown>;
     if (!isNameList(p.allow) || !isNameList(p.deny)) {
-      return { unreadable: 'not a policy document' };
+      return { unreadable: UNREADABLE, reason: 'not a policy document' };
     }
 
     if (p.caps !== undefined) {
       if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
-        return { unreadable: 'not a policy document' };
+        return { unreadable: UNREADABLE, reason: 'not a policy document' };
       }
       return withLists(p, { caps: p.caps as Record<string, TokenCaps> });
     }
@@ -196,7 +215,7 @@ export function readPolicy(path: string, defaultTokenKey?: string): PolicyRead {
       // Same fixed string: the persona learns the file is unreadable, and the
       // operator learns why from the log.
       if (defaultTokenKey === undefined) {
-        return { unreadable: 'not a policy document' };
+        return { unreadable: UNREADABLE, reason: 'not a policy document' };
       }
       const legacy: TokenCaps = {};
       if (p.max_per_tx !== undefined) legacy.max_per_tx = p.max_per_tx as TokenCaps['max_per_tx'];
@@ -208,18 +227,24 @@ export function readPolicy(path: string, defaultTokenKey?: string): PolicyRead {
     // about counterparties and none about amounts. It is not garbage and it is
     // not absence - it is a policy that bounds nothing.
     return withLists(p, {});
-  } catch {
-    // A FIXED STRING, NEVER THE PARSER'S MESSAGE. `no_cap_set` is
-    // persona-facing and its detail crosses with it, and bun's parse error
-    // QUOTES A FRAGMENT OF THE FILE: `JSON Parse error: Unexpected identifier
-    // "broken"`. A malformed policy could therefore put a counterparty name, a
-    // pattern or a number the operator never meant to publish in front of a
-    // model. The raw message belongs in the operator's log, which is the same
-    // split `revert` already makes.
+  } catch (err) {
+    // TWO AUDIENCES, TWO STRINGS. The persona gets `UNREADABLE` and nothing
+    // else, whatever went wrong; the operator gets the parse message verbatim.
     //
-    // Exactly two classes, spelled the same on both sides, so a persona meeting
-    // an unreadable policy through either layer reads the same words.
-    return { unreadable: 'not valid JSON' };
+    // The split is the control. bun's parse error QUOTES A FRAGMENT OF THE
+    // FILE - `{"deny": treasuryOnly}` comes back as `Unexpected identifier
+    // "treasuryOnly"` - and `no_cap_set` is persona-facing with its detail
+    // crossing alongside, so one string for both audiences would put an
+    // operator's counterparty name, pattern or amount in front of a model.
+    //
+    // The operator's half carries the message rather than a class string
+    // because it crosses nowhere: someone debugging a policy file wants the
+    // position and the token, and a coarser string here would be safe and
+    // useless while safety is already carried by the OTHER field.
+    return {
+      unreadable: UNREADABLE,
+      reason: err instanceof Error ? err.message.split('\n')[0] : 'unparseable',
+    };
   }
 }
 
@@ -374,7 +399,7 @@ export function checkLocally(
   // the FILE and not the amount, and a persona that reads "policy file
   // unreadable" can say something useful to whoever can fix it.
   if (isUnreadable(policy)) {
-    return { reason: 'no_cap_set', detail: `policy file unreadable: ${policy.unreadable}` };
+    return { reason: 'no_cap_set', detail: policy.unreadable };
   }
 
   const capless = capsRefusal(policy, token.key);

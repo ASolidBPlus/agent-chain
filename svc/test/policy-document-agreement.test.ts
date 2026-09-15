@@ -204,13 +204,42 @@ describe('one document, two reads, one answer', () => {
     const svc = await readPolicyFile(dir, agentId, DEFAULT_TOKEN);
     const mcp = readPolicy(join(dir, keyFileName(agentId)), DEFAULT_TOKEN);
 
-    expect(svc).toEqual({ unreadable: 'not valid JSON' });
-    expect(mcp).toEqual({ unreadable: 'not valid JSON' });
+    // THE AGREEMENT IS OVER THE CONTRACT, NOT OVER THE DIAGNOSTICS.
+    //
+    // `unreadable` is the persona's and must be identical: it is what a model
+    // switches on and reads back, and two layers wording it differently is the
+    // drift every agreement test in this repo exists to stop.
+    //
+    // `reason` is the operator's, goes to a log on both sides and crosses
+    // nowhere. Requiring the two to match character for character would be
+    // over-constraining a diagnostic - it would forbid one layer from being
+    // MORE useful than the other about a fault only it can see. So this asserts
+    // the contract is one and the diagnostic is present, not that both readers
+    // chose the same words.
+    const svcM = svc as { unreadable: string; reason: string };
+    const mcpM = mcp as { unreadable: string; reason: string };
+    expect(svcM.unreadable).toBe('policy file unreadable');
+    expect(mcpM.unreadable).toBe(svcM.unreadable);
+    expect(svcM.reason.length).toBeGreaterThan(0);
+    expect(mcpM.reason.length).toBeGreaterThan(0);
     expect(isUnreadable(mcp!)).toBe(true);
     // The control: the string the file contains does NOT appear in either
     // answer. Asserting the fixed string alone would pass against a reason that
     // happened to be fixed AND leaky in some other branch.
-    expect(JSON.stringify([svc, mcp])).not.toContain('treasuryOnly');
-    expect(JSON.stringify([svc, mcp])).not.toContain('acme:secret');
+    // THE CONTROL, and it now has a second job: it must hold for the PERSONA'S
+    // string specifically, since the operator's `reason` is allowed to be
+    // anything. Asserting on the whole marker would pass a leak that lived only
+    // in the half nobody shows a persona - and would fail a perfectly safe
+    // operator reason that happened to quote the file, which is its purpose.
+    for (const m of [svcM, mcpM]) {
+      expect(m.unreadable).not.toContain('treasuryOnly');
+      expect(m.unreadable).not.toContain('acme:secret');
+    }
+    // ...and the CONTROL ON THE CONTROL: at least one side's operator reason
+    // DOES quote the file. Without this row the assertions above would pass on
+    // a build where nothing quotes anything, and the test would no longer be
+    // measuring that the split is what keeps the quote out of the persona's
+    // half - it would be measuring that there is nothing to keep out.
+    expect(svcM.reason + mcpM.reason).toContain('treasuryOnly');
   });
 });

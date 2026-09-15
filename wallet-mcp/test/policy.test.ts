@@ -308,8 +308,13 @@ describe('reading the policy file', () => {
     // in front of a model. Measured, not supposed.
     expect(checkLocally(read, 'anyone.play', '1', PLAY)).toEqual({
       reason: 'no_cap_set',
-      detail: 'policy file unreadable: not valid JSON',
+      detail: 'policy file unreadable',
     });
+    // The operator's half is on the MARKER and never in the refusal. It carries
+    // the parse message, which is exactly what must not cross - so this row
+    // asserts both halves at once: the persona's string says nothing about the
+    // file, and the operator's says what actually broke.
+    expect((read as { reason: string }).reason).toContain('JSON Parse error');
   });
 
   // §1: a document with no caps is a thing an operator can now write - rules
@@ -359,7 +364,10 @@ describe('reading the policy file', () => {
     // A legacy file on a deployment with no token has nothing to be about.
     const f = join(dir, 'notoken.json');
     writeFileSync(f, JSON.stringify({ allow: ['*'], deny: [], max_per_tx: '100' }));
-    expect(readPolicy(f)).toEqual({ unreadable: 'not a policy document' });
+    expect(readPolicy(f)).toEqual({
+      unreadable: 'policy file unreadable',
+      reason: 'not a policy document',
+    });
   });
 
   // chain-svc rewrites this file to frozen:true when a wallet is retired, so a
