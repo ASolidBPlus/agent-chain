@@ -269,9 +269,55 @@ contract Deploy is Script {
                 require(
                     t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
                 );
+                // FINDING 20. WHO ADMINISTERS THIS TOKEN, asserted rather than
+                // assumed. DEFAULT_ADMIN_ROLE is the role that grants every
+                // other one, so an unintended holder is not a smaller problem
+                // than an unintended MINTER - it is the same problem with one
+                // extra step.
+                //
+                // The three negatives are the ones a mistake would produce. The
+                // CONVERTER is granted BURNER and MINTER a few lines up, and a
+                // fourth grant added there later would be one word from an admin
+                // that can grant itself anything. `address(0)` is what an
+                // uninitialised admin argument looks like, and it is a hole
+                // nobody holds and everybody can see. The SCRIPT address cannot
+                // be asserted here - `forge script --broadcast` refuses
+                // `address(this)` in a script contract, which cost a compose
+                // smoke once already - so Token.t.sol makes the exhaustive
+                // claim where the addresses are real and there is no broadcast.
+                require(
+                    t.hasRole(t.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE"
+                    );
+                }
             } else if (_eq(mods[i].kind, KIND_NAMES)) {
                 NameRegistry r = NameRegistry(plan.addrs[i]);
                 require(r.hasRole(r.REGISTRAR_ROLE(), treasury), "Deploy: treasury lacks REGISTRAR_ROLE");
+                // FINDING 20, the registry's half. A registry whose admin is not
+                // the treasury is a registry someone else can hand names out of,
+                // and a name is what every payment in this system resolves
+                // through.
+                require(
+                    r.hasRole(r.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !r.hasRole(r.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                if (converterAddr != address(0)) {
+                    require(
+                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), converterAddr),
+                        "Deploy: converter must not hold DEFAULT_ADMIN_ROLE on the registry"
+                    );
+                }
                 if (haveToken) {
                     require(
                         r.resolve(string.concat("treasury.", tld)) == treasury,
@@ -280,6 +326,24 @@ contract Deploy is Script {
                 }
             } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
                 Converter c = Converter(plan.addrs[i]);
+                // FINDING 20, the converter's half. RATE_ADMIN sets the rate at
+                // which one token becomes another - the exchange rate of the
+                // game's economy - so the question of who holds it is the
+                // question of who can print value by moving a number.
+                require(
+                    c.hasRole(c.DEFAULT_ADMIN_ROLE(), treasury), "Deploy: treasury lacks DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    c.hasRole(c.RATE_ADMIN_ROLE(), treasury), "Deploy: treasury lacks RATE_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.DEFAULT_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold DEFAULT_ADMIN_ROLE"
+                );
+                require(
+                    !c.hasRole(c.RATE_ADMIN_ROLE(), address(0)),
+                    "Deploy: address(0) must not hold RATE_ADMIN_ROLE"
+                );
                 for (uint256 j = 0; j < pairs.length; j++) {
                     address src = _tokenAddrByKey(mods, plan.addrs, pairs[j].source);
                     address tgt = _tokenAddrByKey(mods, plan.addrs, pairs[j].target);

@@ -25,11 +25,21 @@ contract DeployTest is Test {
     function setUp() public {
         treasury = vm.addr(KEY);
         vm.setEnv("DEPLOYER_PRIVATE_KEY", vm.toString(KEY));
-        runId = block.timestamp;
+        // UNIQUE PER RUN, not per second. `block.timestamp` is the same for two
+        // runs in the same second, so a FAILING run - which leaves its directory
+        // behind, because `_clean` never reaches - fed the next run a local.json
+        // written by a DIFFERENT manifest. That surfaces as the derivation
+        // check refusing "a file that does not describe this deployment", which
+        // reads exactly like a real defect in the code under test.
+        runId = vm.randomUint();
     }
 
     function _dir(string memory name) internal returns (string memory) {
         string memory d = string.concat("../deployments/test-", name, "-", vm.toString(runId));
+        // A LEFTOVER FROM A FAILED RUN IS NOT A FIXTURE. Even with a unique run
+        // id this costs nothing and removes the whole class: whatever is here,
+        // this test did not put it here.
+        if (vm.exists(d)) vm.removeDir(d, true);
         vm.createDir(d, true);
         return d;
     }

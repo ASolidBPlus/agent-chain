@@ -132,34 +132,25 @@ rm -f ../deployments/local.json.pending
 echo "local.json unchanged by a simulated run"
 
 step "the one-shot never puts the mnemonic on a command line (finding 25)"
-# `cast wallet private-key --mnemonic "$PHRASE"` puts the treasury's BIP-39
-# phrase on the process command line, where `docker top`, `ps` and
-# /proc/<pid>/cmdline show it to anyone on the host - without entering the
-# container. deploy-once.sh writes the phrase to a 0600 file and passes the
-# PATH, which cast accepts ("the mnemonic phrase or mnemonic file at the
-# specified path"); `--mnemonic-stdin` does not exist in the pinned cast.
+# THE GATING TEST IS docker/test-mnemonic-argv.sh, which stubs `cast` and needs
+# no Docker at all - deterministic, and the thing CI could run.
 #
-# WITH A CONTROL, because a sampling test that never catches the leaking form is
-# not measuring anything. The control runs the OLD spelling and must be seen.
-leak_seen=0
-docker run -d --rm --name "$NAME-argv-control" --entrypoint /bin/sh "$IMAGE" \
-  -c "cast wallet private-key --mnemonic '$MNEMONIC' >/dev/null; sleep 3" >/dev/null
-sleep 1
-docker top "$NAME-argv-control" -o args 2>/dev/null | grep -q "junk" && leak_seen=1
-docker rm -f "$NAME-argv-control" >/dev/null 2>&1 || true
-[ "$leak_seen" = 1 ] || { echo "FAIL: the control did not observe the phrase; this check measures nothing"; exit 1; }
-echo "control: the old spelling puts the phrase on argv, as expected"
+# What follows is a NON-GATING VIEW of the same property through the real image,
+# kept because it is the only place the container's own process table is
+# visible. It samples /proc via `docker top`, and a process that exits in
+# milliseconds may not be caught either way - which is exactly why it does not
+# gate: an unobserved run here would otherwise read as a pass.
+sh "$(dirname "$0")/test-mnemonic-argv.sh" || { echo "FAIL: the argv test failed"; exit 1; }
 
-# ...and the fixed spelling must not.
 docker run -d --rm --name "$NAME-argv" --entrypoint /bin/sh "$IMAGE" \
   -c "umask 077; f=\$(mktemp); printf '%s' '$MNEMONIC' > \$f; cast wallet private-key --mnemonic \$f >/dev/null; sleep 3" >/dev/null
 sleep 1
 if docker top "$NAME-argv" -o args 2>/dev/null | grep -q "junk"; then
   docker rm -f "$NAME-argv" >/dev/null 2>&1 || true
-  echo "FAIL: the phrase is on the command line"; exit 1
+  echo "FAIL: the phrase is on the command line in the real image"; exit 1
 fi
 docker rm -f "$NAME-argv" >/dev/null 2>&1 || true
-echo "the phrase is not on any command line; only the file path is"
+echo "view: nothing observed on the container's argv (non-gating; see the test above)"
 
 step "the startup banner does not leak the treasury key"
 # anvil prints the mnemonic and every private key unless -q. Account 0 is the

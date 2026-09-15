@@ -73,6 +73,15 @@ cleanup() { rm -f "$MNEMONIC_FILE"; }
 trap cleanup EXIT INT TERM
 printf '%s' "$ANVIL_MNEMONIC" > "$MNEMONIC_FILE"
 
+# NON-EMPTY, CHECKED. If the file is absent or empty, cast falls back to reading
+# the argument AS A PHRASE and reports "the word /tmp/tmp.XXXX is invalid" - an
+# error about a path that looks like an error about a mnemonic, which sends
+# whoever reads it to the wrong place entirely.
+if [ ! -s "$MNEMONIC_FILE" ]; then
+  echo "deploy: could not write the mnemonic to $MNEMONIC_FILE (is the filesystem writable?)" >&2
+  exit 1
+fi
+
 KEY=$(cast wallet private-key --mnemonic "$MNEMONIC_FILE")
 cd /contracts
 
