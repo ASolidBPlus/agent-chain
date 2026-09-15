@@ -5,6 +5,30 @@
 #   ./docker/verify-compose.sh
 set -euo pipefail
 
+# PARCEL B: A QUIET STEP THAT SPEAKS WHEN IT FAILS.
+#
+# `up -d --build >/dev/null 2>&1` discarded the reason, so a failure inside it
+# left `set -e` killing the script with the log ending at "=== cold start" and
+# nothing to read. Measured on this branch, twice: a compose interpolation error
+# and a container that would not start both arrived as a script that simply
+# stopped.
+#
+# NO `trap ... EXIT` here: this script already sets one to bring the stack down,
+# and a second trap on the same signal REPLACES the first - so a helper that
+# installed one would leave a stack running. The log is per call.
+quietly() { # quietly <label> <cmd...> - prints the command's output only if it fails
+  local label=$1; shift
+  local log; log=$(mktemp)
+  if ! "$@" >"$log" 2>&1; then
+    echo "FAIL: $label" >&2
+    echo "--- last 40 lines ---" >&2
+    tail -40 "$log" >&2
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+}
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"       # the repo root
 export ANVIL_MNEMONIC=${ANVIL_MNEMONIC:-"test test test test test test test test test test test junk"}
 # FINDING 16: NO DEFAULT SECRETS, and the reason is that these two are not
@@ -47,7 +71,7 @@ A=(-H "Authorization: Bearer $CHAIN_SVC_TOKEN")
 
 step "cold start"
 START=$(date +%s)
-"${COMPOSE[@]}" up -d --build >/dev/null 2>&1
+quietly "compose up --build" "${COMPOSE[@]}" up -d --build
 # Criterion 2 gives 30s from a cold start to a served /supply.
 SUPPLY=""
 for _ in $(seq 1 30); do
@@ -65,7 +89,7 @@ check "chain-deploy exited 0" "$("${COMPOSE[@]}" ps -a --format '{{.Service}}:{{
 
 step "state persists across a restart (criterion 2, second half)"
 BEFORE=$(curl -fsS "${A[@]}" http://127.0.0.1:7000/supply)
-"${COMPOSE[@]}" restart chain >/dev/null 2>&1
+quietly "compose restart chain" "${COMPOSE[@]}" restart chain
 for _ in $(seq 1 30); do curl -fsS "${A[@]}" http://127.0.0.1:7000/supply >/dev/null 2>&1 && break; sleep 1; done
 AFTER=$(curl -fsS "${A[@]}" http://127.0.0.1:7000/supply)
 echo "  before: $BEFORE"
