@@ -19,8 +19,17 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /// The reversal's reason, not just its fact: a policy-layer lock holds only
 /// while every spend goes through the service. A leaked wallet key or a
 /// contract-to-contract spend bypasses it entirely, and those are the two cases
-/// a freeze is for. chain-svc's `POST /wallets/:id/freeze` stays as a separate
-/// service-side lock; the two are independent and neither implies the other.
+/// a freeze is for. THIS bar holds regardless, because it is the token's own.
+///
+/// No exceptions and no coupling: the contract does not ask any service what it
+/// thinks, and nothing outside it can make a frozen account send. Operated by
+/// admin-call, like any other role-gated function here.
+///
+/// Deliberately says nothing about what any service does. An earlier draft of
+/// this block named a service route as the other half of the story; the route
+/// did not exist, and a header that invents an endpoint sends a reader looking
+/// for one. What a service does with freezing is that service's to document and
+/// its to change.
 ///
 /// The old text is quoted rather than deleted because a reader who meets a
 /// `frozen` mapping in a contract whose header denies having one cannot tell

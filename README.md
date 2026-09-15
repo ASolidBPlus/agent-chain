@@ -122,8 +122,8 @@ instance of the same code at its own address. Role-based access:
   and not a contract action; a send freeze is now a contract primitive, operated
   by admin-call, because a policy-layer lock holds only while every spend goes
   through the service — and a leaked key or a contract-to-contract spend are the
-  two cases it is for. chain-svc's `POST /wallets/:id/freeze` remains a separate
-  service-side lock; neither implies the other.
+  two cases it is for. The bar is the token's own: no exceptions, no coupling,
+  and nothing outside the contract can make a frozen account send.
 
 ```mermaid
 flowchart LR
