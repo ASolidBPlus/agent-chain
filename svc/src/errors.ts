@@ -22,6 +22,16 @@ export type ErrorCode =
   | 'unknown_intent'
   | 'wallet_frozen'
   | 'over_max_per_tx'
+  /// §1b. The wallet's policy sets NO cap for this token, so no amount can be
+  /// spent - as distinct from `over_max_per_tx`, where a smaller one could.
+  ///
+  /// A SPLIT, NOT AN ADDITION. `over_max_per_tx` carried both meanings and
+  /// still carries the first; a code is the closed set a model switches on, and
+  /// under the old code this one instructed a retry that cannot succeed.
+  ///
+  /// Persona-facing: a fact about the caller's OWN policy, which it can learn
+  /// by trying, so disclosing it discloses nothing.
+  | 'no_cap_set'
   | 'over_stage_cap'
   | 'intent_unresolved'
   | 'counterparty_denied'
@@ -113,6 +123,9 @@ export const STATUS: Record<ErrorCode, number> = {
   // Policy refusals share 409 with `frozen`: the request was well formed and
   // authorised, and the wallet's own policy is what stopped it (spec S5).
   over_max_per_tx: 409,
+  // 409 with the other policy refusals: well formed, authorised, and the
+  // wallet's own policy is what stopped it.
+  no_cap_set: 409,
   over_stage_cap: 409,
   // The intent was reserved and never completed: the first attempt reached the
   // broadcast with an unknown outcome. 409 because retrying UNCHANGED cannot
