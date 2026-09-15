@@ -1508,7 +1508,13 @@ describe('PATCH /wallets/:agentId/policy', () => {
   function spawnerWith(canonicalOf: Record<string, string> = {}): { s: Spawner; store: Store; dir: string } {
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const store = new Store(':memory:');
-    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', null);
+    // KINDED, as of v0.8.0. The merge base for a PATCH is the wallet's OWN
+    // kind's default, read from this row - so a row with a NULL kind has no
+    // kind default to merge onto and every test here would be patching against
+    // nothing. The row was `null` because until now `policyFor` took the
+    // `agent` defaults for every wallet regardless of kind, and the fixture
+    // never had to say which kind it was.
+    store.markSpawned('orch:a', '0x000000000000000000000000000000000000bEEF', 'agent');
     const s = new Spawner(
       { ...config, policyDir: dir } as Config,
       exploding('chain') as Chain,

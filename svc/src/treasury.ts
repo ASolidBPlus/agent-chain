@@ -33,6 +33,7 @@ import { walletPrincipal, type Principal } from './auth.ts';
 import {
   capsFor,
   enforcePolicy,
+  isUnreadable,
   readPolicyFile,
   stageCapWei,
   type AgentPolicy,
@@ -218,11 +219,11 @@ export class Treasury {
   /// Wildcard entries stay name-only - there is no address to resolve for
   /// `*.evil` - which is why the name check above is kept rather than replaced.
   private async assertNotDeniedByIdentity(
-    policy: AgentPolicy,
+    policy: AgentPolicy | null,
     targetAddress: string,
     requested: string,
   ): Promise<void> {
-    for (const entry of policy.deny ?? []) {
+    for (const entry of policy?.deny ?? []) {
       if (entry.includes('*')) continue; // a pattern, already handled by name
 
       // RESOLVED EVERY TIME, NOT CACHED, and the cache this replaces was wrong
@@ -306,9 +307,33 @@ export class Treasury {
 
   /// The policy chain-svc ENFORCES is the same file it wrote for wallet-mcp to
   /// read, so the boundary and the model-facing fast path cannot drift apart.
-  private async policyFor(agentId: string): Promise<AgentPolicy> {
+  /// The rules written for one wallet, or NULL when nobody wrote any.
+  ///
+  /// Order: the wallet's own FILE, then the default for the WALLET'S OWN KIND
+  /// if defaults are loaded at all, then nothing.
+  ///
+  /// THE KIND IS READ PER REQUEST, from the store's wallet row. Until v0.8.0
+  /// this took `this.policyDefaults.agent` for every wallet regardless of kind
+  /// - a shipped quirk that gave an org or a burner the agent defaults, and one
+  /// nobody noticed because the three kinds' caps differ only in magnitude.
+  ///
+  /// An UNREADABLE file is not "no policy": it propagates, and every spend from
+  /// that wallet refuses. Falling through to the kind default would make a
+  /// corrupt byte WIDEN a wallet's bounds.
+  private async policyFor(agentId: string): Promise<AgentPolicy | null> {
     const key = this.chain.modules.tokens[0]?.key;
-    return (await readPolicyFile(this.config.policyDir, agentId, key)) ?? this.policyDefaults.agent;
+    const read = await readPolicyFile(this.config.policyDir, agentId, key);
+    if (isUnreadable(read)) {
+      // REFUSED HERE, once, rather than guarded at every consumer. Every
+      // wallet-scope spend from a wallet whose file will not parse refuses, and
+      // the reason reaches the operator's log while the persona gets the code.
+      console.warn(`[chain-svc] policy file for ${agentId} is unreadable: ${read.unreadable}`);
+      throw new HttpError('no_cap_set', `policy file unreadable: ${read.unreadable}`);
+    }
+    if (read !== null) return read;
+    if (!this.policyDefaults) return null;
+    const kind = this.store.walletRow(agentId)?.kind;
+    return (kind ? this.policyDefaults[kind] : undefined) ?? null;
   }
 
   /// Treasury -> wallet. Facilitator top-ups and bounty payouts (spec S4).
@@ -1167,7 +1192,7 @@ export class Treasury {
     entry: CallEntry,
     args: EncodableArg[],
     fromAgentId: string,
-    policy: AgentPolicy,
+    policy: AgentPolicy | null,
   ): Promise<{ resolved: EncodableArg[]; named: Map<number, string> }> {
     const { inputs, abiIndex } = Treasury.callerInputs(entry);
     const resolved = [...args];
@@ -1307,7 +1332,7 @@ export class Treasury {
     entry: CallEntry,
     args: EncodableArg[],
     wireArgs: unknown[],
-    policy: AgentPolicy,
+    policy: AgentPolicy | null,
   ): { amount: bigint; token: TokenModule; index: number } | null {
     const money = this.callMoney(entry, args, wireArgs);
     if (!money) return null;

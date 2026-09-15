@@ -20,8 +20,8 @@ import type { Resolver } from './resolver.ts';
 import type { Store } from './store.ts';
 import { hashToken } from './auth.ts';
 import { defaultToken, requireNames, resolveToken, type TokenModule } from './modules.ts';
-import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS,
-  type AgentPolicy, type PolicyDefaults, type WalletKind,
+import { mergePolicy, loadPolicyDefaults, readPolicyFile, isWalletKind, WALLET_KINDS, isUnreadable,
+  type AgentPolicy, type PolicyDefaults, type PolicyRead, type WalletKind,
   assertPatternsUsable,
 } from './policy.ts';
 import {
@@ -291,10 +291,15 @@ export class Spawner {
     // Freeze first. If clearing the aliases fails halfway, the wallet is
     // already unable to spend - the safe order.
     this.store.freeze(agentId);
-    // Preserve whatever caps the wallet was spawned with: retirement freezes an
-    // agent, it does not silently re-balance one. Falls back to the `agent`
-    // defaults only when there is no file to preserve.
-    await this.writePolicyFile(agentId, await this.existingPolicy(agentId), true);
+    // §3. RETIREMENT NO LONGER WRITES A POLICY FILE. It used to rewrite the
+    // wallet's file with `frozen: true` stamped in, preserving whatever caps
+    // the wallet was spawned with. At v0.8.0 that would CREATE a file for a
+    // wallet that has none, bake the kind defaults into it, and leave a field
+    // nothing reads - turning retirement into an act that writes rules nobody
+    // asked for, which is the thing this release removes.
+    //
+    // The `frozen` table above IS the record. A policy document is the
+    // operator's rules; retirement is not one of them.
 
     const wallet = this.store.spawnedAddress(agentId);
     if (wallet) {
@@ -409,12 +414,20 @@ export class Spawner {
     }
   }
 
-  private async existingPolicy(agentId: string): Promise<AgentPolicy> {
-    // Falls back to the `agent` defaults only when there is no file to preserve.
-    return (
-      (await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key)) ??
-      this.policyDefaults.agent
-    );
+  /// The merge base for `PATCH` and for retirement.
+  ///
+  /// UNREADABLE PROPAGATES rather than falling back: a PATCH over a file this
+  /// service cannot read would silently discard whatever the operator wrote,
+  /// and `{ clear: true }` is the operation that means "throw it away". The
+  /// caller decides; this does not decide for it.
+  private async existingPolicy(agentId: string): Promise<PolicyRead> {
+    const read = await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key);
+    if (read !== null) return read;
+    // No file: the base is the wallet's OWN kind's default when defaults are
+    // loaded, and nothing otherwise.
+    if (!this.policyDefaults) return null;
+    const kind = this.store.walletRow(agentId)?.kind;
+    return (kind ? this.policyDefaults[kind] : undefined) ?? null;
   }
 
   /// Partial update of a wallet's policy (harness spec S3). Platform scope.
@@ -458,6 +471,17 @@ export class Spawner {
     // is read against it rather than refused. A caller patching the old shape
     // is saying something about the default token; every other token's caps
     // come through from `current` untouched.
+    if (isUnreadable(current)) {
+      // A PATCH MERGES ONTO WHAT IS THERE, and this service cannot read what is
+      // there. Merging onto a fallback would silently discard whatever the
+      // operator wrote; `{ clear: true }` is the operation that means throw it
+      // away, and it works on an unreadable file precisely because it reads
+      // nothing.
+      throw new HttpError(
+        'invalid_request',
+        `policy file unreadable: ${current.unreadable}; clear it first`,
+      );
+    }
     const next = mergePolicy(body, current, this.chain.modules.tokens[0]?.key);
 
     // Also called here now. It was on this path only, so `POST /wallets` with

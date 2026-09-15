@@ -200,12 +200,29 @@ describe('loadPolicyDefaults with per-token caps', () => {
     ).toThrow(/agent/);
   });
 
-  it('refuses a cap that is not a usable amount', () => {
-    for (const bad of [{ max_per_tx: '0', max_per_stage: '5' }, { max_per_tx: '-1', max_per_stage: '5' }, { max_per_tx: 'lots', max_per_stage: '5' }, { max_per_stage: '5' }]) {
+  it('refuses a cap that is PRESENT and not a usable amount', () => {
+    // `{ max_per_stage: '5' }` LEFT THIS LIST at v0.8.0 and is asserted below
+    // instead: an absent `max_per_tx` is not a bad value, it is no bound, and
+    // keeping it here would have been the fail-closed-on-silence rule surviving
+    // in the one place nobody looked.
+    for (const bad of [{ max_per_tx: '0', max_per_stage: '5' }, { max_per_tx: '-1', max_per_stage: '5' }, { max_per_tx: 'lots', max_per_stage: '5' }]) {
       expect(() =>
         loadPolicyDefaults(defaultsFile(FILE({ agent: KIND({ '*': bad }) })), 'play', TOKENS, () => {}),
       ).toThrow();
     }
+  });
+
+  it('LOADS a defaults entry that bounds only one of the two', () => {
+    const d = loadPolicyDefaults(
+      defaultsFile(FILE({ agent: KIND({ '*': { max_per_stage: '5' } }) })),
+      'play',
+      TOKENS,
+      () => {},
+    );
+    // Bounds the stage and says nothing about a single transaction - which is a
+    // coherent thing for an operator to write and was refused as malformed
+    // until each field stood alone.
+    expect(d.agent.caps!.vee).toEqual({ max_per_stage: '5' });
   });
 
   it('still drops TLD patterns on a names-less deployment', () => {
