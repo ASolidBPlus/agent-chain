@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { decodeFunctionData, type Abi } from 'viem';
+import { TokenAbi } from '../src/abi.ts';
 import { Treasury, serialiseResult, PLATFORM_INTENT_AGENT, type Signer } from '../src/treasury.ts';
 import { Store } from '../src/store.ts';
 import { HttpError } from '../src/errors.ts';
@@ -1437,6 +1438,38 @@ describe('fund and set-balance, per token', () => {
     // The SIGNED transaction is the assertion here, because a sweep is signed
     // with the wallet's own key rather than written by the treasury.
     expect(t.signed[0]!.to).toBe(GOLD);
+  });
+
+  // FINDING 1, THE OTHER DIRECTION OF THE INVARIANT PRINTED ON sweepToTreasury:
+  // "`fund` and this and `/sign-transfer` all emit an IntentTransfer and absence
+  // of one keeps meaning something".
+  //
+  // The fund half is asserted above (every emission has a row). This is the
+  // half that was false from the other side: the sweep RECORDED an intent and
+  // emitted a plain `transfer`, under a comment saying transferWithIntent
+  // "arrives with the contract PR, which sequences after this one" - and that
+  // PR landed at v0.7.0 while the line stayed. So a sweep's absence of an
+  // IntentTransfer meant nothing, and the sweep's negative branch reads absence
+  // as "it did not land".
+  it('the sweep emits an IntentTransfer carrying the topic on its own row', async () => {
+    const { t, store } = await harness();
+    await t.setBalance('orch:a', { amount: '0.00001', token: 'gold', intentId: 'sw-2' }).catch(() => undefined);
+
+    // DECODED FROM THE CALLDATA, because that is what goes on chain. The
+    // harness records `{to, data}`, and `to` alone cannot tell `transfer` from
+    // `transferWithIntent` - both reach the right contract with the right
+    // amount, and only one of them tells the tail which intent authorised it.
+    const call = decodeFunctionData({ abi: TokenAbi, data: t.signed[0]!.data });
+    expect(call.functionName).toBe('transferWithIntent');
+
+    // ...and the bytes32 it carries is the one ON THE ROW, not a re-derivation.
+    // With rows written either side of v8 in one store, a re-derivation puts a
+    // topic on chain that the row does not carry, `recordEmission` matches
+    // nothing, and the intent sits unresolved for ever with a transfer that
+    // really happened.
+    const stored = store.intentTopicOf('orch:a', 'sw-2');
+    expect(stored).not.toBeNull();
+    expect((call.args as readonly unknown[])[2]).toBe(stored);
   });
 
   it('sets the balance of the NAMED token, measuring and moving the same one', async () => {
