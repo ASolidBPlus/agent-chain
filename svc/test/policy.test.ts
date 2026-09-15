@@ -3,11 +3,11 @@
 // test that they agree is what makes it safe.
 
 import { describe, it, expect } from 'bun:test';
-import { matchesPattern, assertPatternsUsable, capsFor, enforcePolicy, mergePolicy, capToWei, type AgentPolicy } from '../src/policy.ts';
+import { matchesPattern, assertPatternsUsable, capsFor, enforcePolicy, mergePolicy, capToWei, UNLIMITED, type AgentPolicy } from '../src/policy.ts';
 import { matchesPattern as mcpMatchesPattern } from '../../wallet-mcp/src/policy.ts';
 import { HttpError } from '../src/errors.ts';
 import { RESOLVER_CASES, RESOLVER_DEFAULT, RESOLVER_TOKENS } from '../../wallet-mcp/test/resolver-cases.ts';
-import { capsRefusal } from '../../wallet-mcp/src/policy.ts';
+import { capsRefusal, checkLocally, UNLIMITED as UNLIMITED_MCP } from '../../wallet-mcp/src/policy.ts';
 import { resolveTokenOrRefusal } from '../../wallet-mcp/src/modules.ts';
 import { resolveToken, type Modules } from '../src/modules.ts';
 
@@ -274,5 +274,65 @@ describe('the caps refusal, on both sides', () => {
     const half = { ...policy, caps: { au: { max_per_tx: '1' } } };
     expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no_cap_set');
     expect(capsRefusal(half as never, 'au')).not.toBeNull();
+  });
+
+  // §1b, AT THE POINT OF USE. `capsFor` tested only `=== undefined`, so a
+  // per-wallet policy carrying a typo reached `stageCapWei`/`enforcePolicy` and
+  // threw a raw SyntaxError or became a 0n cap. Not reachable through a FILE,
+  // because `isPolicy` gates every read - but that gate's consequence is the
+  // wrong one: a typo'd file reads as NO POLICY and this service falls back to
+  // the kind defaults, which are WIDER, while wallet-mcp answers `no_cap_set`.
+  // The two layers would disagree about exactly the value class §1b ruled on,
+  // and disagree in the permissive direction here.
+  it('agrees that an UNREADABLE cap value is no cap, on both sides', () => {
+    for (const bad of ['unlimted', 'UNLIMITED', '', 'none', null, 0, -5]) {
+      const p = { ...policy, caps: { play: { max_per_tx: bad, max_per_stage: '500' } } };
+      expect(codeOf(() => capsFor(p as never, 'play'))).toBe('no_cap_set');
+      expect(capsRefusal(p as never, 'play')).toEqual({
+        reason: 'no_cap_set',
+        detail: 'no cap set for play',
+      });
+    }
+  });
+
+  // THE `"unlimited"` ROW, and the ABSENT row beside it - the two must not
+  // collapse into each other in either direction, and a table with only one of
+  // them cannot tell them apart.
+  //
+  // THIS ROW COMPARES THE SPEND DECISION, not the cap lookup. `capsRefusal` and
+  // `capsFor` both answer "is there an entry", and `"unlimited"` IS an entry, so
+  // a lookup-level row passes on both sides whether or not either one skips the
+  // bound. Removing wallet-mcp's per-tx skip left svc 697/0 green - the
+  // divergence guard did not exist until this row.
+  it('agrees that an "unlimited" per-tx cap lets any amount through', () => {
+    const unl = { ...policy, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: '500' } } };
+    const huge = 10n ** 30n;
+
+    // chain-svc: no throw at all.
+    expect(() =>
+      enforcePolicy({
+        policy: unl as never,
+        to: 'alpha.play',
+        amount: huge,
+        decimals: 18,
+        symbol: 'PLAY',
+        tokenKey: 'play',
+      }),
+    ).not.toThrow();
+
+    // wallet-mcp: nothing local objects.
+    expect(checkLocally(unl as never, 'alpha.play', '1000000000000', { key: 'play', decimals: 18 })).toBeNull();
+
+    // ...and the constant they each tested against is the same one.
+    expect(UNLIMITED_MCP).toBe(UNLIMITED);
+  });
+
+  it('agrees that an ABSENT cap is still refused, however unlimited another is', () => {
+    // The fail-closed direction, beside the row above so neither can be read as
+    // licence for the other: `"unlimited"` is a decision someone wrote down and
+    // silence is not.
+    const unl = { ...policy, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: UNLIMITED } } };
+    expect(codeOf(() => capsFor(unl as never, 'au'))).toBe('no_cap_set');
+    expect(capsRefusal(unl as never, 'au')?.reason).toBe('no_cap_set');
   });
 });

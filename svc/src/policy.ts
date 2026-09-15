@@ -80,7 +80,23 @@ export interface AgentPolicy {
 /// currencies cannot otherwise tell which of its spends is impossible.
 export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
   const caps = policy.caps?.[tokenKey];
-  if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
+  // §1b, AT THE POINT OF USE. `isCap` on both fields, not `=== undefined`: a
+  // value this code cannot read is treated as ABSENT, which is the same answer
+  // silence gets and is what `capsRefusal` already does on the wallet side.
+  //
+  // WHY IT MATTERS EVEN THOUGH `isPolicy` GATES EVERY FILE READ. That gate's
+  // consequence is the wrong one: a policy file carrying `'unlimted'` reads as
+  // NO POLICY, so this service falls back to the KIND DEFAULTS - wider caps -
+  // while wallet-mcp, which validates per cap, answers `no_cap_set`. The two
+  // layers would then disagree about exactly the value class §1b was ruled on,
+  // and disagree in the permissive direction here. Checking at the point of use
+  // makes the answer the same whichever route the policy arrived by.
+  //
+  // `isCap`'s default 18 places is deliberate and must stay permissive: a cap
+  // the loader accepted at SIX places has at most six fraction digits, so it
+  // satisfies eighteen. This must never refuse what validation allowed - that
+  // would be a new divergence in place of the one it closes.
+  if (!caps || !isCap(caps.max_per_tx) || !isCap(caps.max_per_stage)) {
     throw new HttpError('no_cap_set', `no cap set for ${tokenKey}`);
   }
   return caps;
