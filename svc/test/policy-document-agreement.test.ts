@@ -42,6 +42,8 @@ interface Expected {
   allow?: string[];
   deny?: string[];
   unreadable?: true;
+  /// A THIRD STATE, spelled explicitly. See `rules()`.
+  absent?: true;
 }
 
 const DOCUMENTS: Array<{ what: string; body: unknown; expect: Expected }> = [
@@ -144,6 +146,24 @@ const DOCUMENTS: Array<{ what: string; body: unknown; expect: Expected }> = [
 
   // ── Unreadable: the SHAPE is wrong, not a value ───────────────────────
   { what: 'not an object', body: ['not', 'a', 'policy'], expect: { unreadable: true } },
+  {
+    // AN EMPTY STRING IS NOT A NAME. The mirror dropped the length check the
+    // boundary has, so this document read as unreadable on one side and as a
+    // policy with a nonsense pattern on the other - two different refusals
+    // downstream from one file.
+    what: 'an empty string in a name list',
+    body: { allow: [''] },
+    expect: { unreadable: true },
+  },
+  {
+    // A GARBAGE ENTRY IS NOT A GARBAGE VALUE. The ruling put a bad cap VALUE at
+    // field level, refusing its own token; an entry that is not an object at
+    // all is not a value, it is a malformed document. `caps` being an object
+    // says nothing about what is in it, and the mirror checked only the map.
+    what: 'a cap entry that is not an object',
+    body: { caps: { play: 'nope' } },
+    expect: { unreadable: true },
+  },
   { what: 'allow is not a list', body: { allow: 'everyone' }, expect: { unreadable: true } },
   { what: 'caps is not an object', body: { caps: [] }, expect: { unreadable: true } },
 ];
@@ -157,7 +177,19 @@ beforeAll(() => {
 /// Reduces either package's read to the rules it found, so the comparison is
 /// between ANSWERS and not between envelopes.
 function rules(read: unknown): Expected {
-  if (read === null) return { unreadable: undefined } as Expected;
+  // ABSENCE GETS ITS OWN VALUE, and this line is the finding.
+  //
+  // It used to return `{ unreadable: undefined }`, and `toEqual` IGNORES
+  // undefined-valued keys - so a null read compared EQUAL to `{}`, and the row
+  // for an empty document passed whether a side read `{}` as an empty policy or
+  // as an absent file. That is exactly the collapse §4 exists to reverse, and
+  // the row named for it could not fail: a mutant returning null for `{}` left
+  // the whole suite green.
+  //
+  // Benign while `checkLocally` answers the same for both, and only until
+  // something treats them differently - at which point the test that would have
+  // said so is the one already passing. THREE STATES NEED THREE VALUES.
+  if (read === null) return { absent: true };
   const r = read as Record<string, unknown>;
   if ('unreadable' in r) return { unreadable: true };
   return {

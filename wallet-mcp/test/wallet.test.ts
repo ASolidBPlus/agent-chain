@@ -285,6 +285,31 @@ describe('send', () => {
     expect(fake.transfers).toHaveLength(0);
   });
 
+  // THE WIRE HALF of an unreadable policy: what a persona actually receives,
+  // and what the operator does. `checkLocally` is pinned by policy.test.ts;
+  // this is the only row that drives `send` end to end against a broken file.
+  //
+  // TWO AUDIENCES, ASSERTED SEPARATELY, because the whole shape is a disclosure
+  // split: the persona gets a fixed sentence that says nothing about the file,
+  // the operator gets the parse message - which QUOTES the file, and is why the
+  // two cannot be one string.
+  it('refuses on an unreadable policy file, telling the persona nothing about it', async () => {
+    const { wallet, config, logs } = walletWith(AGENT_POLICY);
+    writeFileSync(config.policyFile, '{"allow": ["acme:secret"], "deny": treasuryOnly}');
+
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'pf1' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'no_cap_set', detail: 'policy file unreadable' });
+    // Nothing of the file crosses - not the counterparty, not the bad token.
+    expect(JSON.stringify(result)).not.toContain('acme:secret');
+    expect(JSON.stringify(result)).not.toContain('treasuryOnly');
+    // ...and nothing was sent.
+    expect(fake.transfers).toHaveLength(0);
+
+    // The operator's half reached the sink, and it is the half that may quote.
+    expect(logs.some((l) => l.includes('treasuryOnly'))).toBe(true);
+  });
+
   it('refuses a denied counterparty', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     expect(await wallet.send({ to: 'treasury.play', amount: '1', intent_id: 'c1' })).toMatchObject({

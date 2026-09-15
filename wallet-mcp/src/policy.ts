@@ -197,6 +197,11 @@ export function readPolicy(path: string, defaultTokenKey?: string): PolicyRead {
       if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
         return { unreadable: UNREADABLE, reason: 'not a policy document' };
       }
+      // PER ENTRY, not just the map: `caps` being an object says nothing about
+      // what is in it, and an entry that is not an object is a shape failure.
+      if (!Object.values(p.caps as Record<string, unknown>).every(isCapEntry)) {
+        return { unreadable: UNREADABLE, reason: 'not a policy document' };
+      }
       return withLists(p, { caps: p.caps as Record<string, TokenCaps> });
     }
 
@@ -260,9 +265,29 @@ function withLists(p: Record<string, unknown>, rest: Partial<WalletPolicy>): Wal
   };
 }
 
-/// A list of names, or absent. Mirrors chain-svc's `isNameList`.
+/// A list of names, or absent. Mirrors chain-svc's `isNameList` INCLUDING THE
+/// LENGTH CHECK: an empty string is not a name, and a mirror that dropped it
+/// gave `{"allow": [""]}` two answers - unreadable on the boundary, a policy
+/// with a nonsense pattern here. Two different refusals downstream from one
+/// document, which is the drift this package's copies exist to prevent.
 function isNameList(value: unknown): boolean {
-  return value === undefined || (Array.isArray(value) && value.every((v) => typeof v === 'string'));
+  return (
+    value === undefined ||
+    (Array.isArray(value) && value.every((v) => typeof v === 'string' && v.length > 0))
+  );
+}
+
+/// Is this a cap ENTRY - an object - whatever is inside it? Mirrors chain-svc's
+/// `isTokenCaps`, which is shape-only since v0.8.0.
+///
+/// THE LINE IS SHAPE VERSUS VALUE. A garbage VALUE (`max_per_tx: 'lots'`) is
+/// field-level and refuses its own token at the point of use; an entry that is
+/// not an object at all is not a value, it is a malformed document, and the
+/// whole file is unreadable. Without this the mirror accepted
+/// `caps: { play: 'nope' }` as a policy while the boundary called the file
+/// garbage.
+function isCapEntry(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /// `*` matches anything, `*.{tld}` a suffix, `acme:*` a prefix; anything else is
