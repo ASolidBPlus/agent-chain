@@ -363,6 +363,91 @@ contract DeployTest is Test {
         _clean(dir);
     }
 
+    /// A WIPED CHAIN WITH A SURVIVING MANIFEST: every address is empty, so every
+    /// module is deployed again - and lands back on the SAME addresses, because
+    /// CREATE2 derives them from the manifest and not from a nonce.
+    ///
+    /// This is the reachable half of per-module planning. ./deployments is a
+    /// bind mount and chain-state is a named volume, so the file outliving the
+    /// chain is ordinary.
+    function test_AWipedChainRedeploysToTheSameAddresses() public {
+        string memory dir = _dir("wiped");
+        // A ZERO-SUPPLY token, because `vm.etch` replaces CODE and leaves
+        // STORAGE. A real wiped volume takes the whole account; the closest this
+        // harness can get is an empty-code account with its nonce reset, and a
+        // token that minted on its first deployment would mint again on top of
+        // surviving balances and trip the seeding assertion. The planner's
+        // decision is what this test is about, and it is the same either way.
+        _write(
+            dir,
+            '{"schema":1,"modules":['
+            '{"kind":"token","key":"play","name":"Play","symbol":"PLAY","initialSupply":"0"},'
+            '{"kind":"names","tld":"play"}]}'
+        );
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory json = vm.readFile(string.concat(dir, "/local.json"));
+        address token = vm.parseJsonAddress(json, ".modules[0].address");
+        address registry = vm.parseJsonAddress(json, ".modules[1].address");
+        // A wiped chain-state volume takes the whole account, not just its code:
+        // `vm.etch(a, "")` alone leaves the account with its nonce, and CREATE2
+        // answers CreateCollision to an address that has ever been used.
+        vm.etch(token, "");
+        vm.etch(registry, "");
+        vm.resetNonce(token);
+        vm.resetNonce(registry);
+
+        Deploy again = _script();
+        assertTrue(_deployed(again, dir, ""), "a wiped chain redeploys and writes a manifest");
+
+        string memory after_ = vm.readFile(string.concat(dir, "/local.json"));
+        assertEq(vm.parseJsonAddress(after_, ".modules[0].address"), token, "the token returns to its address");
+        assertEq(vm.parseJsonAddress(after_, ".modules[1].address"), registry, "and so does the registry");
+        assertEq(
+            NameRegistry(registry).resolve("treasury.play"), treasury, "the treasury name is registered again"
+        );
+        _clean(dir);
+    }
+
+    /// A SQUATTED ADDRESS is refused BY NAME, with the codehash, rather than by
+    /// a CreateCollision from inside `new` that says only that a creation
+    /// failed.
+    ///
+    /// This is the other reachable half: a fresh deployment onto a chain where
+    /// something already occupies an address this manifest derives.
+    function test_ASquattedAddressIsRefusedByName() public {
+        string memory dir = _dir("squat");
+        _write(dir, _example("token-only.json"));
+
+        // Derive where the token will go, and put something else there first.
+        Deploy probe = _script();
+        _deployed(probe, dir, "");
+        address taken = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        _clean(dir);
+
+        string memory dir2 = _dir("squat2");
+        _write(dir2, _example("token-only.json"));
+        vm.etch(taken, hex"60006000fd");
+
+        Deploy d = _script();
+        // No cache, so the message is the one for an occupied address nobody
+        // recorded - the case that would otherwise be a bare CreateCollision.
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "Deploy: token:play derives ",
+                    vm.toString(taken),
+                    ", which already holds code with codehash ",
+                    vm.toString(taken.codehash),
+                    " and no manifest records it - another deployment is using this address"
+                )
+            )
+        );
+        d.deploy(dir2, "", "1");
+        _clean(dir2);
+    }
+
     // ── the four shipped examples ───────────────────────────────────────────
 
     function test_TokenAndNames() public {
