@@ -105,7 +105,13 @@ cat > "$WORK/policies/calls.json" <<'CALLS_JSON'
     { "contract": "converter", "function": "pair",  "read": true, "kinds": ["org", "agent", "burner"],
       "addressArgs": { "0": "token", "1": "token" } },
     { "contract": "converter", "function": "setPair", "admin": true },
-    { "contract": "converter", "function": "setPaused", "admin": true }
+    { "contract": "converter", "function": "setPaused", "admin": true },
+    { "contract": "play", "function": "setFrozen", "admin": true },
+    { "contract": "gold", "function": "setFrozen", "admin": true },
+    { "contract": "play", "function": "frozen", "read": true, "kinds": ["org", "agent", "burner"],
+      "addressArgs": { "0": "name" } },
+    { "contract": "gold", "function": "frozen", "read": true, "kinds": ["org", "agent", "burner"],
+      "addressArgs": { "0": "name" } }
   ]
 }
 CALLS_JSON

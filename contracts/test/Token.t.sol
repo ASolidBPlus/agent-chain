@@ -12,6 +12,7 @@ contract TokenTest is Test {
     /// under test runs as the test contract instead. Cost two failing tests.
     bytes32 internal minterRole;
     bytes32 internal burnerRole;
+    bytes32 internal freezerRole;
 
     address internal treasury = makeAddr("treasury");
     address internal vendor = makeAddr("vendor");
@@ -21,6 +22,147 @@ contract TokenTest is Test {
         play = new Token("Play Token", "PLAY", treasury);
         minterRole = play.MINTER_ROLE();
         burnerRole = play.BURNER_ROLE();
+        freezerRole = play.FREEZER_ROLE();
+    }
+
+    // ── THE SEND FREEZE ────────────────────────────────────────────────────
+    //
+    // A frozen account CANNOT SEND. Receiving, being minted to, and being read
+    // are unaffected. The point of putting it in the contract rather than in
+    // chain-svc is that it holds when the service is bypassed - a leaked wallet
+    // key, or a contract spending through an allowance - so the tests drive the
+    // contract directly and never through a service path.
+
+    function test_TreasuryHoldsFreezerRoleFromTheConstructor() public view {
+        // GRANTED WHERE THE CONTRACT IS CONSTRUCTED, not by the deploy script.
+        // A role granted in a script step is a role a deployment that skips
+        // that step does not have, and nothing would notice until the first
+        // freeze failed.
+        assertTrue(play.hasRole(freezerRole, treasury));
+    }
+
+    function test_AFrozenAccountCannotTransfer() public {
+        vm.prank(treasury);
+        play.mint(vendor, 100);
+        vm.prank(treasury);
+        play.setFrozen(vendor, true);
+
+        vm.prank(vendor);
+        vm.expectRevert(abi.encodeWithSelector(Token.AccountFrozen.selector, vendor));
+        play.transfer(client, 1);
+    }
+
+    function test_AFrozenAccountCannotTransferWithIntent() public {
+        vm.prank(treasury);
+        play.mint(vendor, 100);
+        vm.prank(treasury);
+        play.setFrozen(vendor, true);
+
+        vm.prank(vendor);
+        vm.expectRevert(abi.encodeWithSelector(Token.AccountFrozen.selector, vendor));
+        play.transferWithIntent(client, 1, keccak256("i-1"));
+    }
+
+    function test_AllowanceCannotMoveAFrozenAccountsMoney() public {
+        // THE BYPASS THAT MATTERS MOST, and the one where the frozen party is
+        // NOT the caller: vendor approves client, then vendor is frozen. The
+        // revert must name VENDOR, because an operator reading it otherwise
+        // learns that someone was frozen and not who.
+        vm.prank(treasury);
+        play.mint(vendor, 100);
+        vm.prank(vendor);
+        play.approve(client, 100);
+        vm.prank(treasury);
+        play.setFrozen(vendor, true);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(Token.AccountFrozen.selector, vendor));
+        play.transferFrom(vendor, client, 1);
+    }
+
+    function test_ABurnFromAFrozenAccountReverts() public {
+        // A CONVERSION IS A SPEND. `burnFrom` needs BURNER_ROLE, which a
+        // converter holds in a real deployment - so without this the freeze is
+        // bypassable by anything holding that role, which is exactly the
+        // contract-to-contract case the freeze exists for.
+        vm.prank(treasury);
+        play.mint(vendor, 100);
+        vm.startPrank(treasury);
+        play.grantRole(burnerRole, client);
+        play.setFrozen(vendor, true);
+        vm.stopPrank();
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(Token.AccountFrozen.selector, vendor));
+        play.burnFrom(vendor, 1);
+    }
+
+    function test_AFrozenAccountStillRECEIVESAndCanBeMintedTo() public {
+        // The freeze bars SENDING and nothing else. A fixture that only froze
+        // the sender could not tell "blocks sends" from "blocks the account",
+        // and the second would make an operator unable to fund a frozen wallet
+        // - which is the first thing an operator wants to do to one.
+        vm.prank(treasury);
+        play.setFrozen(vendor, true);
+
+        vm.prank(treasury);
+        play.mint(vendor, 50);
+        assertEq(play.balanceOf(vendor), 50);
+
+        vm.prank(treasury);
+        play.mint(client, 10);
+        vm.prank(client);
+        play.transfer(vendor, 10);
+        assertEq(play.balanceOf(vendor), 60);
+    }
+
+    function test_UnfreezingRestoresSending() public {
+        vm.prank(treasury);
+        play.mint(vendor, 100);
+        vm.startPrank(treasury);
+        play.setFrozen(vendor, true);
+        play.setFrozen(vendor, false);
+        vm.stopPrank();
+
+        vm.prank(vendor);
+        play.transfer(client, 40);
+        assertEq(play.balanceOf(client), 40);
+        assertFalse(play.frozen(vendor));
+    }
+
+    function test_ANonFreezerCannotFreeze() public {
+        vm.prank(client);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, client, freezerRole)
+        );
+        play.setFrozen(vendor, true);
+    }
+
+    function test_TheEventFiresEvenWhenNothingChanges() public {
+        // A NO-OP STILL EMITS. The feed records what the OPERATOR DID, and
+        // "froze an already-frozen account" is an action someone took. An event
+        // gated on a state change would make the feed a history of the state,
+        // which the mapping already is.
+        vm.startPrank(treasury);
+        play.setFrozen(vendor, true);
+        vm.expectEmit(true, false, false, true, address(play));
+        emit Token.Frozen(vendor, true);
+        play.setFrozen(vendor, true);
+        vm.stopPrank();
+    }
+
+    function test_FreezingOneAccountLeavesOthersAlone() public {
+        // COMPARE TO A VALUE, not to "the frozen one fails": a hook that
+        // reverted for every sender would pass every test above.
+        vm.startPrank(treasury);
+        play.mint(vendor, 100);
+        play.mint(client, 100);
+        play.setFrozen(vendor, true);
+        vm.stopPrank();
+
+        vm.prank(client);
+        play.transfer(vendor, 5);
+        assertEq(play.balanceOf(vendor), 105);
     }
 
     /// The metadata is now WHATEVER THE CONSTRUCTOR WAS GIVEN, which is the

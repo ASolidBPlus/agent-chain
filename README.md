@@ -112,8 +112,18 @@ instance of the same code at its own address. Role-based access:
   emission under one id, from anywhere, is therefore visible as an anomaly.
 - `burnFrom(account, amount)` — `BURNER_ROLE` only, granted to nobody at deploy;
   the deploy grants it to the Converter for each pair's source token.
-- No pause, no blacklist. Freezing a wallet is policy in chain-svc, not a
-  contract action.
+- `setFrozen(account, value)` — `FREEZER_ROLE` only, granted to the treasury in
+  the constructor. A frozen account **cannot send**: `transfer`,
+  `transferFrom`, `transferWithIntent` and a Converter's `burnFrom` all revert
+  with `AccountFrozen`. Receiving and being minted to are unaffected — a freeze
+  bars sending and nothing else. Emits `Frozen` on every call, a no-op included,
+  because the feed records what the operator DID.
+- No pause, no blacklist. This line used to say a freeze was policy in chain-svc
+  and not a contract action; a send freeze is now a contract primitive, operated
+  by admin-call, because a policy-layer lock holds only while every spend goes
+  through the service — and a leaked key or a contract-to-contract spend are the
+  two cases it is for. chain-svc's `POST /wallets/:id/freeze` remains a separate
+  service-side lock; neither implies the other.
 
 ```mermaid
 flowchart LR
