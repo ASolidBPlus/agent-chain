@@ -70,6 +70,34 @@ describe('the pattern dialect', () => {
     );
   });
 
+  // THE THREE STATES OF `allow`, NAMED. The mutant that made this worth writing
+  // is "an absent allow list is read as deny-all" - it was killed, but only by
+  // tests about null kinds, replayed intents and a missing intent id, which
+  // happened to use fixtures with no allow list. Red that says nothing about
+  // allow lists is red that stops being red the day someone adds one to those
+  // fixtures. So the property is stated, and stated on both sides: absent
+  // allows everything, `[]` allows nothing, and a written list allows what it
+  // names. Absent and empty diverging is the point - an operator who wrote an
+  // empty list said "this wallet pays no one".
+  const ALLOW_STATES: Array<[string, string[] | undefined, string, boolean]> = [
+    ['absent allows a stranger', undefined, 'orch:stranger', true],
+    ['empty allows no one', [], 'orch:stranger', false],
+    ['written allows what it names', ['orch:friend'], 'orch:friend', true],
+    ['written refuses what it does not', ['orch:friend'], 'orch:stranger', false],
+  ];
+
+  it.each(ALLOW_STATES)('chain-svc: %s', (_what, allow, to, allowed) => {
+    const policy: AgentPolicy = { caps: POLICY.caps, deny: [], ...(allow === undefined ? {} : { allow }) };
+    expect(codeOf(() => enforcePolicy({ policy, to, amount: 1n, decimals: 18, symbol: 'PLAY', tokenKey: 'play' })))
+      .toBe(allowed ? 'no-error' : 'counterparty_denied');
+  });
+
+  it.each(ALLOW_STATES)('wallet-mcp agrees: %s', (_what, allow, to, allowed) => {
+    const policy = { caps: POLICY.caps, deny: [], ...(allow === undefined ? {} : { allow }) } as never;
+    expect(checkLocally(policy, to, '1', { key: 'play', decimals: 18 })?.reason ?? 'no-refusal')
+      .toBe(allowed ? 'no-refusal' : 'counterparty_denied');
+  });
+
   // A star this dialect does not implement is refused AT LOAD, with a name,
   // rather than silently becoming a literal that matches nothing.
   it('refuses a star in an unsupported position, in both lists', () => {
