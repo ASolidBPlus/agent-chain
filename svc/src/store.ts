@@ -59,8 +59,6 @@ export class Store {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path, { create: true });
-    // WAL so a reader (/history) is never blocked by the events writer.
-    this.db.exec('PRAGMA journal_mode = WAL');
     // FINDING 13: WAIT FOR A BUSY WRITER RATHER THAN THROWING AT IT.
     //
     // WAL keeps readers out of a writer's way; it does not make two WRITERS
@@ -72,7 +70,21 @@ export class Store {
     // Five seconds because the thing being waited for is a migration, not a
     // request: a numbered step rewrites a table and then stamps a version, and
     // a caller that gives up at 100ms gives up in the middle of that.
+    //
+    // FIRST, AND THE ORDER IS THE FIX RATHER THAN A TIDY-UP. It was set after
+    // the line below, and `PRAGMA journal_mode = WAL` TAKES AN EXCLUSIVE LOCK
+    // to rewrite the header - so the second process died on the pragma that
+    // configures the store, one statement before the timeout that would have
+    // let it wait:
+    //
+    //   SQLiteError: database is locked   at PRAGMA journal_mode = WAL
+    //
+    // Found because the ten-trial test flaked rather than failed - roughly one
+    // run in three - which is the shape a race has when the window is a single
+    // statement wide.
     this.db.exec('PRAGMA busy_timeout = 5000');
+    // WAL so a reader (/history) is never blocked by the events writer.
+    this.db.exec('PRAGMA journal_mode = WAL');
     // Ordering is migrate()'s to enforce, not this constructor's - see migrate.ts.
     migrate(this.db, () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS memos (

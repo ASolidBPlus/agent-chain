@@ -977,8 +977,11 @@ describe('two processes may open one store at once', () => {
       }));
 
       // NAMED, not counted: a failure has to say which process and why.
-      expect({ trial: i, code: a.code, err: a.err.split('\n')[0] }).toEqual({ trial: i, code: 0, err: '' });
-      expect({ trial: i, code: b.code, err: b.err.split('\n')[0] }).toEqual({ trial: i, code: 0, err: '' });
+      for (const [which, r] of [['a', a], ['b', b]] as const) {
+        if (r.code !== 0) {
+          throw new Error(`trial ${i} process ${which} exited ${r.code}:\n${r.err}`);
+        }
+      }
       expect(userVersion(path)).toBe(SCHEMA_VERSION);
     }
   }, 120_000);
