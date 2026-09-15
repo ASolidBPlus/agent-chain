@@ -339,13 +339,29 @@ p.write_text(json.dumps({"agentId": "orch:open", "caps": {"play": {"max_per_tx":
 PYEOF
 TYPO=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"open-4"}')
 check "a typo'd cap refuses" "$(echo "$TYPO" | jget "['error']")" "no_cap_set"
-# THE FILE-LEVEL GATE CATCHES IT FIRST, and the detail says so rather than
-# naming the field. A document whose cap value is unusable fails `isPolicy`, so
-# the read returns the unreadable marker before any per-field check runs - both
-# paths answer `no_cap_set` and they differ in the detail, which is the honest
-# thing for them to differ in. The per-FIELD message is reachable through the
-# kind defaults and through a PATCH, which do not go through that gate.
-check "and says the file is unreadable" "$(echo "$TYPO" | python3 -c "import sys,json;print('unreadable' in str(json.load(sys.stdin).get('detail','')))")" "True"
+# GARBAGE IS SCOPED TO THE FIELD IT TOUCHES (ruled). The detail names the FIELD
+# and the token, not the file: the document still reads, and the refusal happens
+# at the point of use for that token alone. Bricking a two-token wallet over one
+# mistyped field would be the service deciding more than it was told.
+#
+# This check asserted the opposite until v0.8.0 - 'unreadable' in the detail -
+# and it was right when it was written: `isTokenCaps` checked VALUES, so one bad
+# cap failed `isPolicy` and the whole file came back as the marker. Relaxing that
+# predicate to SHAPE ONLY moved this answer, and the smoke was the only thing
+# that noticed, because it is the only instrument that reads the detail a
+# persona actually receives.
+check "and says WHICH field, not that the file is bad" "$(echo "$TYPO" | python3 -c "import sys,json;print(json.load(sys.stdin).get('detail',''))")" "max_per_tx for play is not a usable amount"
+
+# THE OTHER SIDE OF THE SAME RULING, so the row above cannot be read as "nothing
+# is ever file-level". A document whose SHAPE is wrong - not a value in it - is
+# unreadable, and every token refuses with the fixed sentence.
+python3 - <<PYEOF
+import pathlib
+pathlib.Path("$WORK/policies/orch%3Aopen.json").write_text('{"caps": []}')
+PYEOF
+SHAPE=$(wbody "$OPEN" -X POST "$BASE/call" -d '{"contract":"converter","function":"convert","args":[{"token":"play"},{"token":"gold"},"1"],"intentId":"open-5"}')
+check "a wrong-SHAPE document is file-level" "$(echo "$SHAPE" | jget "['error']")" "no_cap_set"
+check "and the detail is the fixed sentence" "$(echo "$SHAPE" | jget "['detail']")" "policy file unreadable"
 check "without quoting the file back" "$(echo "$TYPO" | grep -ci 'unlimted' || true)" "0"
 rm -f "$WORK/policies/orch%3Aopen.json"
 
