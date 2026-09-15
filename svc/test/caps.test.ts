@@ -66,25 +66,36 @@ describe('capsFor', () => {
     expect(capsFor(policy, 'vee')).toEqual({ max_per_tx: '100', max_per_stage: '500' });
   });
 
-  it('REFUSES a token the wallet has no entry for', () => {
-    // Silence fails CLOSED. An absent cap read as "no limit" is the one reading
-    // that costs money, and it is the reading a careless caller reaches for.
+  it('reads a token with NO entry as unbounded', () => {
+    // FLIPPED at v0.8.0, and this row is the reversal itself. Silence used to
+    // fail closed here on the argument that an absent cap read as "no limit" is
+    // the reading that costs money. The owner reversed it: this service
+    // enforces only rules someone wrote, and the rules that must survive a
+    // bypass live in the contracts. Refusing on silence is acting on its own
+    // initiative.
+    expect(capsFor(policy, 'au')).toEqual({});
+  });
+
+  it('reads an EMPTY entry as an entry with no bounds, not as garbage', () => {
+    // FLIPPED at v0.8.0. `{}` is an entry someone wrote and put no bounds in.
+    // Under the old rule it refused because `isTokenCaps` required both fields,
+    // so a shape defect and a value defect were one category; each field now
+    // stands alone and neither is present, so neither bounds anything.
+    expect(capsFor({ ...policy, caps: { au: {} } }, 'au')).toEqual({});
+  });
+
+  it('still refuses a field that is PRESENT and unreadable', () => {
+    // The half that survives. COMPARE TO A VALUE on the detail: it must name
+    // the FIELD, or a wallet with one typo between two currencies cannot tell
+    // which of its spends is impossible.
     let err: unknown;
     try {
-      capsFor(policy, 'au');
+      capsFor({ ...policy, caps: { au: { max_per_tx: 'lots' } } }, 'au');
     } catch (e) {
       err = e;
     }
-    expect(err).toBeInstanceOf(HttpError);
-    // §1b. `no_cap_set`, not `over_max_per_tx`: the old code told a persona a
-    // smaller amount would succeed, when no amount can. The DETAIL is
-    // unchanged - it was already right.
     expect((err as HttpError).code).toBe('no_cap_set');
-    expect((err as HttpError).detail).toBe('no cap set for au');
-  });
-
-  it('refuses even when the entry exists but is empty', () => {
-    expect(() => capsFor({ ...policy, caps: { au: {} as never } }, 'au')).toThrow(HttpError);
+    expect((err as HttpError).detail).toBe('max_per_tx for au is not a usable amount');
   });
 });
 

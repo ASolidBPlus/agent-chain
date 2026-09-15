@@ -246,7 +246,7 @@ describe('the caps refusal, on both sides', () => {
     frozen: false,
   };
 
-  it('agrees that a token with no entry cannot be spent, in the same words', () => {
+  it('agrees that a token with no entry is UNBOUNDED, on both sides', () => {
     const chainSvc = (() => {
       try {
         capsFor(policy as never, 'au');
@@ -256,11 +256,12 @@ describe('the caps refusal, on both sides', () => {
       }
     })();
 
-    expect(chainSvc).toEqual({ reason: 'no_cap_set', detail: 'no cap set for au' });
-    expect(capsRefusal(policy as never, 'au')).toEqual({
-      reason: 'no_cap_set',
-      detail: 'no cap set for au',
-    });
+    // FLIPPED at v0.8.0, and still an AGREEMENT test: what matters is that the
+    // two layers answer the SAME thing, not which thing. Both now answer
+    // nothing, and the row below keeps that from being vacuous by showing they
+    // both still refuse something.
+    expect(chainSvc).toBeNull();
+    expect(capsRefusal(policy as never, 'au')).toBeNull();
   });
 
   it('agrees that a token WITH an entry is spendable, so the test can fail either way', () => {
@@ -270,10 +271,15 @@ describe('the caps refusal, on both sides', () => {
     expect(capsRefusal(policy as never, 'play')).toBeNull();
   });
 
-  it('agrees that a HALF-WRITTEN entry is not an entry', () => {
+  it('agrees that a HALF-WRITTEN entry bounds the half that is written', () => {
+    // FLIPPED at v0.8.0. "Half-written" was a category only while `isTokenCaps`
+    // required both fields, so a shape defect and a value defect were the same
+    // thing. Each field now stands alone: this document bounds each
+    // transaction at 1 and says nothing about the stage, which is a coherent
+    // thing to write and no longer garbage.
     const half = { ...policy, caps: { au: { max_per_tx: '1' } } };
-    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no_cap_set');
-    expect(capsRefusal(half as never, 'au')).not.toBeNull();
+    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no-error');
+    expect(capsRefusal(half as never, 'au')).toBeNull();
   });
 
   // §1b, AT THE POINT OF USE. `capsFor` tested only `=== undefined`, so a
@@ -290,7 +296,7 @@ describe('the caps refusal, on both sides', () => {
       expect(codeOf(() => capsFor(p as never, 'play'))).toBe('no_cap_set');
       expect(capsRefusal(p as never, 'play')).toEqual({
         reason: 'no_cap_set',
-        detail: 'no cap set for play',
+        detail: 'max_per_tx for play is not a usable amount',
       });
     }
   });
@@ -327,12 +333,21 @@ describe('the caps refusal, on both sides', () => {
     expect(UNLIMITED_MCP).toBe(UNLIMITED);
   });
 
-  it('agrees that an ABSENT cap is still refused, however unlimited another is', () => {
-    // The fail-closed direction, beside the row above so neither can be read as
-    // licence for the other: `"unlimited"` is a decision someone wrote down and
-    // silence is not.
+  it('agrees that ABSENT and "unlimited" reach the same answer by different routes', () => {
+    // FLIPPED at v0.8.0. This row asserted that silence and a written
+    // "unlimited" must NOT collapse into each other; they now reach the same
+    // BEHAVIOUR, and the thing that must not collapse is what the DOCUMENT
+    // says - which `GET /wallets/:id` reports and this function does not see.
+    //
+    // Kept rather than deleted because the agreement is still the point: both
+    // layers must treat absence the same way, and before this release one of
+    // them would have refused.
     const unl = { ...policy, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: UNLIMITED } } };
-    expect(codeOf(() => capsFor(unl as never, 'au'))).toBe('no_cap_set');
-    expect(capsRefusal(unl as never, 'au')?.reason).toBe('no_cap_set');
+    expect(codeOf(() => capsFor(unl as never, 'au'))).toBe('no-error');
+    expect(capsRefusal(unl as never, 'au')).toBeNull();
+    // ...and the written-unlimited token is equally unrefused, which is what
+    // makes "the same answer" a claim about both rather than about neither.
+    expect(codeOf(() => capsFor(unl as never, 'play'))).toBe('no-error');
+    expect(capsRefusal(unl as never, 'play')).toBeNull();
   });
 });

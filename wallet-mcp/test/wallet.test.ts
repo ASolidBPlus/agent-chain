@@ -434,13 +434,20 @@ describe('send', () => {
     expect(stolen).toHaveLength(0);
   });
 
-  it('refuses when the policy file says frozen', async () => {
-    const { wallet } = walletWith({ ...AGENT_POLICY, frozen: true });
-    expect(await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'e1' })).toMatchObject({
-      ok: false,
-      reason: 'frozen',
-    });
-    expect(fake.transfers).toHaveLength(0);
+  it('has no local freeze check to make, because `frozen` left the document', async () => {
+    // REMOVED AT v0.8.0, not weakened. The service-side lock is RETIREMENT,
+    // written by `retire()` to its own table and never to a wallet's policy
+    // file - so a `frozen` field in a policy document is now just an unknown
+    // key, and a local pre-check for it would be checking something nothing
+    // writes.
+    //
+    // A retired wallet's send is refused at the BOUNDARY, and reaches a persona
+    // as the generic error: `wallet_retired` is withheld, because a retired
+    // wallet has no persona left to read it.
+    const { wallet } = walletWith({ ...AGENT_POLICY, frozen: true } as never);
+    const result = await wallet.send({ to: 'alpha.play', amount: '1', intent_id: 'e1' });
+    expect(result).toMatchObject({ ok: true });
+    expect(fake.transfers).toHaveLength(1);
   });
 
   // The stage cap needs server state this process cannot see, so it arrives
@@ -612,12 +619,15 @@ describe('one wallet, two tokens', () => {
   // A readable policy that says nothing about this token is a REFUSAL, not a
   // deferral: an absent cap read as "no limit" is the one reading that costs
   // money. (An UNREADABLE policy still defers - see policy.test.ts.)
-  it('refuses a token the policy sets no cap for', async () => {
+  it('does NOT refuse a token the policy says nothing about', async () => {
+    // FLIPPED at v0.8.0: silence about a token is no rule about it, so the send
+    // goes to the boundary rather than being pre-refused here. The boundary is
+    // the authority either way; what changed is that neither layer invents a
+    // bound nobody wrote.
     const { wallet } = walletWith({ ...AGENT_POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } });
     const result = await wallet.send({ to: 'alpha.play', amount: '1', token: 'GOLD', intent_id: 'g1' });
-    expect(result).toMatchObject({ ok: false, reason: 'no_cap_set' });
-    expect(result.detail).toContain('au');
-    expect(fake.transfers).toHaveLength(0);
+    expect(result).toMatchObject({ ok: true });
+    expect(fake.transfers).toHaveLength(1);
   });
 
   it('refuses a token this deployment does not have, and says what it does', async () => {

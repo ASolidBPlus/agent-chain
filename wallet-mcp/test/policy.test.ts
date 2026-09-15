@@ -43,7 +43,6 @@ const POLICY: WalletPolicy = {
   },
   allow: ['*.play'],
   deny: ['treasury.play'],
-  frozen: false,
 };
 
 describe('pattern matching', () => {
@@ -59,7 +58,12 @@ describe('the local pre-check', () => {
   it('refuses over max_per_tx, a denied counterparty, and a frozen wallet', () => {
     expect(chk(POLICY, 'alpha.play', '150')).toBe('over_max_per_tx');
     expect(chk(POLICY, 'treasury.play', '1')).toBe('counterparty_denied');
-    expect(chk({ ...POLICY, frozen: true }, 'alpha.play', '1')).toBe('frozen');
+    // `frozen` left the policy document at v0.8.0: the service-side lock is
+    // retirement, written to its own table by `retire()` alone and never to a
+    // wallet's policy file. There is nothing local to pre-check, so a retired
+    // wallet's send is refused at the boundary and reaches a persona as the
+    // generic error - `wallet_retired` is withheld, because a retired wallet
+    // has no persona left to read it.
   });
 
   it('refuses a counterparty no allow rule covers', () => {
@@ -110,15 +114,16 @@ describe('caps are per token', () => {
     expect(chk(POLICY, 'alpha.play', '5.0000000001', GOLD)).toBeNull();
   });
 
-  // FAIL CLOSED. Silence about a token is not permission: an absent cap read as
-  // "no limit" is the only reading of this that costs money.
-  it('refuses a token the policy says nothing about, and says which', () => {
+  // FLIPPED at v0.8.0: silence about a token is no rule about it. The old row
+  // refused here on the argument that an absent cap read as "no limit" is the
+  // only reading that costs money; the owner reversed it, and the bounds that
+  // must survive a bypass live in the contracts rather than in this file.
+  it('does not refuse a token the policy says nothing about', () => {
     const only = { ...POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } };
-    const refusal = checkLocally(only, 'alpha.play', '1', GOLD);
-    expect(refusal?.reason).toBe('no_cap_set');
-    expect(refusal?.detail).toContain('au');
-    // ...while the token it does cover is unaffected.
-    expect(chk(only, 'alpha.play', '1')).toBeNull();
+    expect(checkLocally(only, 'alpha.play', '1', GOLD)).toBeNull();
+    // ...while the token it DOES cover is still bounded, which is what keeps
+    // this a statement about absence rather than about the check being off.
+    expect(chk(only, 'alpha.play', '101')).toBe('over_max_per_tx');
   });
 
   // The map is chain-svc's, and chain-svc's bookkeeping stores KEYS. A policy
@@ -131,8 +136,13 @@ describe('caps are per token', () => {
     // for key/symbol resolution and a classifier reading names files it under
     // resolution and leaves it on the old code - the disposition is decided by
     // what the FIXTURE makes true, never by the title.
-    expect(chk(bySymbol, 'alpha.play', '1', GOLD)).toBe('no_cap_set');
-    expect(capsRefusal(bySymbol, 'au')?.detail).toContain('au');
+    // A policy keyed by SYMBOL caps nothing under key `au`, and at v0.8.0
+    // capping nothing is no refusal. The key/symbol property is asserted on the
+    // bound instead: looked up by KEY the entry is absent (unbounded), and the
+    // same entry read under its written key `GOLD` is found and BOUNDS at 5 -
+    // so a reader that matched symbols would refuse the 1 below.
+    expect(chk(bySymbol, 'alpha.play', '1', GOLD)).toBeNull();
+    expect(capsRefusal(bySymbol, 'au')).toBeNull();
     expect(capsRefusal(bySymbol, 'GOLD')).toBeNull();
   });
 
@@ -144,9 +154,14 @@ describe('caps are per token', () => {
   // refuses: the local check would pass and /sign-transfer would reject, which
   // reads to a persona as the platform being broken.
   it('does not treat a literal "*" entry as covering every token', () => {
+    // FLIPPED in its assertion, unchanged in its point: `*` still covers
+    // nothing. What an uncovered token means changed at v0.8.0 - unbounded
+    // rather than refused - so the property is asserted by showing the bound
+    // does NOT apply: 999 passes under `play`, which a wildcard reader would
+    // have refused at 100.
     const wild = { ...POLICY, caps: { '*': { max_per_tx: 100, max_per_stage: 500 } } };
-    expect(chk(wild, 'alpha.play', '1')).toBe('no_cap_set');
-    expect(capsRefusal(wild, 'play')?.detail).toBe('no cap set for play');
+    expect(chk(wild, 'alpha.play', '999')).toBeNull();
+    expect(capsRefusal(wild, 'play')).toBeNull();
   });
 
   // §1b. `"unlimited"` is a decision someone wrote down; silence is not. The two
@@ -164,21 +179,33 @@ describe('caps are per token', () => {
     // "unlimited" would refuse exactly like silence.
     expect(capsRefusal(unl, 'play')).toBeNull();
     // ...and the OTHER bound is untouched. Each field takes it independently,
-    // so a test that set both could not tell one skip from two.
-    expect(capsRefusal({ ...unl, caps: { play: { max_per_tx: UNLIMITED } as never } }, 'play')?.reason)
-      .toBe('no_cap_set');
+    // so a test that set both could not tell one skip from two. At v0.8.0 an
+    // absent second field is no longer a refusal, so the independence is shown
+    // the other way round: written-unlimited per-tx with an absent stage bound
+    // is a policy with NO refusals in it at all.
+    expect(capsRefusal({ ...unl, caps: { play: { max_per_tx: UNLIMITED } } }, 'play')).toBeNull();
   });
 
   // THE FAIL-OPEN DIRECTION, which is the one that costs money. The
   // implementation to reach for is `typeof v === 'string' && !isNumeric(v)` ->
   // no bound, and it makes a TYPO an uncapped wallet.
   it('treats any other non-amount cap as ABSENT, never as unlimited', () => {
-    for (const bad of ['unlimted', 'UNLIMITED', 'Unlimited', '', 'none', null, undefined, {}, -5, 0]) {
+    // `undefined` LEAVES THIS LIST at v0.8.0 and is the whole reversal: it is
+    // the one value in it that means "nobody wrote a bound" rather than "this
+    // is unreadable". Everything else is PRESENT and unusable, and still fails
+    // closed.
+    for (const bad of ['unlimted', 'UNLIMITED', 'Unlimited', '', 'none', null, {}, -5, 0]) {
       const p = { ...POLICY, caps: { play: { max_per_tx: bad, max_per_stage: 500 } } } as unknown as WalletPolicy;
       expect(capsRefusal(p, 'play')?.reason).toBe('no_cap_set');
       // And it refuses the SEND too, rather than passing the bound.
       expect(chk(p, 'alpha.play', '1')).toBe('no_cap_set');
     }
+    // THE ONE THAT MOVED, kept as its own row rather than deleted from the list:
+    // an absent field is no bound, and reading it as garbage would re-impose
+    // exactly the fail-closed-on-silence rule this release removes.
+    const absent = { ...POLICY, caps: { play: { max_per_stage: 500 } } } as unknown as WalletPolicy;
+    expect(capsRefusal(absent, 'play')).toBeNull();
+    expect(chk(absent, 'alpha.play', '999999')).toBeNull();
     // The control: the exact string, and only it, is accepted.
     const ok = { ...POLICY, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: UNLIMITED } } } as unknown as WalletPolicy;
     expect(capsRefusal(ok, 'play')).toBeNull();
@@ -192,7 +219,7 @@ describe('caps are per token', () => {
     const empty = { ...POLICY, caps: { play: { max_per_tx: '', max_per_stage: 500 } } } as unknown as WalletPolicy;
     expect(checkLocally(empty, 'alpha.play', '1', PLAY)).toEqual({
       reason: 'no_cap_set',
-      detail: 'no cap set for play',
+      detail: 'max_per_tx for play is not a usable amount',
     });
   });
 
@@ -204,13 +231,19 @@ describe('caps are per token', () => {
   it('capsRefusal answers for one token at a time', () => {
     expect(capsRefusal(POLICY, 'play')).toBeNull();
     expect(capsRefusal(POLICY, 'au')).toBeNull();
-    expect(capsRefusal(POLICY, 'nope')).toEqual({
-      reason: 'no_cap_set',
-      detail: 'no cap set for nope',
-    });
-    // A half-written entry is not an entry: either bound missing is no cap.
-    const half = { ...POLICY, caps: { play: { max_per_stage: 500 } as never } };
-    expect(capsRefusal(half, 'play')?.reason).toBe('no_cap_set');
+    // FLIPPED: a token with no entry is unbounded at v0.8.0, so there is
+    // nothing to refuse about `nope`.
+    expect(capsRefusal(POLICY, 'nope')).toBeNull();
+    // A HALF-WRITTEN ENTRY BOUNDS THE HALF THAT IS WRITTEN. "Half-written" was
+    // a category only while both fields were required; each stands alone now.
+    const half = { ...POLICY, caps: { play: { max_per_stage: 500 } } };
+    expect(capsRefusal(half, 'play')).toBeNull();
+    // PER TOKEN STILL MEANS PER TOKEN, which is what this row is named for and
+    // what the flips above would otherwise have emptied out: one unreadable
+    // entry refuses its own token and leaves the others alone.
+    const oneBad = { ...POLICY, caps: { play: { max_per_tx: 'lots' }, au: { max_per_tx: 5 } } } as never;
+    expect(capsRefusal(oneBad, 'play')?.reason).toBe('no_cap_set');
+    expect(capsRefusal(oneBad, 'au')).toBeNull();
   });
 });
 
@@ -219,7 +252,7 @@ describe('reading the policy file', () => {
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const good = join(dir, 'good.json');
     writeFileSync(good, JSON.stringify(POLICY));
-    expect(readPolicy(good)?.caps.play?.max_per_tx).toBe(100);
+    expect(readPolicy(good)?.caps?.play?.max_per_tx).toBe(100);
 
     const bad = join(dir, 'bad.json');
     writeFileSync(bad, '{not json');
@@ -229,14 +262,18 @@ describe('reading the policy file', () => {
 
   // chain-svc rewrites this file to frozen:true when a wallet is retired, so a
   // cached copy would keep spending for the life of the process.
-  it('sees a freeze written after the process started', () => {
+  it('sees a cap written after the process started', () => {
+    // READ FRESH ON EVERY SEND, and this is the row that proves it. It used to
+    // assert a freeze appearing mid-process; `frozen` left the document at
+    // v0.8.0, so the property is asserted on a bound instead - the same
+    // question about the same caching, on a field that still exists.
     const dir = mkdtempSync(join(tmpdir(), 'policy-'));
     const path = join(dir, 'p.json');
     writeFileSync(path, JSON.stringify(POLICY));
-    expect(readPolicy(path)?.frozen).toBe(false);
+    expect(readPolicy(path)?.caps?.play?.max_per_tx).toBe(100);
 
-    writeFileSync(path, JSON.stringify({ ...POLICY, frozen: true }));
-    expect(readPolicy(path)?.frozen).toBe(true);
+    writeFileSync(path, JSON.stringify({ ...POLICY, caps: { play: { max_per_tx: 5 } } }));
+    expect(readPolicy(path)?.caps?.play?.max_per_tx).toBe(5);
   });
 });
 
@@ -305,7 +342,7 @@ describe('reading the policy chain-svc actually writes', () => {
 
     const policy = readPolicy(file);
     expect(policy).not.toBeNull();
-    expect(policy!.caps.play!.max_per_tx).toBe('25');
+    expect(policy!.caps!.play!.max_per_tx).toBe('25');
     // And the cap it read actually enforces, in wei rather than as a float.
     expect(chk(policy, 'bob.play', '26')).toBe('over_max_per_tx');
     expect(chk(policy, 'bob.play', '25')).toBeNull();

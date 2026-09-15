@@ -296,12 +296,20 @@ describe('policy enforcement', () => {
       store.close();
     });
 
-    it('refuses a token with NO entry, however unlimited the others are', () => {
-      // Fail-closed is unchanged: "unlimited" is a decision someone wrote
-      // down, silence is not.
+    it('treats a token with NO entry as unbounded, like a written "unlimited"', () => {
+      // FLIPPED at v0.8.0. This asserted that silence fails closed while
+      // "unlimited" is a written decision; the owner reversed the first half.
+      // The two now reach the same stage state by different routes - and the
+      // state is `{cap: 'unlimited'}`, never `null`, so the spend is still
+      // RECORDED. That is the half of the old rule that survives.
+      expect(stageCapWei(unlimitedTx, 'au', 6)).toEqual({ cap: UNLIMITED });
+      expect(stageCapWei(unlimitedStage, 'play', 18)).toEqual({ cap: UNLIMITED });
+      // And a WRITTEN garbage value still refuses, which is what keeps this a
+      // statement about silence rather than about the check being gone.
+      const typo = { caps: { au: { max_per_stage: 'lots' } }, allow: ['*'], deny: [] } as never;
       let err: unknown;
       try {
-        stageCapWei(unlimitedTx, 'au', 6);
+        stageCapWei(typo, 'au', 6);
       } catch (e) {
         err = e;
       }

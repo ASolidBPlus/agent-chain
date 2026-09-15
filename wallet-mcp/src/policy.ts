@@ -86,9 +86,13 @@ export type Refusal =
 /// looks capped.
 export const UNLIMITED = 'unlimited';
 
+/// BOTH FIELDS OPTIONAL as of v0.8.0, mirroring chain-svc. Absence is not a
+/// hole to fail closed on - it is "nobody wrote a bound", and this layer must
+/// answer what the boundary would answer or it is a divergence rather than a
+/// pre-check.
 export interface TokenCaps {
-  max_per_tx: number | string;
-  max_per_stage: number | string;
+  max_per_tx?: number | string;
+  max_per_stage?: number | string;
 }
 
 /// Is this a value a cap may take? EXACTLY `"unlimited"`, or an amount.
@@ -113,11 +117,10 @@ export interface WalletPolicy {
   /// own bookkeeping stores the key. `resolveTokenOrRefusal` is where a key and
   /// a symbol meet, once.
   ///
-  /// A TOKEN WITH NO ENTRY CANNOT BE SPENT: see `capsRefusal`.
-  caps: Record<string, TokenCaps>;
-  allow: string[];
-  deny: string[];
-  frozen: boolean;
+  /// EVERY FIELD OPTIONAL, and absence means no rule - see `capsRefusal`.
+  caps?: Record<string, TokenCaps>;
+  allow?: string[];
+  deny?: string[];
 }
 
 /// Read fresh on every send rather than cached: chain-svc rewrites this file to
@@ -232,8 +235,20 @@ export function capsRefusal(
   // PER CAP, NOT PER FILE. Rejecting the whole policy for one bad entry would
   // lose the local pre-check for every OTHER token because one was mistyped -
   // which defers more to chain-svc than the mistake warrants.
-  if (!caps || !isCapAmount(caps.max_per_tx) || !isCapAmount(caps.max_per_stage)) {
-    return { reason: 'no_cap_set', detail: `no cap set for ${tokenKey}` };
+  // THREE OUTCOMES PER FIELD, the same table chain-svc's `capsFor` implements:
+  // absent -> unbounded, "unlimited" -> unbounded, a valid amount -> that
+  // bound, anything else -> no_cap_set naming the field.
+  //
+  // The two must agree VALUE FOR VALUE, not merely in spirit: this side is a
+  // fast-path copy of a check whose authority is chain-svc, and a local answer
+  // that differed would send a persona a refusal the boundary would not give,
+  // or let one through the boundary then refuses.
+  if (!caps) return null;
+  for (const field of ['max_per_tx', 'max_per_stage'] as const) {
+    const value = caps[field];
+    if (value !== undefined && !isCapAmount(value)) {
+      return { reason: 'no_cap_set', detail: `${field} for ${tokenKey} is not a usable amount` };
+    }
   }
   return null;
 }
@@ -253,24 +268,31 @@ export function checkLocally(
   // rather than guess either way. NOT the same as a readable policy that says
   // nothing about this token, which refuses below.
   if (!policy) return null;
-  if (policy.frozen) return { reason: 'frozen' };
 
   const capless = capsRefusal(policy, token.key);
   if (capless) return capless;
-  const caps = policy.caps[token.key]!;
+  // ABSENT ENTRY, ABSENT FIELD: no local refusal. `capsRefusal` has already
+  // refused anything present-and-unreadable, so what remains is either a usable
+  // bound or no bound at all.
+  const caps = policy.caps?.[token.key] ?? {};
 
   // §1b. `"unlimited"` skips THIS bound and nothing else - the stage bound is
   // its own field and its own decision, and chain-svc is the authority on both
   // regardless. The spend is still recorded there; a skipped bound is not a
   // skipped audit.
   if (
+    caps.max_per_tx !== undefined &&
     caps.max_per_tx !== UNLIMITED &&
     veeToWei(amount, token.decimals) > veeToWei(String(caps.max_per_tx), token.decimals)
   ) {
     return { reason: 'over_max_per_tx' };
   }
-  // Deny beats allow, and an empty allow list denies everything.
-  if (policy.deny.some((p) => matchesPattern(p, to))) return { reason: 'counterparty_denied' };
-  if (!policy.allow.some((p) => matchesPattern(p, to))) return { reason: 'counterparty_denied' };
+  // Deny beats allow. ABSENT `deny` denies nothing; ABSENT `allow` allows
+  // everything; a WRITTEN `allow: []` allows nothing, which is the one place
+  // absent and empty diverge and is the same divergence chain-svc keeps.
+  if ((policy.deny ?? []).some((p) => matchesPattern(p, to))) return { reason: 'counterparty_denied' };
+  if (policy.allow !== undefined && !policy.allow.some((p) => matchesPattern(p, to))) {
+    return { reason: 'counterparty_denied' };
+  }
   return null;
 }
