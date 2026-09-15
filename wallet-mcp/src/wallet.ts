@@ -42,6 +42,28 @@ export interface WalletOptions {
   modules: ModulesReply;
 }
 
+/// What a read tool answers when it cannot answer. THREE SHAPES, and which one
+/// a case takes is ENUMERATED rather than derived (amendment §2):
+///
+///   a chain-svc code the map CLEARS     { error: <Refusal>, detail? }
+///       the persona can act on it, and the detail is that fact's elaboration
+///   a chain-svc code the map WITHHOLDS  { error: 'error' } + one operator line
+///       answered and declined; not the persona's business, and not a retry
+///   the tool's own malformed input      { error: 'error', detail }
+///       the persona can fix it
+///   no reply, or one the tool cannot use  { unreachable: <cause> }
+///       the machinery, not the ask; retry or escalate
+///
+/// THERE IS DELIBERATELY NO ONE-SENTENCE TEST. Three were written while this
+/// was being specified - "can the persona act", "does retrying make sense",
+/// "is the fault in the request" - and each was wrong on a case its author did
+/// not have in mind. A rule derived from one instance and validated on that
+/// instance is a restatement, not a rule. Match a case to a ROW; a fifth state
+/// is a ruling, not a derivation.
+export type ReadFailure =
+  | { error: Refusal | 'error'; detail?: string }
+  | { unreachable: string };
+
 export interface SendResult {
   ok: boolean;
   txHash?: string;
@@ -89,6 +111,13 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   //    the fast path's answer rather than the boundary's - and it could
   //    provoke exactly that by calling and reading the refusal.
   over_max_per_tx: 'over_max_per_tx',
+  // §1b. THE OTHER HALF OF A SPLIT, not a new disclosure: `over_max_per_tx` was
+  // carrying two meanings and keeps the one where a smaller amount would work.
+  // Persona-facing for the same reason its sibling is - it is a fact about the
+  // caller's OWN policy, learnable by trying, so telling it changes nothing an
+  // attacker could do. The caps are the bound and knowing the bound is not a
+  // bypass; knowing there ISN'T one is the same kind of fact.
+  no_cap_set: 'no_cap_set',
   over_stage_cap: 'over_stage_cap',
   counterparty_denied: 'counterparty_denied',
   wallet_frozen: 'frozen',
@@ -340,17 +369,74 @@ export class Wallet {
   /// breaks once the field goes - so the window in which someone could notice is
   /// exactly the window in which nothing looks wrong. Absent `balances` is an
   /// error here, which makes an un-upgraded chain-svc fail loudly instead.
-  async balance(): Promise<{ balances: Record<string, string>; default: string } | { error: string }> {
+  async balance(): Promise<{ balances: Record<string, string>; default: string } | ReadFailure> {
     const res = await this.client.balance(this.config.agentId);
-    const down = Wallet.unreachable(res);
-    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'balance unavailable') };
-    const body = res.body as
-      | { balances?: Record<string, string>; default?: string; error?: string }
-      | null;
-    if (res.status !== 200 || !body?.balances || !body.default) {
-      return { error: this.redact(body?.error ?? 'balance unavailable') };
+    const reply = this.readReply(res, 'balance');
+    if (!('ok' in reply)) return reply;
+    const body = reply.body as { balances?: Record<string, string>; default?: string } | null;
+    // A 200 WITHOUT `balances` IS A VERSION SKEW, not a refusal: an un-upgraded
+    // chain-svc still answering the single-token shape. It reaches the persona
+    // as an outage because that is its consequence - nothing it did wrong,
+    // nothing it can change - and the CAUSE goes in the prose for whoever has
+    // to fix the deployment.
+    if (!body?.balances || !body.default) {
+      return { unreachable: 'chain-svc answered without a usable balance' };
     }
     return { balances: body.balances, default: body.default };
+  }
+
+  /// EVERY read tool's reply, judged in ONE place: either the 200 body for the
+  /// caller to finish judging - only the caller knows what a usable balance or
+  /// a usable history looks like - or the failure to answer with.
+  ///
+  /// Returns the body rather than null-on-success so the narrowing survives:
+  /// `res.body` exists only on the `response` outcome, and a boolean helper
+  /// leaves every caller re-proving that.
+  ///
+  /// WHY THIS EXISTS: `balance`, `resolve`, `history` and `contracts` each did
+  /// `body?.error ?? '<tool> unavailable'`, which put THREE kinds of thing in
+  /// one `error` field - a chain-svc code, an outage sentence, and wallet-mcp's
+  /// own prose - with nothing telling a model which it had. Worse, the code went
+  /// through UNEXAMINED: `refusalFor` is where the disclosure decision is
+  /// applied, and four of the seven paths never called it. Measured before the
+  /// change, a fake chain-svc answering `chain_error` on every route: four tools
+  /// handed the raw code to the persona with ZERO operator log lines, and
+  /// `resolve` handed the raw DETAIL too. `read` alone was correct, which is how
+  /// we knew the probe could tell them apart.
+  ///
+  /// The `subject` names what could not be had, for the operator reading the
+  /// prose. The persona reads the KEY and wants the consequence; the operator
+  /// reads the prose and wants the cause. Bare "unreachable" would serve the
+  /// first and point the second at the network when the fault is a version skew.
+  private readReply(res: CallResult, subject: string): { ok: true; body: unknown } | ReadFailure {
+    const down = Wallet.unreachable(res);
+    // A TRANSPORT FAILURE IS NOT AN ERROR CODE. A chain-svc code may be withheld
+    // from the persona; an outage MUST reach it, or a persona told a generic
+    // "error" during an outage cannot tell "I was refused" from "the service is
+    // down", and a student debugging the game hunts a registration bug that does
+    // not exist.
+    if (down || res.outcome !== 'response') {
+      return { unreachable: this.redact(down ?? 'chain-svc did not answer') };
+    }
+    if (res.status !== 200) {
+      const body = res.body as { error?: string; detail?: string } | null;
+      if (body?.error) {
+        const mapped = refusalFor(body.error, this.log);
+        // THE DETAIL RIDES WITH A CLEARED CODE AND IS DROPPED WITH A WITHHELD
+        // ONE. A cleared code means the map decided the persona may have this
+        // fact, and the detail is that fact stated usefully - chain-svc naming
+        // both readings it tried for a bare name, say. A withheld code's detail
+        // is the thing being withheld: `treasury_insufficient` carries the
+        // treasury's holding numerically, which is the game's supply position.
+        return mapped
+          ? { error: mapped, ...(body.detail ? { detail: this.redact(body.detail) } : {}) }
+          : { error: 'error' };
+      }
+      // A non-200 carrying NO code at all is not a refusal anyone made. It is a
+      // reply this tool cannot use, which has an outage's consequence exactly.
+      return { unreachable: `chain-svc answered without a usable ${subject}` };
+    }
+    return { ok: true, body: res.body };
   }
 
   /// The primary addressing path (spec S5). A persona pays a NAME.
@@ -358,37 +444,23 @@ export class Wallet {
     name: string,
   ): Promise<
     | { address: string; canonical: string | null; resolvedVia?: string }
-    | { error: string; detail?: string }
-    | { unreachable: string }
+    | ReadFailure
   > {
     const res = await this.client.resolve(name);
-    const down = Wallet.unreachable(res);
-    // A TRANSPORT FAILURE IS NOT AN ERROR CODE, and it used to arrive in the
-    // same `error` field - one field carrying two kinds of thing, so a caller
-    // could not tell chain-svc's `not_your_wallet` from wallet-mcp's own
-    // "chain-svc is unreachable (ConnectionRefused)". It is now its own shape.
-    //
-    // The distinction is load-bearing rather than tidy: a chain-svc CODE may be
-    // withheld from the persona, while an outage MUST reach it - a persona told
-    // a generic "error" during an outage cannot tell "my send was refused" from
-    // "the service is down", and a student debugging the game is sent looking
-    // for a registration bug that does not exist. That is the flattening the
-    // note above forbids; collapsing them into one field made it possible to
-    // reintroduce by accident, which is exactly what happened.
-    if (down || res.outcome !== 'response') {
-      return { unreachable: this.redact(down ?? 'chain-svc did not answer') };
-    }
-    const body = res.body as {
-      address?: string; canonical?: string | null; error?: string; detail?: string; resolvedVia?: string;
+    // THE MODEL THE OTHER FOUR COPY IS THIS THREE-WAY SPLIT, and it was the
+    // only tool that had it. Its ERROR HANDLING was not the model: it forwarded
+    // chain-svc's raw code AND raw detail without consulting the map, which is
+    // why it was the worst of the four rather than the exemplar.
+    const reply = this.readReply(res, 'answer');
+    if (!('ok' in reply)) return reply;
+    const body = reply.body as {
+      address?: string; canonical?: string | null; resolvedVia?: string;
     } | null;
-    if (res.status !== 200 || !body?.address) {
-      // The DETAIL travels with the code. chain-svc names both readings it
-      // tried; dropping that here is the flattening this file exists to forbid,
-      // one field over.
-      return {
-        error: this.redact(body?.error ?? 'unknown_name'),
-        ...(body?.detail ? { detail: this.redact(body.detail) } : {}),
-      };
+    // A 200 with no address is not a missing name - chain-svc answers 404 with
+    // `unknown_name` for that, which the map clears and the branch above
+    // forwards with its detail intact. This is a reply that cannot be used.
+    if (!body?.address) {
+      return { unreachable: 'chain-svc answered without a usable address' };
     }
     // `resolvedVia` says WHICH RULE resolved it - a persona checking who it is
     // about to pay should be able to see that the answer came from its own
@@ -406,7 +478,7 @@ export class Wallet {
   async history(
     limit = 20,
     token?: unknown,
-  ): Promise<Array<Record<string, unknown>> | { error: string; detail?: string }> {
+  ): Promise<Array<Record<string, unknown>> | ReadFailure> {
     const resolved = resolveTokenOrRefusal(this.modules, token);
     if (!resolved.ok) {
       // THE CODE IN `error`, THE SENTENCE IN `detail` - the shape every other
@@ -418,13 +490,12 @@ export class Wallet {
       return { error: resolved.reason, detail: this.redact(resolved.detail) };
     }
     const res = await this.client.history(this.config.agentId, limit, resolved.token.key);
-    const down = Wallet.unreachable(res);
-    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'history unavailable') };
-    if (res.status !== 200 || !Array.isArray(res.body)) {
-      const body = res.body as { error?: string } | null;
-      return { error: this.redact(body?.error ?? 'history unavailable') };
+    const reply = this.readReply(res, 'history');
+    if (!('ok' in reply)) return reply;
+    if (!Array.isArray(reply.body)) {
+      return { unreachable: 'chain-svc answered without a usable history' };
     }
-    return (res.body as Array<Record<string, unknown>>).map((entry) => ({
+    return (reply.body as Array<Record<string, unknown>>).map((entry) => ({
       // S5 asks for `when`; S4's /history carries a block number and no
       // timestamp, so this is a block height. Flagged for the spec -
       // chain-svc would have to read block timestamps to do better.
@@ -535,25 +606,21 @@ export class Wallet {
       // one fact, and the two would drift the first time either side reworded
       // it. chain-svc already says exactly what it tried; this passes it
       // through and adds nothing.
-      // ONE DECISION POINT, shared with the send path below. This used to
-      // hand-roll its own two-code allowlist and then fall through to
-      // `this.fail('error', resolved.error)` - which leaked the real code to
-      // the persona exactly as the send path did, and was NOT caught when the
-      // map became `Record<ErrorCode, …>`, because this branch never indexed
-      // the map. The type change flagged every site that LOOKED UP a code and
-      // none that merely PASSED ONE ALONG.
+      // ONE DECISION POINT, and it is now inside `resolve` rather than here.
+      // `resolve` routes chain-svc's code through `refusalFor` before it
+      // returns, so what arrives is ALREADY a Refusal or the generic 'error'.
+      // Mapping it a second time would be a second decision about one fact -
+      // and worse than redundant: `refusalFor('error')` finds no such chain-svc
+      // code, logs "a code this build does not know", and returns null, so the
+      // generic case would become a drift warning about a code nobody sent.
       //
-      // Routing both paths through `refusalFor` removes the class rather than
-      // the instance: a code's disclosure is decided in one place, and a second
-      // site cannot disagree with the first about which codes are safe.
-      const mapped = refusalFor(resolved.error, this.log);
-      // The detail is chain-svc's own prose - since §5 a bare `to` has TWO
-      // readings, and the refusal has to name both or a persona reads "no
-      // wallet is registered as toby" while `acme:toby` exists and concludes
-      // the registry is broken. Reconstructing that sentence here would be a
-      // second authority for one fact. It is passed through, never invented,
-      // and NEVER replaced by the code itself.
-      return mapped ? this.fail(mapped, resolved.detail) : this.fail('error');
+      // The detail is chain-svc's own prose and rides with a cleared code only.
+      // Since §5 a bare `to` has TWO readings, and the refusal has to name both
+      // or a persona reads "no wallet is registered as toby" while `acme:toby`
+      // exists and concludes the registry is broken. Reconstructing that
+      // sentence here would be a second authority for one fact. It is passed
+      // through, never invented, and NEVER replaced by the code itself.
+      return this.fail(resolved.error, resolved.detail);
     }
 
     const local = checkLocally(readPolicy(this.config.policyFile), to, amount, token);
@@ -640,13 +707,9 @@ export class Wallet {
   /// call without ever seeing an address.
   async contracts(): Promise<unknown> {
     const res = await this.client.calls();
-    const down = Wallet.unreachable(res);
-    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'calls unavailable') };
-    if (res.status !== 200) {
-      const body = res.body as { error?: string } | null;
-      return { error: this.redact(body?.error ?? 'calls unavailable') };
-    }
-    return res.body;
+    const reply = this.readReply(res, 'menu');
+    if (!('ok' in reply)) return reply;
+    return reply.body;
   }
 
   /// sha256 of the canonical JSON of the wire arguments - the SAME hash
@@ -749,20 +812,24 @@ export class Wallet {
     const fn = typeof args.function === 'string' ? args.function.trim() : '';
     const wire = Array.isArray(args.args) ? (args.args as unknown[]) : null;
 
-    if (contract === '') return { error: 'contract is required' };
-    if (fn === '') return { error: 'function is required' };
-    if (wire === null) return { error: 'args must be an array, [] for a function that takes none' };
+    // THE CODE IN `error`, THE PROSE IN `detail`, which is `send`'s precedent
+    // for the identical case: the persona's own input, which it can fix. `error`
+    // carries a Refusal or the generic 'error' and never a sentence - a model
+    // switching on that field must not have to tell a code from prose.
+    if (contract === '') return { error: 'error', detail: 'contract is required' };
+    if (fn === '') return { error: 'error', detail: 'function is required' };
+    if (wire === null) {
+      return { error: 'error', detail: 'args must be an array, [] for a function that takes none' };
+    }
 
     const res = await this.client.readContract({ contract, function: fn, args: wire });
-    const down = Wallet.unreachable(res);
-    if (down || res.outcome !== 'response') return { error: this.redact(down ?? 'read unavailable') };
-    if (res.status === 200) return res.body;
-
-    const body = res.body as { error?: string; detail?: string } | null;
-    const mapped = body?.error ? refusalFor(body.error, this.log) : null;
-    return mapped
-      ? { error: mapped, ...(body?.detail ? { detail: this.redact(body.detail) } : {}) }
-      : { error: 'error' };
+    // `read` was the only tool already routing through the map, and it is the
+    // positive control the reachability measurement leaned on - it answered
+    // {error:'error'} with one operator line while the other four handed over
+    // the raw code. Same decision, now shared rather than duplicated.
+    const reply = this.readReply(res, 'result');
+    if (!('ok' in reply)) return reply;
+    return reply.body;
   }
 
   /// Polls GET /intents/:intentId until the reservation resolves or the budget
