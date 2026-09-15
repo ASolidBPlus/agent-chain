@@ -72,7 +72,10 @@ describe('capsFor', () => {
       err = e;
     }
     expect(err).toBeInstanceOf(HttpError);
-    expect((err as HttpError).code).toBe('over_max_per_tx');
+    // §1b. `no_cap_set`, not `over_max_per_tx`: the old code told a persona a
+    // smaller amount would succeed, when no amount can. The DETAIL is
+    // unchanged - it was already right.
+    expect((err as HttpError).code).toBe('no_cap_set');
     expect((err as HttpError).detail).toBe('no cap set for au');
   });
 

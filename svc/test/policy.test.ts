@@ -256,9 +256,9 @@ describe('the caps refusal, on both sides', () => {
       }
     })();
 
-    expect(chainSvc).toEqual({ reason: 'over_max_per_tx', detail: 'no cap set for au' });
+    expect(chainSvc).toEqual({ reason: 'no_cap_set', detail: 'no cap set for au' });
     expect(capsRefusal(policy as never, 'au')).toEqual({
-      reason: 'over_max_per_tx',
+      reason: 'no_cap_set',
       detail: 'no cap set for au',
     });
   });
@@ -272,7 +272,7 @@ describe('the caps refusal, on both sides', () => {
 
   it('agrees that a HALF-WRITTEN entry is not an entry', () => {
     const half = { ...policy, caps: { au: { max_per_tx: '1' } } };
-    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('over_max_per_tx');
+    expect(codeOf(() => capsFor(half as never, 'au'))).toBe('no_cap_set');
     expect(capsRefusal(half as never, 'au')).not.toBeNull();
   });
 });

@@ -70,14 +70,18 @@ export interface AgentPolicy {
 
 /// The caps for one token, or the refusal that says there are none.
 ///
-/// `over_max_per_tx` rather than a new code: from the caller's side this IS the
-/// per-transaction bound refusing, and the bound happens to be zero because
-/// nobody set one. The DETAIL says which token, because a persona holding two
+/// `no_cap_set` rather than `over_max_per_tx` (§1b). The old code was
+/// defensible as a DESCRIPTION - the per-transaction bound refusing, with the
+/// bound at zero because nobody set one - and wrong as an INSTRUCTION: it tells
+/// a persona a smaller amount would succeed, when no amount can. A code is the
+/// closed set a model switches on, so it has to be actionable, not merely true.
+///
+/// The DETAIL is unchanged and says which token, because a persona holding two
 /// currencies cannot otherwise tell which of its spends is impossible.
 export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
   const caps = policy.caps?.[tokenKey];
   if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
-    throw new HttpError('over_max_per_tx', `no cap set for ${tokenKey}`);
+    throw new HttpError('no_cap_set', `no cap set for ${tokenKey}`);
   }
   return caps;
 }
@@ -310,9 +314,23 @@ export function capToWei(cap: VeeCap, decimals: number): bigint {
 export function isCap(value: unknown, decimals = 18): value is VeeCap {
   if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
   if (typeof value !== 'string') return false;
+  // §1b. EXACTLY `"unlimited"`, before the regex and never a broader test.
+  //
+  // The fail-open implementation is the one to reach for and the one to refuse:
+  // `!isNumeric(v) -> no bound` makes `"unlimted"` an uncapped wallet, and a
+  // typo in a policy file is the likeliest way anyone ever writes a
+  // non-numeric cap. An exact match keeps the regex as the gate for every
+  // other string, so an unrecognised value stays invalid and reads as ABSENT -
+  // which fails closed, as `no_cap_set`.
+  if (value === UNLIMITED) return true;
   if (!new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`).test(value)) return false;
   return capToWei(value, decimals) > 0n;
 }
+
+/// §1b. The one cap value that is not an amount. A named constant rather than a
+/// string literal at each site: three files test for it, and a fourth spelling
+/// of it would be an uncapped wallet that looks capped.
+export const UNLIMITED = 'unlimited';
 
 const isNameList = (a: unknown): a is string[] =>
   Array.isArray(a) && a.every((x) => typeof x === 'string' && x.length > 0);
