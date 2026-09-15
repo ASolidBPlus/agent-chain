@@ -112,6 +112,14 @@ const services = {
       },
     };
   })(),
+  // `GET /wallets/:id` reports the EFFECTIVE policy and where it came from, so
+  // the routing fixture needs an answer. It gives the honest one for a
+  // deployment that loads no kind defaults and has no per-wallet files, which
+  // is what this fixture's config describes - not a fixed stub, so a route that
+  // stopped calling it would show as a changed reply rather than as nothing.
+  spawner: {
+    effectivePolicy: async () => ({ policy: null, policySource: 'none' as const }),
+  },
   resolver: {
     lookup: async (name: string) => (name === 'alpha.play' ? { address: WALLET, canonical: 'alpha:client' } : null),
     require: async (name: string) => {
@@ -414,6 +422,12 @@ describe('GET /wallets/:agentId', () => {
       frozen: false,
       bareIdCount: 0,
       balances: { PLAY: '5' },
+      // §1. The effective policy and its source, derived at read time. `none`
+      // is the honest answer for a deployment that loads no kind defaults and a
+      // wallet with no file - and it is what makes `policy: null` legible:
+      // null alone cannot tell "no rules" from "this deployment loads none".
+      policy: null,
+      policySource: 'none',
     });
   });
 
@@ -685,6 +699,12 @@ describe('per-token reads', () => {
     const svc = {
       config: { token: TOKEN },
       store,
+      // `GET /wallets/:id` reports the effective policy and its source (§1).
+      // This harness describes a deployment that loads no kind defaults, so
+      // `none` is the honest answer rather than a placeholder.
+      spawner: {
+        effectivePolicy: async () => ({ policy: null, policySource: 'none' as const }),
+      },
       chain: {
         treasury: '0xtreasury',
         deployment: { chainId: 31337, treasury: '0xtreasury' },
@@ -764,6 +784,12 @@ describe('per-token reads', () => {
     const svc = {
       config: { token: TOKEN },
       store,
+      // `GET /wallets/:id` reports the effective policy and its source (§1).
+      // This harness describes a deployment that loads no kind defaults, so
+      // `none` is the honest answer rather than a placeholder.
+      spawner: {
+        effectivePolicy: async () => ({ policy: null, policySource: 'none' as const }),
+      },
       chain: {
         treasury: '0xtreasury',
         deployment: { chainId: 31337, treasury: '0xtreasury' },

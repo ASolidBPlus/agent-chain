@@ -301,6 +301,17 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
         ),
       );
 
+  // §1. THE EFFECTIVE POLICY AND WHERE IT CAME FROM, derived at read time
+  // rather than stored: the answer changes when a file is written or cleared,
+  // or when the kind defaults are re-pointed, and a stored copy would be a
+  // snapshot that disagrees with what the next spend enforces.
+  //
+  // `policySource` is the field that makes `policy: null` legible. Null alone
+  // cannot tell "no rules anywhere" from "the kind has none" from "this
+  // deployment loads no defaults at all", and an operator looking at an
+  // unbounded wallet needs to know which of those to change.
+  const { policy, policySource } = await services.spawner.effectivePolicy(agentId);
+
   return {
     agentId,
     address: row.address,
@@ -308,6 +319,8 @@ async function getWallet({ services, param }: RouteContext): Promise<unknown> {
     kind: row.kind,
     frozen: services.store.isFrozen(agentId),
     bareIdCount: row.bareIdCount,
+    policy,
+    policySource,
     ...(balances === null ? {} : { balances }),
   };
 }

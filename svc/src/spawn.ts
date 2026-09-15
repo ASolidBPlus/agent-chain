@@ -8,7 +8,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { parseEther, type Address } from 'viem';
-import { writeFile, rename, mkdir } from 'node:fs/promises';
+import { writeFile, rename, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NameRegistryAbi, TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
@@ -428,6 +428,25 @@ export class Spawner {
     }
   }
 
+  /// What `GET /wallets/:id` reports: the rules that will actually apply, and
+  /// WHERE THEY CAME FROM.
+  ///
+  /// Derived per read. An unreadable file is reported as its own source rather
+  /// than as `null` - an operator staring at an unbounded wallet must be able
+  /// to tell "nobody wrote rules" from "I wrote rules this service cannot
+  /// read", because only the second is something they broke.
+  async effectivePolicy(
+    agentId: string,
+  ): Promise<{ policy: AgentPolicy | null; policySource: 'wallet' | 'kind' | 'none' | 'unreadable' }> {
+    const read = await readPolicyFile(this.config.policyDir, agentId, this.chain.modules.tokens[0]?.key);
+    if (isUnreadable(read)) return { policy: null, policySource: 'unreadable' };
+    if (read !== null) return { policy: read, policySource: 'wallet' };
+    const kind = this.store.walletRow(agentId)?.kind;
+    const fromKind = this.policyDefaults && kind ? this.policyDefaults[kind] : undefined;
+    if (fromKind) return { policy: fromKind, policySource: 'kind' };
+    return { policy: null, policySource: 'none' };
+  }
+
   /// The merge base for `PATCH` and for retirement.
   ///
   /// UNREADABLE PROPAGATES rather than falling back: a PATCH over a file this
@@ -464,9 +483,30 @@ export class Spawner {
       max_per_stage?: unknown;
       allow?: unknown;
       deny?: unknown;
+      /// DELETE THE FILE. The one operation that means "this wallet has no
+      /// rules of its own" - which a PATCH cannot express, because with every
+      /// field optional an absent field means "leave it alone" and there is no
+      /// JSON for "remove it".
+      clear?: unknown;
     },
   ): Promise<Record<string, unknown>> {
     assertCanonicalAgentId(agentId);
+    if (body.clear !== undefined) {
+      if (body.clear !== true) {
+        throw new HttpError('invalid_request', 'clear is either true or absent');
+      }
+      // NO OTHER FIELD MAY ACCOMPANY IT. "Delete the file and also set this"
+      // has two readings - set it on the cleared file, or set it and then
+      // delete - and they differ in what the wallet ends up with.
+      const others = Object.keys(body).filter((k) => k !== 'clear');
+      if (others.length > 0) {
+        throw new HttpError('invalid_request', `clear takes no other fields; got ${others.join(', ')}`);
+      }
+      // WORKS ON AN UNREADABLE FILE, deliberately: it is the way out of one,
+      // and it reads nothing, so there is nothing for a bad document to break.
+      await rm(join(this.config.policyDir, keyFileName(agentId)), { force: true });
+      return { agentId, cleared: true };
+    }
     if (!this.store.spawnedAddress(agentId)) {
       throw new HttpError('wallet_not_found', `no wallet for ${agentId}`);
     }

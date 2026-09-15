@@ -76,6 +76,12 @@ async function serve(typedModules: Record<string, unknown>): Promise<Harness> {
   const services = {
     config: { token: TOKEN },
     store,
+    // `GET /wallets/:id` reports the effective policy and its source (§1). This
+    // harness describes a deployment that loads no kind defaults, so `none` is
+    // the honest answer rather than a placeholder.
+    spawner: {
+      effectivePolicy: async () => ({ policy: null, policySource: 'none' as const }),
+    },
     chain: {
       deployment: { chainId: 31337, treasury: '0xtreasury' },
       modules,

@@ -777,6 +777,21 @@ export function enforcePolicy(args: {
   tokenKey: string;
 }): void {
   const { policy, to, canonical, amount, decimals, symbol, tokenKey } = args;
+
+  // THE ZERO FLOOR IS NOT POLICY, and it runs ahead of everything that reads
+  // one. A property of the rail: `parseVee` accepts "0" deliberately - it is a
+  // parser and zero is a valid number - and a zero-amount sign-transfer burns
+  // an intent id and emits a zero Transfer for nothing. That is true whether or
+  // not an operator wrote any rules, and a direct caller with a wallet token
+  // bypasses wallet-mcp's own refusal entirely.
+  //
+  // MOVED AHEAD AT v0.8.0. It sat below the cap checks, which was harmless
+  // while every wallet had a policy - and would have become unreachable the
+  // moment a null policy short-circuited them. A guard deleted by accident
+  // rather than by decision, and nothing would have failed.
+  if (amount <= 0n) {
+    throw new HttpError('invalid_amount', 'the amount must be greater than zero');
+  }
   // capsFor, not policy.max_per_tx: a wallet with no entry for this token
   // cannot spend it, and that refusal has to come from the same place every
   // other cap does.
@@ -789,17 +804,6 @@ export function enforcePolicy(args: {
       ? null
       : capToWei(caps.max_per_tx, decimals);
 
-  // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
-  // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
-  // number - and wallet-mcp refuses `vee <= 0` for the model. But a direct
-  // caller with a wallet token bypasses wallet-mcp entirely, and a zero-VEE
-  // sign-transfer burns an intent id and emits a zero Transfer for nothing.
-  // Harmless in itself; the reason to refuse it here is that the rule "the
-  // policy layer is a courtesy, the boundary is the boundary" has to hold for
-  // every check, not the ones that happened to be duplicated.
-  if (amount <= 0n) {
-    throw new HttpError('invalid_amount', 'vee must be greater than zero');
-  }
   if (perTx !== null && amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${caps.max_per_tx} ${symbol}`);
   }
