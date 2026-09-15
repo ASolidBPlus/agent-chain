@@ -125,9 +125,9 @@ describe('"unlimited" in isCap', () => {
 describe('loadPolicyDefaults with per-token caps', () => {
   it('expands * to every deployed token key', () => {
     const d = loadPolicyDefaults(defaultsFile(FILE()), 'play', TOKENS, () => {});
-    expect(Object.keys(d.agent.caps).sort()).toEqual(['au', 'vee']);
-    expect(d.agent.caps.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
-    expect(d.agent.caps.au).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(Object.keys(d.agent.caps!).sort()).toEqual(['au', 'vee']);
+    expect(d.agent.caps!.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(d.agent.caps!.au).toEqual({ max_per_tx: '100', max_per_stage: '500' });
   });
 
   it('lets an explicit key REPLACE the pair, not merge into it', () => {
@@ -147,8 +147,8 @@ describe('loadPolicyDefaults with per-token caps', () => {
       TOKENS,
       () => {},
     );
-    expect(d.agent.caps.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
-    expect(d.agent.caps.au).toEqual({ max_per_tx: '1000', max_per_stage: '9000' });
+    expect(d.agent.caps!.vee).toEqual({ max_per_tx: '100', max_per_stage: '500' });
+    expect(d.agent.caps!.au).toEqual({ max_per_tx: '1000', max_per_stage: '9000' });
   });
 
   it('refuses an explicit key that is not a deployed token', () => {
@@ -228,7 +228,7 @@ describe('loadPolicyDefaults with per-token caps', () => {
     // every spend is refused by capsFor - which is correct, because there is
     // nothing to spend.
     const d = loadPolicyDefaults(defaultsFile(FILE()), 'play', [], () => {});
-    expect(d.agent.caps).toEqual({});
+    expect(d.agent.caps!).toEqual({});
   });
 });
 
@@ -282,16 +282,16 @@ describe('mergePolicy with caps', () => {
     // its kind may. Merging would let a caller widen one token by naming
     // another.
     const merged = mergePolicy({ caps: { au: { max_per_tx: '1', max_per_stage: '2' } } }, defaults);
-    expect(merged.caps).toEqual({ au: { max_per_tx: '1', max_per_stage: '2' } });
+    expect(merged.caps!).toEqual({ au: { max_per_tx: '1', max_per_stage: '2' } });
     expect(merged.allow).toEqual(['*.play']);
   });
 
   it('accepts the legacy pair from a caller and reads it as the default token', () => {
     const merged = mergePolicy({ max_per_tx: '7' }, defaults, 'vee');
-    expect(merged.caps.vee).toEqual({ max_per_tx: '7', max_per_stage: '500' });
+    expect(merged.caps!.vee).toEqual({ max_per_tx: '7', max_per_stage: '500' });
     // The OTHER token's defaults survive: a caller writing the legacy shape is
     // saying something about the default token, not about every token.
-    expect(merged.caps.au).toEqual({ max_per_tx: '10', max_per_stage: '50' });
+    expect(merged.caps!.au).toEqual({ max_per_tx: '10', max_per_stage: '50' });
   });
 
   it('refuses a cap that is not an amount, in either shape', () => {

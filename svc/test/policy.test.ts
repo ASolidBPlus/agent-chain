@@ -97,12 +97,12 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
     // Fell to the kind defaults, per TOKEN now: a harness policy that names
     // only allow/deny is saying nothing about caps, so the kind's whole caps
     // map survives rather than one pair of numbers.
-    expect(p.caps.play).toEqual({ max_per_tx: 100, max_per_stage: 500 });
+    expect(p.caps!.play).toEqual({ max_per_tx: 100, max_per_stage: 500 });
   });
 
   it('accepts a complete numeric policy, as before', () => {
     const p = mergePolicy({ caps: { play: { max_per_tx: 25, max_per_stage: 100 } }, allow: ['*'], deny: [] }, DEF);
-    expect(p.caps.play).toEqual({ max_per_tx: 25, max_per_stage: 100 });
+    expect(p.caps!.play).toEqual({ max_per_tx: 25, max_per_stage: 100 });
   });
 
   // A cap IS an amount, and every other amount on these wires is a decimal
@@ -112,7 +112,7 @@ describe('a caller-supplied policy is a patch over the kind defaults', () => {
     // default token - a caller writing the old shape is saying something about
     // the default token, not about every token.
     const p = mergePolicy({ max_per_tx: '25', max_per_stage: '100', allow: ['*'], deny: [] }, DEF, 'play');
-    expect(capToWei(p.caps.play!.max_per_tx, 18)).toBe(25n * 10n ** 18n);
+    expect(capToWei(p.caps!.play!.max_per_tx!, 18)).toBe(25n * 10n ** 18n);
   });
 
   it('accepts no policy at all', () => {

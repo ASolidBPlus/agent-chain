@@ -222,7 +222,7 @@ export class Treasury {
     targetAddress: string,
     requested: string,
   ): Promise<void> {
-    for (const entry of policy.deny) {
+    for (const entry of policy.deny ?? []) {
       if (entry.includes('*')) continue; // a pattern, already handled by name
 
       // RESOLVED EVERY TIME, NOT CACHED, and the cache this replaces was wrong

@@ -226,7 +226,7 @@ export class Spawner {
     // reads the registry: an argument refusal should not depend on the chain
     // being reachable, and a repeat spawn should not pay for a check whose
     // answer it already stored.
-    await this.assertDenyEntriesAreCanonical(policy.deny);
+    await this.assertDenyEntriesAreCanonical(policy.deny ?? []);
 
     const address = (await this.keystore.has(agentId))
       ? (await this.keystore.load(agentId)).address
@@ -463,7 +463,7 @@ export class Spawner {
     // Also called here now. It was on this path only, so `POST /wallets` with
     // `deny: ["mark.play"]` was accepted while PATCH with the identical value
     // was refused - the same asymmetry in the other direction.
-    await this.assertDenyEntriesAreCanonical(next.deny);
+    await this.assertDenyEntriesAreCanonical(next.deny ?? []);
 
     const frozen = typeof body.frozen === 'boolean' ? body.frozen : this.store.isFrozen(agentId);
     if (typeof body.frozen === 'boolean') {

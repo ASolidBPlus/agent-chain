@@ -487,11 +487,15 @@ describe('policy defaults', () => {
       // PER TOKEN now, and asserted for EVERY token the defaults expanded to
       // rather than for one: the `*` entry is copied to each deployed key, so a
       // check of one key would pass while another carried nothing.
-      const caps = DEFAULTS[kind].caps;
+      // THE SHIPPED FILE writes both bounds for every kind, so these are
+      // asserted non-null rather than skipped: the fields are optional in the
+      // TYPE as of v0.8.0 and present in THIS document, and a test that
+      // tolerated their absence would stop noticing the file losing one.
+      const caps = DEFAULTS[kind].caps!;
       expect(Object.keys(caps).length).toBeGreaterThan(0);
       for (const pair of Object.values(caps)) {
-        expect(capToWei(pair.max_per_tx, 18)).toBeGreaterThan(0n);
-        expect(capToWei(pair.max_per_stage, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx, 18));
+        expect(capToWei(pair.max_per_tx!, 18)).toBeGreaterThan(0n);
+        expect(capToWei(pair.max_per_stage!, 18)).toBeGreaterThanOrEqual(capToWei(pair.max_per_tx!, 18));
       }
       // The file ships `treasury.{tld}`; this is the substitution having
       // happened, asserted through the value a wallet actually gets.
@@ -528,7 +532,7 @@ describe('policy defaults', () => {
 
     // Nothing anywhere contains an unfilled placeholder.
     for (const kind of ['org', 'agent', 'burner'] as const) {
-      for (const p of [...defaults[kind].allow, ...defaults[kind].deny]) {
+      for (const p of [...(defaults[kind].allow ?? []), ...(defaults[kind].deny ?? [])]) {
         expect(p).not.toContain('{tld}');
       }
     }
@@ -1540,7 +1544,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
     const p = read(dir);
     expect(p.caps.play).toEqual({
       max_per_stage: 4242,
-      max_per_tx: DEFAULTS.agent.caps.play!.max_per_tx,
+      max_per_tx: DEFAULTS.agent.caps!.play!.max_per_tx,
     });
     expect(p.allow).toEqual(DEFAULTS.agent.allow);
     expect(p.deny).toEqual(DEFAULTS.agent.deny);
