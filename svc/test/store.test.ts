@@ -108,7 +108,7 @@ describe('call counting', () => {
       agentId: 'orch:a',
       stage: 's1',
       amount: 0n,
-      capWei: null, token: 'play',
+      stageCap: null, token: 'play',
       call: CALL,
     });
     expect(store.intentCall('i-1')).toEqual({
@@ -121,7 +121,7 @@ describe('call counting', () => {
 
   it('leaves the call columns null for a transfer intent', () => {
     const store = new Store(':memory:');
-    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, capWei: null, token: 'play' });
+    store.reserve({ intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 1n, stageCap: null, token: 'play' });
     expect(store.intentCall('i-1')).toBeNull();
     store.close();
   });
@@ -134,7 +134,7 @@ describe('call counting', () => {
         agentId: 'orch:a',
         stage: 's1',
         amount: 0n,
-        capWei: null, token: 'play',
+        stageCap: null, token: 'play',
         call: CALL,
       }).outcome;
 
@@ -151,10 +151,10 @@ describe('call counting', () => {
     // which reads as `intent_unresolved`: "it may have been sent".
     const store = new Store(':memory:');
     for (const id of ['i-1', 'i-2']) {
-      store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+      store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL });
     }
     expect(
-      store.reserve({ token: 'play', intentId: 'i-3', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+      store.reserve({ token: 'play', intentId: 'i-3', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL })
         .outcome,
     ).toBe('over_stage_cap');
     expect(store.intentCall('i-3')).toBeNull();
@@ -173,7 +173,7 @@ describe('call counting', () => {
         agentId: agent,
         stage,
         amount: 0n,
-        capWei: null, token: 'play',
+        stageCap: null, token: 'play',
         call: { contract, function: fn, argsHash: 'h', maxPerStage: 1 },
       }).outcome;
 
@@ -194,7 +194,7 @@ describe('call counting', () => {
     const { maxPerStage: _none, ...noLimit } = CALL;
     for (const id of ['i-1', 'i-2', 'i-3']) {
       expect(
-        store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: noLimit })
+        store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: noLimit })
           .outcome,
       ).toBe('reserved');
     }
@@ -208,7 +208,7 @@ describe('call counting', () => {
     // was counted. The caller does not get to say, because a caller that
     // remembers its own coordinates is a caller that can be wrong about them.
     const store = new Store(':memory:');
-    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL });
     expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
 
     store.release('i-1');
@@ -219,7 +219,7 @@ describe('call counting', () => {
   it('frees the slot the release gave back, not merely the number', () => {
     const store = new Store(':memory:');
     const call = (id: string) =>
-      store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+      store.reserve({ token: 'play', intentId: id, agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL })
         .outcome;
     expect(call('i-1')).toBe('reserved');
     expect(call('i-2')).toBe('reserved');
@@ -236,7 +236,7 @@ describe('call counting', () => {
     // a tx_hash, so it is not released, and neither is its count. A reverted
     // call has a hash too - it was mined - so it keeps its slot.
     const store = new Store(':memory:');
-    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL });
     store.completeIntent('i-1', '0xdead');
 
     store.release('i-1');
@@ -254,7 +254,7 @@ describe('call counting', () => {
       agentId: 'orch:a',
       stage: 's1',
       amount: 10n,
-      capWei: 100n, token: 'play',
+      stageCap: { cap: 100n }, token: 'play',
       call: CALL,
     });
     expect(store.spentThisStage('orch:a', 's1', 'play')).toBe(10n);
@@ -272,7 +272,7 @@ describe('call counting', () => {
     // same clamp the stage hold already has, for the same reason.
     const store = new Store(':memory:');
     const { maxPerStage: _none, ...noLimit } = CALL;
-    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: noLimit });
+    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: noLimit });
     store.release('i-1');
     expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(0);
     store.close();
@@ -280,9 +280,9 @@ describe('call counting', () => {
 
   it('refuses a duplicate intent id before it counts anything', () => {
     const store = new Store(':memory:');
-    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL });
+    store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL });
     expect(
-      store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, capWei: null, call: CALL })
+      store.reserve({ token: 'play', intentId: 'i-1', agentId: 'orch:a', stage: 's1', amount: 0n, stageCap: null, call: CALL })
         .outcome,
     ).toBe('duplicate');
     expect(store.callCount('orch:a', 's1', 'converter', 'convert')).toBe(1);
@@ -304,8 +304,8 @@ describe('stage spend, per token', () => {
 
   it('keeps two tokens apart in one stage for one wallet', () => {
     const store = new Store(':memory:');
-    store.reserve({ intentId: 'i-play', agentId: 'orch:a', stage, amount: 100n, capWei: 1000n, token: 'play' });
-    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, capWei: 1000n, token: 'gold' });
+    store.reserve({ intentId: 'i-play', agentId: 'orch:a', stage, amount: 100n, stageCap: { cap: 1000n }, token: 'play' });
+    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, stageCap: { cap: 1000n }, token: 'gold' });
 
     expect(store.spentThisStage('orch:a', stage, 'play')).toBe(100n);
     expect(store.spentThisStage('orch:a', stage, 'gold')).toBe(7n);
@@ -322,15 +322,15 @@ describe('stage spend, per token', () => {
     // default token would have locked a persona out of every other.
     const store = new Store(':memory:');
     expect(
-      store.reserve({ intentId: 'p1', agentId: 'orch:a', stage, amount: 100n, capWei: 100n, token: 'play' })
+      store.reserve({ intentId: 'p1', agentId: 'orch:a', stage, amount: 100n, stageCap: { cap: 100n }, token: 'play' })
         .outcome,
     ).toBe('reserved');
     expect(
-      store.reserve({ intentId: 'p2', agentId: 'orch:a', stage, amount: 1n, capWei: 100n, token: 'play' })
+      store.reserve({ intentId: 'p2', agentId: 'orch:a', stage, amount: 1n, stageCap: { cap: 100n }, token: 'play' })
         .outcome,
     ).toBe('over_stage_cap');
     expect(
-      store.reserve({ intentId: 'g1', agentId: 'orch:a', stage, amount: 50n, capWei: 100n, token: 'gold' })
+      store.reserve({ intentId: 'g1', agentId: 'orch:a', stage, amount: 50n, stageCap: { cap: 100n }, token: 'gold' })
         .outcome,
     ).toBe('reserved');
     store.close();
@@ -341,8 +341,8 @@ describe('stage spend, per token', () => {
     // coordinate. A release against the wrong currency would leave the real
     // hold standing AND credit budget somewhere it was never taken.
     const store = new Store(':memory:');
-    store.reserve({ intentId: 'i-play', agentId: 'orch:a', stage, amount: 100n, capWei: 1000n, token: 'play' });
-    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, capWei: 1000n, token: 'gold' });
+    store.reserve({ intentId: 'i-play', agentId: 'orch:a', stage, amount: 100n, stageCap: { cap: 1000n }, token: 'play' });
+    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, stageCap: { cap: 1000n }, token: 'gold' });
 
     store.release('i-gold');
     expect(store.spentThisStage('orch:a', stage, 'gold')).toBe(0n);
@@ -352,7 +352,7 @@ describe('stage spend, per token', () => {
 
   it('records the token on the intent itself', () => {
     const store = new Store(':memory:');
-    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, capWei: null, token: 'gold' });
+    store.reserve({ intentId: 'i-gold', agentId: 'orch:a', stage, amount: 7n, stageCap: null, token: 'gold' });
     expect(store.intentToken('i-gold')).toBe('gold');
     store.close();
   });

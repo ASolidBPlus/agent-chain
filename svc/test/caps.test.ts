@@ -25,6 +25,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   capsFor,
+  isCap,
+  UNLIMITED,
+  stageCapWei,
+  enforcePolicy,
   loadPolicyDefaults,
   mergePolicy,
   normalisePolicy,
@@ -72,12 +76,49 @@ describe('capsFor', () => {
       err = e;
     }
     expect(err).toBeInstanceOf(HttpError);
-    expect((err as HttpError).code).toBe('over_max_per_tx');
+    // §1b. `no_cap_set`, not `over_max_per_tx`: the old code told a persona a
+    // smaller amount would succeed, when no amount can. The DETAIL is
+    // unchanged - it was already right.
+    expect((err as HttpError).code).toBe('no_cap_set');
     expect((err as HttpError).detail).toBe('no cap set for au');
   });
 
   it('refuses even when the entry exists but is empty', () => {
     expect(() => capsFor({ ...policy, caps: { au: {} as never } }, 'au')).toThrow(HttpError);
+  });
+});
+
+// §1b. "unlimited" AS AN EXPLICIT CHOICE, and nothing else.
+//
+// The value space is the whole point. `"unlimited"` means someone decided; an
+// ABSENT cap means nobody did, and those stay different answers. Everything
+// else - a typo, an empty string, a null - is treated as ABSENT and refuses,
+// because the fail-OPEN implementation (`not a number -> no bound`) turns
+// `"unlimted"` into an uncapped wallet, and a typo is the likeliest way anyone
+// ever writes a non-numeric cap.
+describe('"unlimited" in isCap', () => {
+  it('accepts exactly "unlimited"', () => {
+    expect(isCap(UNLIMITED)).toBe(true);
+    expect(isCap('unlimited')).toBe(true);
+  });
+
+  it('refuses every OTHER non-numeric string, so a typo is not an uncapped wallet', () => {
+    // COMPARE TO A VALUE at each: these are the strings a broader predicate
+    // would have admitted, and each one of them is a wallet with no bound.
+    for (const bad of ['unlimted', 'UNLIMITED', 'Unlimited', 'unlimited ', ' unlimited', '', 'none', 'inf']) {
+      expect(isCap(bad)).toBe(false);
+    }
+  });
+
+  it('still accepts amounts, and still refuses zero and negatives', () => {
+    // The regex must remain the gate for everything that is not the one exact
+    // string - if the new clause had widened it, this row would pass anyway
+    // and the row above is what notices.
+    expect(isCap('25')).toBe(true);
+    expect(isCap('0')).toBe(false);
+    expect(isCap('-1')).toBe(false);
+    expect(isCap(null)).toBe(false);
+    expect(isCap(undefined)).toBe(false);
   });
 });
 
@@ -262,5 +303,61 @@ describe('mergePolicy with caps', () => {
 
   it('refuses caps naming a token with no pair', () => {
     expect(() => mergePolicy({ caps: { vee: 'lots' } }, defaults)).toThrow(HttpError);
+  });
+});
+
+// §1b. THE PROPERTY, NOT THE INSTANCE (the wallet-mcp lane's finding, 00:22Z).
+//
+// The defect this closes was not "unlimited fails to skip a bound". It was that
+// a value `isCap` ACCEPTS was unusable by the code that consumes it: at
+// c23a5b6, `isCap('unlimited')` was true and `capToWei('unlimited', 18)` threw
+// a SyntaxError - not an unbounded wallet and not a bounded one, a crash on the
+// money path that is not an HttpError and surfaces as a 500.
+//
+// So the assertion is about the PAIR. A test naming "unlimited" would have gone
+// green the moment the two consumers were taught about it and said nothing
+// about the next special value somebody adds. This one stays true.
+describe('every value isCap accepts is usable by everything that consumes a cap', () => {
+  const ACCEPTED = ['1', '25', '1000000', '0.5', '25.000000000000000001'.slice(0, 20), UNLIMITED, 100, 1];
+
+  it('has a fixture that is actually accepted, or it proves nothing', () => {
+    // THE GUARD ON THE GUARD. If a value in the list stopped being accepted,
+    // the loop below would skip it and pass vacuously - the empty-set failure,
+    // which is how a property test quietly stops testing its property.
+    for (const v of ACCEPTED) expect(isCap(v, 18)).toBe(true);
+    expect(ACCEPTED.length).toBeGreaterThan(4);
+  });
+
+  it('never makes a consumer throw anything but an HttpError', () => {
+    for (const cap of ACCEPTED) {
+      const policy: AgentPolicy = {
+        caps: { play: { max_per_tx: cap, max_per_stage: cap } },
+        allow: ['*'],
+        deny: [],
+      };
+      // Both consumers, because they guard independently and either could be
+      // the one that was never taught.
+      for (const call of [
+        () => stageCapWei(policy, 'play', 18),
+        () =>
+          enforcePolicy({
+            policy,
+            to: 'alpha.play',
+            amount: 1n,
+            decimals: 18,
+            symbol: 'PLAY',
+            tokenKey: 'play',
+          }),
+      ]) {
+        try {
+          call();
+        } catch (err) {
+          // An HttpError is a REFUSAL and a legitimate outcome - a cap of "1"
+          // refuses an amount over it. Anything else is the code meeting a
+          // value it was never taught, which is the class this test exists for.
+          expect(err).toBeInstanceOf(HttpError);
+        }
+      }
+    }
   });
 });

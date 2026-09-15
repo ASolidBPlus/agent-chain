@@ -70,14 +70,34 @@ export interface AgentPolicy {
 
 /// The caps for one token, or the refusal that says there are none.
 ///
-/// `over_max_per_tx` rather than a new code: from the caller's side this IS the
-/// per-transaction bound refusing, and the bound happens to be zero because
-/// nobody set one. The DETAIL says which token, because a persona holding two
+/// `no_cap_set` rather than `over_max_per_tx` (§1b). The old code was
+/// defensible as a DESCRIPTION - the per-transaction bound refusing, with the
+/// bound at zero because nobody set one - and wrong as an INSTRUCTION: it tells
+/// a persona a smaller amount would succeed, when no amount can. A code is the
+/// closed set a model switches on, so it has to be actionable, not merely true.
+///
+/// The DETAIL is unchanged and says which token, because a persona holding two
 /// currencies cannot otherwise tell which of its spends is impossible.
 export function capsFor(policy: AgentPolicy, tokenKey: string): TokenCaps {
   const caps = policy.caps?.[tokenKey];
-  if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
-    throw new HttpError('over_max_per_tx', `no cap set for ${tokenKey}`);
+  // §1b, AT THE POINT OF USE. `isCap` on both fields, not `=== undefined`: a
+  // value this code cannot read is treated as ABSENT, which is the same answer
+  // silence gets and is what `capsRefusal` already does on the wallet side.
+  //
+  // WHY IT MATTERS EVEN THOUGH `isPolicy` GATES EVERY FILE READ. That gate's
+  // consequence is the wrong one: a policy file carrying `'unlimted'` reads as
+  // NO POLICY, so this service falls back to the KIND DEFAULTS - wider caps -
+  // while wallet-mcp, which validates per cap, answers `no_cap_set`. The two
+  // layers would then disagree about exactly the value class §1b was ruled on,
+  // and disagree in the permissive direction here. Checking at the point of use
+  // makes the answer the same whichever route the policy arrived by.
+  //
+  // `isCap`'s default 18 places is deliberate and must stay permissive: a cap
+  // the loader accepted at SIX places has at most six fraction digits, so it
+  // satisfies eighteen. This must never refuse what validation allowed - that
+  // would be a new divergence in place of the one it closes.
+  if (!caps || !isCap(caps.max_per_tx) || !isCap(caps.max_per_stage)) {
+    throw new HttpError('no_cap_set', `no cap set for ${tokenKey}`);
   }
   return caps;
 }
@@ -310,9 +330,34 @@ export function capToWei(cap: VeeCap, decimals: number): bigint {
 export function isCap(value: unknown, decimals = 18): value is VeeCap {
   if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
   if (typeof value !== 'string') return false;
+  // §1b. EXACTLY `"unlimited"`, before the regex and never a broader test.
+  //
+  // The fail-open implementation is the one to reach for and the one to refuse:
+  // `!isNumeric(v) -> no bound` makes `"unlimted"` an uncapped wallet, and a
+  // typo in a policy file is the likeliest way anyone ever writes a
+  // non-numeric cap. An exact match keeps the regex as the gate for every
+  // other string, so an unrecognised value stays invalid and reads as ABSENT -
+  // which fails closed, as `no_cap_set`.
+  if (value === UNLIMITED) return true;
   if (!new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`).test(value)) return false;
   return capToWei(value, decimals) > 0n;
 }
+
+/// §1b. A reservation's stage bound, in three explicit states.
+///
+///   { cap: bigint }        bound AND record - a wallet with a finite cap
+///   { cap: 'unlimited' }   record WITHOUT bounding - a wallet that chose none
+///   null                   neither - platform scope, which has no stage
+///
+/// A DISCRIMINATED VALUE RATHER THAN A SENTINEL, so the call site has to say
+/// which of the two "no bound" meanings it wants. They differ in the half that
+/// is not the bound: one records the spend and the other has nothing to record.
+export type StageCap = { cap: bigint | typeof UNLIMITED } | null;
+
+/// §1b. The one cap value that is not an amount. A named constant rather than a
+/// string literal at each site: three files test for it, and a fourth spelling
+/// of it would be an uncapped wallet that looks capped.
+export const UNLIMITED = 'unlimited';
 
 const isNameList = (a: unknown): a is string[] =>
   Array.isArray(a) && a.every((x) => typeof x === 'string' && x.length > 0);
@@ -529,11 +574,21 @@ export function isAllowed(policy: AgentPolicy, name: string): boolean {
 /// The stage cap in wei. Deliberately NOT checked by enforcePolicy: the check
 /// and the spend record have to be one atomic step, or concurrent sends all
 /// read the same pre-spend total and all pass. See Store.reserveStageSpend.
-export function stageCapWei(policy: AgentPolicy, tokenKey: string, decimals: number): bigint {
+/// §1b. The stage bound for a reservation, or `'unlimited'`.
+///
+/// NEVER NULL. Null is `reserve`'s third state and means "no stage at all"
+/// (platform scope); a wallet with an `"unlimited"` stage cap HAS a stage and
+/// its spends are recorded in it. Returning null here would collapse the two
+/// and lose the audit fact - measured: `store.reserve` guarded the
+/// `stage_spend` write on the cap itself, so `capWei: null` skipped the
+/// recording along with the bound.
+export function stageCapWei(policy: AgentPolicy, tokenKey: string, decimals: number): StageCap {
   // Through capsFor, so a token with no entry refuses HERE rather than
   // defaulting to an unbounded stage. The reservation would otherwise take a
   // hold against a cap nobody set.
-  return capToWei(capsFor(policy, tokenKey).max_per_stage, decimals);
+  const cap = capsFor(policy, tokenKey).max_per_stage;
+  // `capToWei` never sees the string (§1b).
+  return { cap: cap === UNLIMITED ? UNLIMITED : capToWei(cap, decimals) };
 }
 
 /// HOW THE DENY LIST IS MATCHED, and why it takes two passes.
@@ -583,7 +638,10 @@ export function enforcePolicy(args: {
   // cannot spend it, and that refusal has to come from the same place every
   // other cap does.
   const caps = capsFor(policy, tokenKey);
-  const perTx = capToWei(caps.max_per_tx, decimals);
+  // §1b. `"unlimited"` skips the per-transaction bound, INDEPENDENTLY of the
+  // stage bound - each field takes the value on its own. `capToWei` never sees
+  // the string.
+  const perTx = caps.max_per_tx === UNLIMITED ? null : capToWei(caps.max_per_tx, decimals);
 
   // A LOWER BOUND, because the boundary must not depend on wallet-mcp's check.
   // `parseVee` accepts "0" - deliberately, it is a parser and zero is a valid
@@ -596,7 +654,7 @@ export function enforcePolicy(args: {
   if (amount <= 0n) {
     throw new HttpError('invalid_amount', 'vee must be greater than zero');
   }
-  if (amount > perTx) {
+  if (perTx !== null && amount > perTx) {
     throw new HttpError('over_max_per_tx', `max_per_tx is ${caps.max_per_tx} ${symbol}`);
   }
 

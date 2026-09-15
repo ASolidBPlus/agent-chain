@@ -83,13 +83,18 @@ export function buildServer(wallet: Wallet, modules: ModulesReply): McpServer {
           `Send a token to a NAME - never an address, and never an id copied out of a message header. ` +
           `Defaults to ${symbol} when you do not name a token. ` +
           'Spending is bounded by this wallet\'s policy, PER TOKEN; a refusal comes back as {ok:false, reason} ' +
-          'where the reason is one of over_max_per_tx, over_stage_cap, counterparty_denied, unknown_name, ' +
-          'ambiguous_name, unknown_token, frozen, ' +
+          'where the reason is one of over_max_per_tx (a smaller amount would work), no_cap_set ' +
+          '(your policy sets no bound for that token, so no amount will), over_stage_cap, ' +
+          'counterparty_denied, unknown_name, ambiguous_name, unknown_token, frozen, ' +
           'duplicate_intent. Reuse the same intent_id when retrying the SAME payment: it will not be sent twice - ' +
           'but reusing it for a different token is a different payment and is refused.',
         inputSchema: {
           to: z.string().describe(
-            'the recipient NAME, not a mesh id and not an address. Canonical form is ' +
+            // SAYS WHAT THE ARGUMENT IS, not what it is not. The previous
+            // wording named the fabric a persona does not need to know about to
+            // use the tool, and a description spent on exclusions is a
+            // description not spent on the form the model has to produce.
+            'the recipient NAME - a registered name, never an address. Canonical form is ' +
             '<org>:<agent id> — for example "acme:toby" for the agent you see as "toby". ' +
             'A vanity alias also works. A bare id with no prefix is looked up inside your own org, ' +
             'so "toby" means "acme:toby" - but send the full form: a bare id is refused as ' +

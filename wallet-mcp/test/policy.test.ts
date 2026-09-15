@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  UNLIMITED,
   capsRefusal,
   checkLocally,
   normaliseVee,
@@ -114,7 +115,7 @@ describe('caps are per token', () => {
   it('refuses a token the policy says nothing about, and says which', () => {
     const only = { ...POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } };
     const refusal = checkLocally(only, 'alpha.play', '1', GOLD);
-    expect(refusal?.reason).toBe('over_max_per_tx');
+    expect(refusal?.reason).toBe('no_cap_set');
     expect(refusal?.detail).toContain('au');
     // ...while the token it does cover is unaffected.
     expect(chk(only, 'alpha.play', '1')).toBeNull();
@@ -125,7 +126,12 @@ describe('caps are per token', () => {
   // its key upper-cased: keyed by symbol, this test would pass by coincidence.
   it('reads the map by key, never by symbol', () => {
     const bySymbol = { ...POLICY, caps: { GOLD: { max_per_tx: 5, max_per_stage: 20 } } };
-    expect(chk(bySymbol, 'alpha.play', '1', GOLD)).toBe('over_max_per_tx');
+    // `no_cap_set`, NOT `over_max_per_tx`: a policy keyed by symbol caps
+    // nothing, so the refusal this asserts is the no-cap one. The test is NAMED
+    // for key/symbol resolution and a classifier reading names files it under
+    // resolution and leaves it on the old code - the disposition is decided by
+    // what the FIXTURE makes true, never by the title.
+    expect(chk(bySymbol, 'alpha.play', '1', GOLD)).toBe('no_cap_set');
     expect(capsRefusal(bySymbol, 'au')?.detail).toContain('au');
     expect(capsRefusal(bySymbol, 'GOLD')).toBeNull();
   });
@@ -139,8 +145,55 @@ describe('caps are per token', () => {
   // reads to a persona as the platform being broken.
   it('does not treat a literal "*" entry as covering every token', () => {
     const wild = { ...POLICY, caps: { '*': { max_per_tx: 100, max_per_stage: 500 } } };
-    expect(chk(wild, 'alpha.play', '1')).toBe('over_max_per_tx');
+    expect(chk(wild, 'alpha.play', '1')).toBe('no_cap_set');
     expect(capsRefusal(wild, 'play')?.detail).toBe('no cap set for play');
+  });
+
+  // §1b. `"unlimited"` is a decision someone wrote down; silence is not. The two
+  // must not collapse into each other in either direction, so both rows are
+  // here and the fixture holds them side by side.
+  it('accepts "unlimited" as a cap and skips only that bound', () => {
+    const unl = {
+      ...POLICY,
+      caps: { play: { max_per_tx: UNLIMITED, max_per_stage: 500 } },
+    } as unknown as WalletPolicy;
+
+    // The per-tx bound is gone at any size...
+    expect(chk(unl, 'alpha.play', '999999999')).toBeNull();
+    // ...and it is NOT a cap-less policy: capsRefusal must still pass it, or
+    // "unlimited" would refuse exactly like silence.
+    expect(capsRefusal(unl, 'play')).toBeNull();
+    // ...and the OTHER bound is untouched. Each field takes it independently,
+    // so a test that set both could not tell one skip from two.
+    expect(capsRefusal({ ...unl, caps: { play: { max_per_tx: UNLIMITED } as never } }, 'play')?.reason)
+      .toBe('no_cap_set');
+  });
+
+  // THE FAIL-OPEN DIRECTION, which is the one that costs money. The
+  // implementation to reach for is `typeof v === 'string' && !isNumeric(v)` ->
+  // no bound, and it makes a TYPO an uncapped wallet.
+  it('treats any other non-amount cap as ABSENT, never as unlimited', () => {
+    for (const bad of ['unlimted', 'UNLIMITED', 'Unlimited', '', 'none', null, undefined, {}, -5, 0]) {
+      const p = { ...POLICY, caps: { play: { max_per_tx: bad, max_per_stage: 500 } } } as unknown as WalletPolicy;
+      expect(capsRefusal(p, 'play')?.reason).toBe('no_cap_set');
+      // And it refuses the SEND too, rather than passing the bound.
+      expect(chk(p, 'alpha.play', '1')).toBe('no_cap_set');
+    }
+    // The control: the exact string, and only it, is accepted.
+    const ok = { ...POLICY, caps: { play: { max_per_tx: UNLIMITED, max_per_stage: UNLIMITED } } } as unknown as WalletPolicy;
+    expect(capsRefusal(ok, 'play')).toBeNull();
+  });
+
+  // The empty string is the one non-amount value that did not throw:
+  // `veeToWei('')` is 0, so `max_per_tx: ''` refused EVERY spend as a bare
+  // `over_max_per_tx` - a bricked wallet whose message said the amount was too
+  // large. It now says what is actually wrong.
+  it('diagnoses an empty cap as no cap, not as an amount over the bound', () => {
+    const empty = { ...POLICY, caps: { play: { max_per_tx: '', max_per_stage: 500 } } } as unknown as WalletPolicy;
+    expect(checkLocally(empty, 'alpha.play', '1', PLAY)).toEqual({
+      reason: 'no_cap_set',
+      detail: 'no cap set for play',
+    });
   });
 
   // The NARROW function chain-svc's agreement test asserts against
@@ -152,12 +205,12 @@ describe('caps are per token', () => {
     expect(capsRefusal(POLICY, 'play')).toBeNull();
     expect(capsRefusal(POLICY, 'au')).toBeNull();
     expect(capsRefusal(POLICY, 'nope')).toEqual({
-      reason: 'over_max_per_tx',
+      reason: 'no_cap_set',
       detail: 'no cap set for nope',
     });
     // A half-written entry is not an entry: either bound missing is no cap.
     const half = { ...POLICY, caps: { play: { max_per_stage: 500 } as never } };
-    expect(capsRefusal(half, 'play')?.reason).toBe('over_max_per_tx');
+    expect(capsRefusal(half, 'play')?.reason).toBe('no_cap_set');
   });
 });
 
@@ -341,7 +394,12 @@ describe('the intent ledger never forgets', () => {
 // persona-facing side, and one quietly removed from it. The count alone would
 // catch neither if two changes cancelled.
 describe('the disclosure decision', () => {
-  it('discloses exactly these fourteen codes, and nothing else', () => {
+  // THE NUMBER IS OUT OF THE NAME, deliberately. It said "fourteen" and the
+  // array said fourteen things, and the two could rot apart: update the array
+  // and the title is a false statement that still passes. A title must not
+  // carry a fact that can rot independently of the assertion under it - which
+  // is the same reason the comment above prefers a VALUE to a count.
+  it('discloses exactly this set, and nothing else', () => {
     const facing = Object.entries(REFUSAL_FOR)
       .filter(([, reason]) => reason !== null)
       .map(([code]) => code)
@@ -351,6 +409,14 @@ describe('the disclosure decision', () => {
       [
         // The persona's own wallet, policy or input...
         'over_max_per_tx',
+        // APPENDED, NOT SUBSTITUTED. `over_max_per_tx` keeps the meaning where
+        // a smaller amount would succeed; `no_cap_set` takes the one where none
+        // would. Replacing rather than appending would delete a live
+        // persona-facing code, and this test's red at that moment reads as "the
+        // list is stale" - which invites making the list match the map and
+        // cementing the deletion. A test that catches a mistake still needs the
+        // reader to know which direction to fix it.
+        'no_cap_set',
         'over_stage_cap',
         'counterparty_denied',
         'wallet_frozen',

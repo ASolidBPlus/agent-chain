@@ -484,7 +484,7 @@ export class Treasury {
       agentId,
       stage: await this.currentStage(),
       amount: current < target ? target - current : current - target,
-      capWei: null,
+      stageCap: null,
       token: tok.key,
       idSource: suppliedId ? 'caller' : 'server',
     });
@@ -838,7 +838,7 @@ export class Treasury {
       // the hold and the bound it is tested against cannot be in different
       // currencies.
       token: tok.key,
-      capWei: stageCapWei(policy, tok.key, decimals),
+      stageCap: stageCapWei(policy, tok.key, decimals),
     });
 
     if (reservation.outcome === 'over_stage_cap') {
@@ -1476,7 +1476,10 @@ export class Treasury {
       // takes a gold hold against a gold cap, and leaves the play budget alone.
       // Before per-token caps this could only be taken for the default token,
       // which meant every other currency had an unbounded stage.
-      capWei: money ? stageCapWei(policy, money.token.key, money.token.decimals) : null,
+      // NULL BECAUSE THERE IS NO MONEY, not because there is no bound: a call
+      // with no amount rule has no spend to record. The third state, reached
+      // for the third reason.
+      stageCap: money ? stageCapWei(policy, money.token.key, money.token.decimals) : null,
       call: {
         contract: contract.key,
         function: entry.function,
@@ -1754,7 +1757,7 @@ export class Treasury {
       agentId: 'platform',
       stage,
       amount: 0n,
-      capWei: null,
+      stageCap: null,
       // No money moves through admin-call's reservation - it is the
       // idempotency half only - so this is a coordinate, not a claim that
       // anything was held in that currency.

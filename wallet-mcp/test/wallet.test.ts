@@ -510,7 +510,34 @@ describe('reads', () => {
   it('resolves a name to an address and a canonical id', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     expect(await wallet.resolve('alpha.play')).toEqual({ address: '0xaaa', canonical: 'alpha:client' });
-    expect(await wallet.resolve('nobody.play')).toMatchObject({ error: expect.any(String) });
+    // COMPARED TO A VALUE. This asserted `expect.any(String)`, which is true of
+    // every error string there is - a chain outage, a withheld code, a refusal
+    // meaning something else - so it said the lookup failed SOMEHOW rather than
+    // that it failed by name.
+    expect(await wallet.resolve('nobody.play')).toMatchObject({ error: 'unknown_name' });
+  });
+
+  // THE RESOLVE TOOL'S OWN DETAIL, asserted directly rather than through `send`.
+  //
+  // It was protected only transitively: `send` calls `this.resolve(to)` and
+  // forwards what it returns, so send's assertions reached back through it. That
+  // coupling is exactly what the mapping change edits, and the tests carrying
+  // the coverage are named for `send` - so whoever edits `resolve` gets no local
+  // signal. Not a hole that existed; a hole this change would have opened.
+  it('keeps a cleared code\'s detail and drops a withheld one\'s', async () => {
+    const { wallet } = walletWith(AGENT_POLICY);
+
+    // `unknown_name` is cleared, and its detail is load-bearing: since §5 a bare
+    // `to` has TWO readings and the refusal has to name both, or a persona reads
+    // "no wallet is registered as toby" while `acme:toby` exists and concludes
+    // the registry is broken.
+    const missing = (await wallet.resolve('ghost')) as { error?: string; detail?: string };
+    expect(missing.error).toBe('unknown_name');
+    expect(missing.detail).toContain('orch:ghost');
+
+    // A withheld code carries NOTHING - the detail is the thing being withheld.
+    fake.resolveReply = { status: 502, body: { error: 'chain_error', detail: 'reverted at 0xdead' } };
+    expect(await wallet.resolve('alpha.play')).toEqual({ error: 'error' });
   });
 });
 
@@ -536,7 +563,20 @@ describe('one wallet, two tokens', () => {
   it('fails loudly on a chain-svc too old to send balances, rather than reading vee', async () => {
     const { wallet } = walletWith(AGENT_POLICY);
     fake.balanceReply = { status: 200, body: { vee: '250', eth: '1' } };
-    expect(await wallet.balance()).toEqual({ error: 'balance unavailable' });
+    // IN `unreachable`, NOT IN `error`. A 200 carrying the old single-token
+    // shape is a version skew, and a version skew has an OUTAGE'S CONSEQUENCE
+    // for the persona: no answer, nothing it did wrong, nothing it can change.
+    // Putting it in the refusal channel would be outage-confused-with-refusal
+    // reached from the other side. The CAUSE goes in the prose, for the
+    // operator who has to fix the deployment - the persona reads the key and
+    // wants the consequence, the operator reads the prose and wants the cause.
+    //
+    // This assertion previously read `{ error: 'balance unavailable' }` - a
+    // GOOD test of a shape that has been replaced, which is why it goes red
+    // here by design rather than by accident.
+    expect(await wallet.balance()).toEqual({
+      unreachable: 'chain-svc answered without a usable balance',
+    });
   });
 
   it('sends the default token when none is named', async () => {
@@ -575,7 +615,7 @@ describe('one wallet, two tokens', () => {
   it('refuses a token the policy sets no cap for', async () => {
     const { wallet } = walletWith({ ...AGENT_POLICY, caps: { play: { max_per_tx: 100, max_per_stage: 500 } } });
     const result = await wallet.send({ to: 'alpha.play', amount: '1', token: 'GOLD', intent_id: 'g1' });
-    expect(result).toMatchObject({ ok: false, reason: 'over_max_per_tx' });
+    expect(result).toMatchObject({ ok: false, reason: 'no_cap_set' });
     expect(result.detail).toContain('au');
     expect(fake.transfers).toHaveLength(0);
   });
@@ -862,10 +902,16 @@ describe('the call op', () => {
       expect(await wallet.contracts()).toEqual(fake.menu);
     });
 
-    it('reports an outage as an outage', async () => {
+    it('reports an outage as an outage, in its own key', async () => {
       const { wallet } = walletWith(AGENT_POLICY);
       await new Promise<void>((r) => fake.server.close(() => r()));
-      expect(await wallet.contracts()).toEqual({ error: expect.stringContaining('unreachable') });
+      // The key IS the report. This asserted the outage landed in `error`,
+      // which is the shape the three-way split removes - a weak test (a
+      // substring matcher) of a replaced contract, so its red says the contract
+      // moved, not that contracts broke.
+      expect(await wallet.contracts()).toEqual({
+        unreachable: expect.stringContaining('unreachable'),
+      });
     });
   });
 

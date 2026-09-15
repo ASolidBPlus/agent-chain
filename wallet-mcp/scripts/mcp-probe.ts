@@ -164,8 +164,46 @@ async function main(): Promise<void> {
   console.log(`  resolve alpha.play -> ${JSON.stringify(real)}`);
   check('the lookalike is a different wallet', lookalike.address !== real.address, true);
 
+  // §2. THE THREE-WAY SPLIT, over the real transport, for all five read tools.
+  //
+  // Two of the three branches are drivable from here. THE OUTAGE BRANCH IS NOT:
+  // the server reads /modules at startup and exits non-zero when chain-svc is
+  // absent, so a second server pointed at a dead port never boots and there is
+  // nothing to call a tool on. Driving it end to end needs chain-svc killed
+  // UNDER a running server, which is the harness's to do and not this script's.
+  // The CI test (test/disclosure.test.ts) covers that branch on every push;
+  // this covers the two that need a real transport and a real chain.
+  console.log('\n=== §2: the read tools answer in three shapes, never two');
+
+  // A REFUSAL, on the one read tool a persona can provoke: a name that is not
+  // registered. `error` carries the CODE, `detail` carries chain-svc's own
+  // prose naming both readings it tried.
+  const ghost = await call('resolve', { name: 'nobody.play' });
+  check('resolve refuses by CODE, not by prose', ghost.error, 'unknown_name');
+  check('...and forwards the detail, which names both readings', typeof ghost.detail === 'string' && ghost.detail.includes('orch:'), true);
+  check('...and puts nothing in the outage key', ghost.unreachable, undefined);
+
+  // The tool's own malformed input: the one case whose prose the persona may
+  // read, and it rides in `detail` behind the generic code.
+  const badArgs = await call('read', { contract: '', function: 'quote', args: [] });
+  check('a malformed read is the generic code', badArgs.error, 'error');
+  check('...with the prose in detail', badArgs.detail, 'contract is required');
+
+  // SUCCESS on each of the five, so the refusal rows above are not the only
+  // shape any of them can produce.
+  for (const [tool, args] of [
+    ['balance', {}],
+    ['history', { limit: 3 }],
+    ['contracts', {}],
+    ['resolve', { name: 'alpha.play' }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const out = await call(tool, args);
+    const shaped = out !== null && out.error === undefined && out.unreachable === undefined;
+    check(`${tool} answers a success object, not a failure shape`, shaped, true);
+  }
+
   console.log('\n=== secret hygiene (spec S5): the token in no tool output');
-  const everything = JSON.stringify([before, first, replay, named, who, history, lookalike, real]);
+  const everything = JSON.stringify([before, first, replay, named, who, history, lookalike, real, ghost, badArgs]);
   check('token absent from every response', everything.includes(process.env.WALLET_TOKEN ?? 'x'), false);
   // Known-positive control: prove the matcher can see the token at all.
   check('control - the matcher can see it', JSON.stringify({ t: process.env.WALLET_TOKEN }).includes(process.env.WALLET_TOKEN ?? 'x'), true);

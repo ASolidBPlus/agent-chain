@@ -14,6 +14,15 @@ import { readFileSync } from 'node:fs';
 /// contract, so they are stable and lowercase.
 export type Refusal =
   | 'over_max_per_tx'
+  /// §1b. The policy sets NO cap for this token, so no amount can be spent - as
+  /// distinct from `over_max_per_tx`, where a smaller one could. A SPLIT, not an
+  /// addition: `over_max_per_tx` keeps its other meaning.
+  ///
+  /// A CODE IS AN INSTRUCTION, not merely a description. The old code was
+  /// defensible as a description - the per-transaction bound refusing, with the
+  /// bound at zero because nobody set one - and wrong as an instruction: it
+  /// tells a persona to try less when no amount can work.
+  | 'no_cap_set'
   | 'over_stage_cap'
   | 'counterparty_denied'
   | 'unknown_name'
@@ -63,9 +72,39 @@ export type Refusal =
   /// says more about the game's machinery than a player should read.
   | 'revert';
 
+/// §1b. The one cap value that is not an amount, spelled once.
+///
+/// MIRRORS `UNLIMITED` in svc/src/policy.ts and must equal it character for
+/// character. NOT IMPORTED from there: wallet-mcp's only reference to chain-svc
+/// is `import type`, which is erased, so this package keeps ZERO RUNTIME
+/// DEPENDENCY on chain-svc and still runs with it absent (org-core imports this
+/// as a library). A value import would be the first one and would end that.
+///
+/// So this is the `matchesPattern` arrangement again - two spellings of one
+/// constant, and a test in svc/test that they agree, because that suite may
+/// import both. A fourth spelling anywhere would be an uncapped wallet that
+/// looks capped.
+export const UNLIMITED = 'unlimited';
+
 export interface TokenCaps {
   max_per_tx: number | string;
   max_per_stage: number | string;
+}
+
+/// Is this a value a cap may take? EXACTLY `"unlimited"`, or an amount.
+///
+/// Mirrors chain-svc's `isCap`. The exact match is tested FIRST and never by a
+/// broader predicate: `typeof v === 'string' && !isNumeric(v)` is the
+/// implementation to reach for and the one to refuse, because it makes
+/// `"unlimted"` an uncapped wallet and a typo is the likeliest way anyone ever
+/// writes a non-numeric cap. Everything else stays invalid and reads as ABSENT,
+/// which fails closed.
+export function isCapAmount(value: unknown): boolean {
+  if (value === UNLIMITED) return true;
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== 'string') return false;
+  if (!/^\d+(\.\d+)?$/.test(value)) return false;
+  return Number(value) > 0;
 }
 
 export interface WalletPolicy {
@@ -183,8 +222,18 @@ export function capsRefusal(
   tokenKey: string,
 ): { reason: Refusal; detail: string } | null {
   const caps = policy.caps?.[tokenKey];
-  if (!caps || caps.max_per_tx === undefined || caps.max_per_stage === undefined) {
-    return { reason: 'over_max_per_tx', detail: `no cap set for ${tokenKey}` };
+  // A VALUE THIS SIDE CANNOT READ IS TREATED AS ABSENT, not as unlimited and
+  // not as a crash. A typo, the empty string, null: each fails closed here with
+  // the same answer silence gets. The empty string is the one that used to be
+  // worst - `veeToWei('')` returns 0, so `max_per_tx: ''` refused every spend as
+  // a bare `over_max_per_tx`: a bricked wallet whose message said the amount was
+  // too large.
+  //
+  // PER CAP, NOT PER FILE. Rejecting the whole policy for one bad entry would
+  // lose the local pre-check for every OTHER token because one was mistyped -
+  // which defers more to chain-svc than the mistake warrants.
+  if (!caps || !isCapAmount(caps.max_per_tx) || !isCapAmount(caps.max_per_stage)) {
+    return { reason: 'no_cap_set', detail: `no cap set for ${tokenKey}` };
   }
   return null;
 }
@@ -210,7 +259,14 @@ export function checkLocally(
   if (capless) return capless;
   const caps = policy.caps[token.key]!;
 
-  if (veeToWei(amount, token.decimals) > veeToWei(String(caps.max_per_tx), token.decimals)) {
+  // §1b. `"unlimited"` skips THIS bound and nothing else - the stage bound is
+  // its own field and its own decision, and chain-svc is the authority on both
+  // regardless. The spend is still recorded there; a skipped bound is not a
+  // skipped audit.
+  if (
+    caps.max_per_tx !== UNLIMITED &&
+    veeToWei(amount, token.decimals) > veeToWei(String(caps.max_per_tx), token.decimals)
+  ) {
     return { reason: 'over_max_per_tx' };
   }
   // Deny beats allow, and an empty allow list denies everything.
