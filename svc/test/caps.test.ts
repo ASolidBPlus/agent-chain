@@ -26,12 +26,13 @@ import { join } from 'node:path';
 import {
   capsFor,
   isCap,
+  isPolicy,
+  normalisePolicy,
   UNLIMITED,
   stageCapWei,
   enforcePolicy,
   loadPolicyDefaults,
   mergePolicy,
-  normalisePolicy,
   droppedPatternsLogged,
   type AgentPolicy,
 } from '../src/policy.ts';
@@ -277,10 +278,17 @@ describe('the legacy policy shape', () => {
     expect(normalisePolicy(modern, 'vee')).toEqual(modern);
   });
 
-  it('refuses a document that is neither shape', () => {
-    for (const bad of [{ allow: [], deny: [] }, { caps: 'lots', allow: [], deny: [] }, null, 'policy']) {
+  it('refuses a document that is not a document, and a caps map that is not a map', () => {
+    // `{ allow: [], deny: [] }` LEFT THIS LIST at v0.8.0 - it is a document
+    // with rules and no bounds, which is exactly what §1 invites an operator to
+    // write. It threw until now, and because `readPolicyFile` calls this inside
+    // its try, the throw became the unreadable marker: a valid permissive file
+    // turned into a wallet that refused every spend.
+    for (const bad of [{ caps: 'lots', allow: [], deny: [] }, null, 'policy', []]) {
       expect(() => normalisePolicy(bad, 'vee')).toThrow();
     }
+    // ...and the one that moved, asserted as what it now means.
+    expect(normalisePolicy({ allow: [], deny: [] }, 'vee')).toEqual({ allow: [], deny: [] });
   });
 
   it('prefers caps when a file somehow carries both shapes', () => {
@@ -345,6 +353,64 @@ describe('mergePolicy with caps', () => {
 // So the assertion is about the PAIR. A test naming "unlimited" would have gone
 // green the moment the two consumers were taught about it and said nothing
 // about the next special value somebody adds. This one stays true.
+// THE SAME PROPERTY ONE LEVEL UP, at the document rather than the field: every
+// shape `isPolicy` accepts must be usable by `normalisePolicy`.
+//
+// Handed to me by the wallet-mcp lane rather than found here, and it is the
+// right instrument: the three instances they reported were five, and a test
+// naming today's shapes says nothing about the next one somebody writes.
+//
+// WHY THE PAIR MATTERS MORE THAN IT DID. The two were allowed to disagree while
+// a document `normalisePolicy` threw on became "no policy" and fell back to the
+// kind defaults - wrong, but bounded. At v0.8.0 that throw lands in
+// `readPolicyFile`'s catch and becomes the UNREADABLE marker, so a disagreement
+// turns a valid permissive document into a wallet that refuses every spend.
+describe('every document isPolicy accepts is usable by normalisePolicy', () => {
+  const ACCEPTED: Array<[string, unknown]> = [
+    ['allow and deny with no caps at all', { allow: ['*.play'], deny: ['treasury.play'] }],
+    ['an empty document', {}],
+    ['the legacy pair, both halves', { allow: [], deny: [], max_per_tx: '100', max_per_stage: '500' }],
+    ['the legacy pair, max_per_tx alone', { allow: [], deny: [], max_per_tx: '100' }],
+    ['the legacy pair, max_per_stage alone', { allow: [], deny: [], max_per_stage: '500' }],
+    ['the new shape, both bounds', { caps: { play: { max_per_tx: '1', max_per_stage: '2' } } }],
+    ['the new shape, one bound', { caps: { play: { max_per_tx: '1' } } }],
+    ['the new shape, an empty entry', { caps: { play: {} } }],
+    ['"unlimited" in an entry', { caps: { play: { max_per_tx: 'unlimited' } } }],
+    ['allow written empty', { allow: [], deny: [] }],
+  ];
+
+  it('has a fixture the gate actually accepts, or it proves nothing', () => {
+    // THE GUARD ON THE GUARD. A shape that stopped being accepted would be
+    // skipped by the loop below and pass vacuously - the empty-set failure that
+    // is how a property test quietly stops testing its property.
+    for (const [name, doc] of ACCEPTED) expect([name, isPolicy(doc)]).toEqual([name, true]);
+    expect(ACCEPTED.length).toBeGreaterThan(6);
+  });
+
+  it('never throws on one', () => {
+    for (const [name, doc] of ACCEPTED) {
+      // The name rides in the assertion so a failure says WHICH shape, rather
+      // than making the reader count loop iterations.
+      let outcome = 'ok';
+      try {
+        normalisePolicy(doc, 'play');
+      } catch (err) {
+        outcome = `THREW ${(err as HttpError).code}: ${(err as HttpError).detail}`;
+      }
+      expect([name, outcome]).toEqual([name, 'ok']);
+    }
+  });
+
+  it('still refuses a document the gate refuses', () => {
+    // COMPARE TO A VALUE at the other end: without this the property would hold
+    // for a `normalisePolicy` that threw on nothing at all.
+    for (const bad of [{ caps: { play: { max_per_tx: 'lots' } } }, { allow: 'everyone' }, [], 'policy']) {
+      expect(isPolicy(bad)).toBe(false);
+    }
+    expect(() => normalisePolicy({ allow: 'everyone' }, 'play')).toThrow(HttpError);
+  });
+});
+
 describe('every value isCap accepts is usable by everything that consumes a cap', () => {
   const ACCEPTED = ['1', '25', '1000000', '0.5', '25.000000000000000001'.slice(0, 20), UNLIMITED, 100, 1];
 

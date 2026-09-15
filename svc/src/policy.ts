@@ -121,10 +121,6 @@ export function capsFor(policy: AgentPolicy | null, tokenKey: string): TokenCaps
   // and disagree in the permissive direction here. Checking at the point of use
   // makes the answer the same whichever route the policy arrived by.
   //
-  // `isCap`'s default 18 places is deliberate and must stay permissive: a cap
-  // the loader accepted at SIX places has at most six fraction digits, so it
-  // satisfies eighteen. This must never refuse what validation allowed - that
-  // would be a new divergence in place of the one it closes.
   // THREE OUTCOMES PER FIELD, and they are not two:
   //
   //   absent        -> unlimited. Nobody wrote a bound.
@@ -245,14 +241,36 @@ function expandCaps(raw: unknown, tokenKeys: string[], kind: string, path: strin
 /// an old example - keeps the NEW one: it is the shape that can express what
 /// the old cannot, and preferring the legacy pair would discard every token but
 /// the default.
+/// A policy DOCUMENT as read from disk, in whichever shape it was written.
+///
+/// EVERY SHAPE `isPolicy` ACCEPTS MUST COME OUT OF HERE. The two were allowed
+/// to disagree while a document this function threw on became "no policy" and
+/// fell back to the kind defaults - wrong, but bounded. At v0.8.0 the throw
+/// lands in `readPolicyFile`'s catch and becomes the UNREADABLE MARKER, so a
+/// disagreement turns a valid permissive document into a wallet that refuses
+/// every spend. Measured on 60da6e4: FIVE of the six shapes the gate accepts
+/// threw here, including `{}` and the half-written entry §5.3 requires.
+///
+/// The property is asserted rather than the instances - see the pair test in
+/// caps.test.ts, the same shape as isCap/capToWei one level up. A test naming
+/// today's shapes says nothing about the next one somebody writes.
 export function normalisePolicy(value: unknown, defaultTokenKey: string | undefined): AgentPolicy {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new HttpError('invalid_request', 'policy must be an object');
   }
   const p = value as Record<string, unknown>;
-  if (!isNameList(p.allow) || !isNameList(p.deny)) {
-    throw new HttpError('invalid_request', 'policy must carry allow and deny lists');
+  // ABSENT LISTS ARE NOT MISSING LISTS. `allow` absent allows everything,
+  // `deny` absent denies nothing; a PRESENT one must still be a list of names.
+  if (p.allow !== undefined && !isNameList(p.allow)) {
+    throw new HttpError('invalid_request', 'allow must be an array of non-empty strings');
   }
+  if (p.deny !== undefined && !isNameList(p.deny)) {
+    throw new HttpError('invalid_request', 'deny must be an array of non-empty strings');
+  }
+  const lists: AgentPolicy = {
+    ...(p.allow === undefined ? {} : { allow: p.allow as string[] }),
+    ...(p.deny === undefined ? {} : { deny: p.deny as string[] }),
+  };
 
   if (p.caps !== undefined) {
     if (typeof p.caps !== 'object' || p.caps === null || Array.isArray(p.caps)) {
@@ -263,10 +281,20 @@ export function normalisePolicy(value: unknown, defaultTokenKey: string | undefi
         throw new HttpError('invalid_request', `caps.${key} must be {max_per_tx, max_per_stage}`);
       }
     }
-    return { caps: p.caps as Record<string, TokenCaps>, allow: p.allow, deny: p.deny };
+    return { caps: p.caps as Record<string, TokenCaps>, ...lists };
   }
 
-  if (isCap(p.max_per_tx) && isCap(p.max_per_stage)) {
+  // THE LEGACY PAIR, TAKING EITHER HALF. It required both, so a file bounding
+  // only the per-transaction amount threw - while the SAME intent in the new
+  // shape (`caps: {play: {max_per_tx}}`) is read as "bound each transaction, no
+  // stage bound". One operator intent, two answers, decided by which spelling
+  // they happened to use.
+  if (p.max_per_tx !== undefined || p.max_per_stage !== undefined) {
+    for (const field of ['max_per_tx', 'max_per_stage'] as const) {
+      if (p[field] !== undefined && !isCap(p[field])) {
+        throw new HttpError('invalid_request', `${field} must be a usable amount`);
+      }
+    }
     if (defaultTokenKey === undefined) {
       throw new HttpError(
         'invalid_request',
@@ -274,13 +302,20 @@ export function normalisePolicy(value: unknown, defaultTokenKey: string | undefi
       );
     }
     return {
-      caps: { [defaultTokenKey]: { max_per_tx: p.max_per_tx, max_per_stage: p.max_per_stage } },
-      allow: p.allow,
-      deny: p.deny,
+      caps: {
+        [defaultTokenKey]: {
+          ...(p.max_per_tx === undefined ? {} : { max_per_tx: p.max_per_tx as VeeCap }),
+          ...(p.max_per_stage === undefined ? {} : { max_per_stage: p.max_per_stage as VeeCap }),
+        },
+      },
+      ...lists,
     };
   }
 
-  throw new HttpError('invalid_request', 'policy must carry caps, or max_per_tx and max_per_stage');
+  // NO CAPS AT ALL is a document, not a defect: allow/deny rules and no bounds
+  // is exactly what §1 invites an operator to write, and so is `{}`. This used
+  // to be the final throw.
+  return lists;
 }
 
 /// Loaded from policy-defaults.json rather than held as a constant here, so the
@@ -627,7 +662,18 @@ export async function readPolicyFile(
     // So: absent -> null (no rules written), unreadable -> a marker every
     // spend refuses on. Fail closed on garbage, open on silence, at file level
     // exactly as at field level.
-    return { unreadable: err instanceof Error ? err.message.split('\n')[0] : 'unparseable' };
+    // A FIXED STRING PER FAILURE CLASS, never the parser's message. This
+    // reason reaches a PERSONA: `no_cap_set` is persona-facing and its detail
+    // crosses with it. Measured - bun answers
+    // `JSON Parse error: Unexpected identifier "broken"`, quoting a fragment of
+    // the operator's own policy file, and a malformed value could be a name, a
+    // pattern or a number the operator did not intend to publish.
+    //
+    // The class is what a caller can act on ("this file is not JSON") and the
+    // message is what an operator needs, so the message goes to the log sink -
+    // the same split `revert` makes, for the same reason.
+    void err;
+    return { unreadable: 'not valid JSON' };
   }
 }
 
