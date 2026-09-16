@@ -197,6 +197,42 @@ contract NameRegistry is AccessControl {
         // No zero-address guard: both entry points refuse a zero target before
         // reaching this, and an unreachable branch would report as uncovered
         // while proving nothing.
+        // AND THE CONSEQUENCE OF "only when empty", stated because it is not
+        // visible from this line (reviewer's observation; no behaviour change).
+        //
+        // `reverse[target]` is CLEARED in two places - `transfer`, when a name
+        // changes hands, and `setTarget`, when it moves away - and it is only
+        // ever written here, on a registration, and only into an empty slot. So
+        // an address whose primary name was cleared has NO primary name until
+        // something registers a new one for it, and the NEXT registerFor for
+        // that address takes the slot whatever name it carries.
+        //
+        // chain-svc never exercises that: it registers the canonical id first
+        // and an alias only afterwards, so the canonical always wins the empty
+        // slot. The consequence is for anything else holding the registrar
+        // role - register a vanity alias for an address whose primary was
+        // cleared and the alias BECOMES that address's primary name, and
+        // `reverseOf` answers with it.
+        //
+        // Left as it is deliberately: the alternative is re-writing `reverse`
+        // on retarget, which is the promotion this design exists to prevent
+        // (see setTarget).
+        //
+        // THE INVARIANT IS THAT THE CANONICAL HOLDS THE SLOT FROM SPAWN, and
+        // ordering is only how spawn establishes it - not a rule every caller
+        // can check for itself. chain-svc's `addAlias` (POST /aliases) calls
+        // `registerFor(alias, wallet)` with no canonical registration in the
+        // operation at all: it is safe because the slot is already taken and is
+        // written only when empty, not because it registered anything in a
+        // particular order. Stated this way round because "register in the
+        // right order" invites a third registrar path to check its order,
+        // conclude it is covered, and have nothing to order against.
+        //
+        // If the slot ever empties under a live wallet - owner-only `transfer`
+        // or `setTarget`, then an ordinary alias registration - `reverseOf`
+        // answers the ALIAS, and that is the canonical chain-svc's deny-list
+        // identity pass matches on. Narrow and self-inflicted, and unchanged by
+        // any of this; recorded so the next reader meets it here.
         if (mayWriteReverse && reverse[target] == bytes32(0)) {
             reverse[target] = key;
         }
