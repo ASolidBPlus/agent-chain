@@ -28,13 +28,38 @@
 // a test under wallet-mcp that imported chain-svc would itself be a second
 // place the dependency exists.
 import { describe, it, expect } from 'bun:test';
-import { readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, cpSync } from 'node:fs';
+import {
+  readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, cpSync,
+  existsSync, symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MCP_SRC = join(ROOT, 'wallet-mcp', 'src');
+
+/// WHERE THIS TREE'S DEPENDENCIES ACTUALLY ARE, found by walking up rather than
+/// assumed to be at the repo root.
+///
+/// They are at the root when this repo is checked out on its own, and NOT when
+/// it is a git submodule of the consumer: a workspace install hoists to the
+/// OUTER root, so `chain/node_modules` does not exist. The first version of this
+/// helper assumed the standalone layout, passed in this repo's CI, and failed
+/// the moment the consumer ran the same file - which is the whole reason the
+/// consumer build is a gate rather than a formality.
+function nearestNodeModules(from: string): string {
+  let dir = from;
+  for (;;) {
+    const candidate = join(dir, 'node_modules');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error(`no node_modules above ${from}; this test cannot build a tree to import in`);
+    }
+    dir = parent;
+  }
+}
 
 describe('wallet-mcp stands alone', () => {
   // THE STRUCTURAL HALF, which says WHICH LINE to look at when the other half
@@ -70,7 +95,9 @@ describe('wallet-mcp stands alone', () => {
     mkdirSync(join(dir, 'wallet-mcp'), { recursive: true });
     cpSync(join(ROOT, 'wallet-mcp', 'src'), join(dir, 'wallet-mcp', 'src'), { recursive: true });
     cpSync(join(ROOT, 'wallet-mcp', 'package.json'), join(dir, 'wallet-mcp', 'package.json'));
-    cpSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), { recursive: true, dereference: false });
+    // SYMLINKED, not copied: resolution only needs to find it, and copying a
+    // whole dependency tree per run is minutes of I/O for no extra evidence.
+    symlinkSync(nearestNodeModules(ROOT), join(dir, 'node_modules'), 'dir');
     writeFileSync(join(dir, 'package.json'), '{"name":"standalone-probe","private":true}');
 
     const probe = join(dir, 'probe.ts');
