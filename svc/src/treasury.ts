@@ -1694,10 +1694,19 @@ export class Treasury {
     });
 
     if (reservation.outcome === 'over_stage_cap') {
+      // THE DETAIL NAMES THE LIMIT THAT FIRED, and the reservation is what says
+      // which one. It used to key on `entry.maxPerStage !== undefined && !money`
+      // - so on an entry that carries BOTH a call count and money, the count
+      // branch was skipped and the message reported the wallet's max_per_stage
+      // AMOUNT, a bound that had not tripped. An operator reads a money cap
+      // that did not fire and goes to change the wrong file.
+      //
+      // Two limits produce one outcome and they live in different files: the
+      // amount is the WALLET's policy, the count is the ENTRY's in calls.json.
       throw new HttpError(
         'over_stage_cap',
-        entry.maxPerStage !== undefined && !money
-          ? `${entry.function} may be called ${entry.maxPerStage} times per stage`
+        reservation.limit === 'entry_calls'
+          ? `${entry.function} on ${contract.key} may be called ${entry.maxPerStage} times per stage`
           : `max_per_stage is ${capsFor(policy, money!.token.key).max_per_stage} for this stage`,
       );
     }

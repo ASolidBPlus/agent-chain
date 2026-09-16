@@ -191,6 +191,17 @@ const NEW_TABLE_COLUMNS: ReadonlyArray<[string, string]> = [
   // component - the numbered step recreates the table, so `createTables` makes
   // it complete on a fresh store and the reconciliation never visits it.
   ['stage_spend', 'token'],
+  // FINDING 22: the ledger watermark's store half. A NEW TABLE, so it arrives
+  // complete from `createTables` and is classified here rather than ALTERed -
+  // `reservations` has a NOT NULL default and `id` is a primary key with a
+  // CHECK, neither of which ALTER TABLE can add.
+  //
+  // NO NUMBERED STEP AND NO VERSION BUMP: an existing store gets the table
+  // empty, the seed row sets the counter to 0, and the keystore has no
+  // watermark yet - so the first boot after this ships ESTABLISHES the mark
+  // rather than accusing anyone on a history the store never recorded.
+  ['ledger_facts', 'id'],
+  ['ledger_facts', 'reservations'],
 ];
 
 export function classifiedColumns(): Set<string> {
@@ -624,6 +635,17 @@ export interface LifetimeFacts {
   /// The operator has stated they intend to end the game's idempotency
   /// lifetime. The one legitimate reason for this state to exist.
   acknowledged: boolean;
+  /// FINDING 22. Every intent this STORE has ever reserved, monotonically -
+  /// never how many exist, because `release` deletes rows.
+  reservations: number;
+  /// The highest value the KEYSTORE has seen that counter reach, or NULL when
+  /// it has never recorded one. A different volume, which is the only thing
+  /// that makes the comparison mean anything: a restored store brings its own
+  /// counter back with it, and cannot bring this one.
+  ///
+  /// Null and zero are different facts. Null is a keystore that has not spoken
+  /// yet; zero is one that has, and said the store had reserved nothing.
+  watermark: number | null;
 }
 
 /// Gathers the three facts. A SEAM RATHER THAN INLINE CODE IN THE ENTRYPOINT,
@@ -652,8 +674,8 @@ export interface LifetimeFacts {
 /// incident that trips this control is an operator doing volume surgery, which
 /// is exactly when a neighbouring volume also fails to attach.
 export async function gatherLifetimeFacts(deps: {
-  store: { intentsEmpty(): boolean; walletsRecorded(): number };
-  keystore: { agentCount(): Promise<number> };
+  store: { intentsEmpty(): boolean; walletsRecorded(): number; reservationsEverMade(): number };
+  keystore: { agentCount(): Promise<number>; ledgerWatermark(): Promise<number | null> };
   /// `getCode` rather than the deployments file: the file records what was
   /// deployed ONCE, and the question is what is on the chain NOW. A file
   /// describing a chain that has since been reset is precisely the stale
@@ -668,6 +690,10 @@ export async function gatherLifetimeFacts(deps: {
     keystoreAgents: await deps.keystore.agentCount(),
     contractsDeployed: code !== undefined && code !== '0x',
     acknowledged: deps.acknowledged,
+    // FINDING 22: the two halves of the watermark comparison, gathered here
+    // with everything else so the control stays a pure function of facts.
+    reservations: deps.store.reservationsEverMade(),
+    watermark: await deps.keystore.ledgerWatermark(),
   };
 }
 
@@ -711,6 +737,76 @@ export class LedgerWipeError extends Error {
 /// loud-but-continuing failure is precisely what routed someone to
 /// the wipe, and a warning at startup is read by nobody. The legitimate reset
 /// is not obstructed - it IS the acknowledgement flag, one documented step.
+/// A STORE THAT WENT BACKWARDS IN TIME while the keys beside it did not.
+///
+/// This is the restore case, and it is invisible to every fact above: a backup
+/// restored onto a live game has wallets, has keys, has contracts, and has a
+/// non-empty intents table. Nothing in the wipe control fires, and the store
+/// quietly re-offers intent ids that have already paid.
+///
+/// The comparison is between volumes, because that is the only place the
+/// disagreement can exist. Restore both from one backup and they AGREE - which
+/// is correct, that is a consistent restore and it starts. Wipe both and they
+/// are both zero, which is the existing full-reset path. Restore the store
+/// alone, under the keystore it was taken from, and the store's counter is
+/// behind a mark the keystore still remembers.
+///
+/// Checked BEFORE the wipe control below rather than after: a restored store is
+/// a more specific diagnosis than an empty one, and an operator who is told the
+/// wrong one goes looking in the wrong place.
+export function assertLedgerNotRestored(facts: LifetimeFacts): void {
+  if (facts.acknowledged) return;
+
+  // THE KEYSTORE VANISHED UNDER A LIVE LEDGER - the same asymmetry as the wipe
+  // control, from the other side. A store that has reserved intents beside a
+  // keystore that has never recorded a mark means the keys were replaced while
+  // the ledger stayed, and every wallet this store remembers is now a wallet
+  // nobody holds a key for.
+  //
+  // A GENUINELY FRESH DEPLOYMENT HAS BOTH AT ZERO, which is why this is the one
+  // conjunct: `reservations > 0` is what separates a new keystore from a lost
+  // one, and the first boot after this ships has a counter of 0 whatever the
+  // store's age, so nobody is accused on a history that was never recorded.
+  if (facts.watermark === null) {
+    if (facts.reservations === 0) return;
+    throw new LedgerWipeError(
+      `refusing to start: this store has reserved ${facts.reservations} intent(s), and the ` +
+        `keystore beside it has no record of ever having seen this ledger. The KEYSTORE is the ` +
+        `volume that changed: a fresh one under a live store, or a keystore volume that did not ` +
+        `mount.\n` +
+        `\n` +
+        `Every wallet this store remembers is a wallet nobody now holds a key for - they cannot ` +
+        `sign, and their balances are unreachable. ${LEDGER_RESET_NOTICE}.\n` +
+        `\n` +
+        `${FREEZE_RECOVERY_ADVICE}.\n` +
+        `\n` +
+        `Find the keystore volume that belongs with this store. If you meant to end this game, ` +
+        `say so explicitly and start again with --acknowledge-ledger-reset (or ` +
+        `CHAIN_SVC_ACKNOWLEDGE_LEDGER_RESET=1).`,
+    );
+  }
+
+  if (facts.reservations >= facts.watermark) return;
+
+  throw new LedgerWipeError(
+    `refusing to start: this store has reserved ${facts.reservations} intent(s) in its whole ` +
+      `history, and the keystore beside it remembers a store that had reached ${facts.watermark}. ` +
+      `A counter that only ever goes up cannot fall, so this store is OLDER than the keys it is ` +
+      `being used with - a backup restored under a live game, or a store volume from a different ` +
+      `deployment.\n` +
+      `\n` +
+      `The wallets in that keystore still exist and still hold their balances, and ` +
+      `${LEDGER_RESET_NOTICE}. Every intent id consumed between this store's backup and now is ` +
+      `reservable again, and an id that has already paid can pay a second time.\n` +
+      `\n` +
+      `${FREEZE_RECOVERY_ADVICE}.\n` +
+      `\n` +
+      `If this is the store you meant to restore, the keystore beside it is the wrong one - find ` +
+      `the keystore from the same backup. If you meant to end this game, say so explicitly and ` +
+      `start again with --acknowledge-ledger-reset (or CHAIN_SVC_ACKNOWLEDGE_LEDGER_RESET=1).`,
+  );
+}
+
 export function assertLedgerLifetimeIntact(facts: LifetimeFacts): void {
   if (facts.acknowledged) {
     // FINDING 21: THE ACKNOWLEDGEMENT IS NOT A DISMISSAL, and it warns EVERY

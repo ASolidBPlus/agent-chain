@@ -1525,3 +1525,87 @@ describe('the read size bound', () => {
     ).toBe('bad_args');
   });
 });
+
+// THE over_stage_cap DETAIL NAMES THE LIMIT THAT ACTUALLY FIRED.
+//
+// Two different limits produce one outcome: the WALLET's per-stage spend bound
+// (its policy) and the ENTRY's per-stage call count (calls.json). They are
+// configured in different files by different people, so an operator told the
+// wrong one goes and edits the wrong file.
+//
+// The message used to key on `entry.maxPerStage !== undefined && !money`, so on
+// an entry carrying BOTH - which `convert` does, and which is the ordinary shape
+// for anything that moves money a bounded number of times - the count branch was
+// skipped and the reply reported the wallet's max_per_stage AMOUNT, a bound that
+// had not tripped.
+describe('over_stage_cap says which limit tripped', () => {
+  const capped = (agentId: string, maxPerStage: string) =>
+    writeFileSync(
+      join(POLICY_DIR, `${encodeURIComponent(agentId)}.json`),
+      JSON.stringify({ agentId, caps: { play: { max_per_tx: '1000', max_per_stage: maxPerStage } }, allow: ['*'], deny: [] }),
+    );
+
+  it('names the COUNT and the entry when the call count trips', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:counted', '0x000000000000000000000000000000000000cc01', 'agent');
+    // A stage amount high enough that only the COUNT can fire. Stated rather
+    // than left implicit: with both able to trip, this row would be asserting
+    // the tie-break instead of the branch it names.
+    capped('orch:counted', '1000000');
+    const { t } = await harness(undefined, { store });
+
+    // CONVERT carries maxPerStage: 2 AND an amount rule, which is the shape the
+    // finding is about.
+    await t.call(asWallet('orch:counted'), convertBody({ intentId: 'c-1' }));
+    await t.call(asWallet('orch:counted'), convertBody({ intentId: 'c-2' }));
+
+    let err: HttpError | undefined;
+    try { await t.call(asWallet('orch:counted'), convertBody({ intentId: 'c-3' })); } catch (e) { err = e as HttpError; }
+    expect(err?.code).toBe('over_stage_cap');
+    expect(err?.detail).toBe('convert on converter may be called 2 times per stage');
+    // AND NOT the other limit's words, because the defect was not "says
+    // nothing" - it was "says the other one, confidently".
+    expect(err?.detail).not.toMatch(/max_per_stage/);
+    store.close();
+  });
+
+  it('names the AMOUNT when the wallet stage bound trips', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:broke', '0x000000000000000000000000000000000000cc02', 'agent');
+    // Below one convert, so the FIRST call trips the amount and the count
+    // (limit 2) cannot have fired.
+    capped('orch:broke', '1');
+    const { t } = await harness(undefined, { store });
+
+    let err: HttpError | undefined;
+    try { await t.call(asWallet('orch:broke'), convertBody({ intentId: 'b-1' })); } catch (e) { err = e as HttpError; }
+    expect(err?.code).toBe('over_stage_cap');
+    expect(err?.detail).toMatch(/^max_per_stage is 1 for this stage$/);
+    store.close();
+  });
+
+  // WHEN BOTH WOULD TRIP, THE AMOUNT WINS - because `reserve` checks the stage
+  // spend before the entry count. Asserted rather than left to chance: a
+  // tie-break nobody wrote down is one that changes silently when the two
+  // checks are reordered, and the two limits are refused in the same breath.
+  //
+  // (The spec's parenthetical said the count is checked first. Measured here:
+  // it is not. `reserve` tests the stage amount at the top of the transaction
+  // and the entry count below it.)
+  it('reports the AMOUNT when both would trip, because that is the one checked first', async () => {
+    const store = new Store(':memory:');
+    store.markSpawned('orch:both', '0x000000000000000000000000000000000000cc03', 'agent');
+    capped('orch:both', '1');
+    const { t } = await harness(undefined, { store });
+
+    // Exhaust the count too, so both are genuinely over - each of these refuses
+    // on the amount, which is the point: the count never gets to increment.
+    for (const id of ['x-1', 'x-2', 'x-3']) {
+      await t.call(asWallet('orch:both'), convertBody({ intentId: id })).catch(() => undefined);
+    }
+    let err: HttpError | undefined;
+    try { await t.call(asWallet('orch:both'), convertBody({ intentId: 'x-4' })); } catch (e) { err = e as HttpError; }
+    expect(err?.detail).toMatch(/^max_per_stage is 1 for this stage$/);
+    store.close();
+  });
+});

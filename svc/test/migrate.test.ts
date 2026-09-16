@@ -24,6 +24,7 @@ import {
   ADDITIVE_COLUMNS,
   classifiedColumns,
   assertLedgerLifetimeIntact,
+  assertLedgerNotRestored,
   gatherLifetimeFacts,
   LedgerWipeError,
   LEDGER_RESET_NOTICE,
@@ -383,9 +384,16 @@ describe('the facts the control is given', () => {
 // the control is permanently off - the shape that left #34's sweep dormant
 // through a merge.
 describe('gathering the facts', () => {
-  const deps = (over: Partial<{ empty: boolean; wallets: number; agents: number; code: string | undefined; ack: boolean }> = {}) => ({
-    store: { intentsEmpty: () => over.empty ?? true, walletsRecorded: () => over.wallets ?? 0 },
-    keystore: { agentCount: async () => over.agents ?? 2 },
+  const deps = (over: Partial<{ empty: boolean; wallets: number; agents: number; code: string | undefined; ack: boolean; reservations: number; watermark: number }> = {}) => ({
+    store: {
+      intentsEmpty: () => over.empty ?? true,
+      walletsRecorded: () => over.wallets ?? 0,
+      reservationsEverMade: () => over.reservations ?? 0,
+    },
+    keystore: {
+      agentCount: async () => over.agents ?? 2,
+      ledgerWatermark: async () => ('watermark' in over ? over.watermark! : null),
+    },
     getCode: async () => ('code' in over ? over.code : '0x6080'),
     acknowledged: over.ack ?? false,
   });
@@ -393,7 +401,14 @@ describe('gathering the facts', () => {
   it('carries each fact from its own source', async () => {
     expect(await gatherLifetimeFacts(deps())).toEqual({
       intentsEmpty: true, storeWallets: 0, keystoreAgents: 2, contractsDeployed: true, acknowledged: false,
+      reservations: 0, watermark: null,
     });
+    // FINDING 22's two halves come from DIFFERENT SOURCES, which is the whole
+    // mechanism: the counter from the store, the mark from the keystore. A
+    // gatherer that read both from one of them would compare a value with
+    // itself and never fire.
+    expect((await gatherLifetimeFacts(deps({ reservations: 9 }))).reservations).toBe(9);
+    expect((await gatherLifetimeFacts(deps({ watermark: 12 }))).watermark).toBe(12);
     expect((await gatherLifetimeFacts(deps({ empty: false }))).intentsEmpty).toBe(false);
     expect((await gatherLifetimeFacts(deps({ wallets: 4 }))).storeWallets).toBe(4);
     expect((await gatherLifetimeFacts(deps({ agents: 7 }))).keystoreAgents).toBe(7);
@@ -534,7 +549,13 @@ describe('the ledger lifetime control', () => {
   // Empty store + keys in the keystore + contracts on the chain. Each conjunct
   // rules out one legitimate way to arrive at an empty store, which is why
   // this is a proof rather than a heuristic.
-  const wiped = { intentsEmpty: true, storeWallets: 0, keystoreAgents: 3, contractsDeployed: true, acknowledged: false };
+  // The watermark pair is at rest here (0 and 0): these rows are about the WIPE
+  // control, and finding 22's restore control has its own block below. Both at
+  // zero is the fresh-install shape, which is the state that must not fire it.
+  const wiped = {
+    intentsEmpty: true, storeWallets: 0, keystoreAgents: 3, contractsDeployed: true, acknowledged: false,
+    reservations: 0, watermark: 0,
+  };
 
   it('refuses a store wiped beneath a live game', () => {
     expect(() => assertLedgerLifetimeIntact(wiped)).toThrow(LedgerWipeError);
@@ -1024,4 +1045,112 @@ describe('two processes may open one store at once', () => {
       expect(userVersion(path)).toBe(SCHEMA_VERSION);
     }
   }, 120_000);
+});
+
+// FINDING 22: A STORE THAT WENT BACKWARDS IN TIME.
+//
+// Invisible to every fact the wipe control reads: a backup restored onto a live
+// game has wallets, keys, contracts and a non-empty intents table. Nothing
+// fires, and the store quietly re-offers intent ids that have already paid.
+//
+// The mechanism is a comparison BETWEEN VOLUMES, because that is the only place
+// the disagreement can exist. The spec's first form put the watermark inside the
+// store, which cannot work: restore the file and the watermark is restored with
+// it, and the two agree about a past that is no longer true.
+describe('the ledger restore control', () => {
+  const live = {
+    intentsEmpty: false, storeWallets: 3, keystoreAgents: 3, contractsDeployed: true,
+    acknowledged: false, reservations: 40, watermark: 40 as number | null,
+  };
+
+  it('starts when the store is at or ahead of the mark', () => {
+    // AHEAD IS NORMAL, not suspicious: the counter grows during a run and the
+    // mark is written at boot, so every healthy second boot has more
+    // reservations than the mark it was compared against.
+    expect(() => assertLedgerNotRestored({ ...live, reservations: 40, watermark: 40 })).not.toThrow();
+    expect(() => assertLedgerNotRestored({ ...live, reservations: 57, watermark: 40 })).not.toThrow();
+  });
+
+  it('refuses a store restored under the keystore it was taken from, by name', () => {
+    let err: unknown;
+    try { assertLedgerNotRestored({ ...live, reservations: 12, watermark: 40 }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(LedgerWipeError);
+    // BOTH NUMBERS IN THE MESSAGE. "Refuses" is not the requirement - an
+    // operator has to be able to tell which volume went backwards, and the pair
+    // is what says so.
+    expect((err as Error).message).toContain('12');
+    expect((err as Error).message).toContain('40');
+    expect((err as Error).message).toContain(LEDGER_RESET_NOTICE);
+  });
+
+  // THE OTHER SIDE OF THE SAME ASYMMETRY (the reviewer's edge): the KEYSTORE is
+  // the volume that changed. Every wallet the store remembers is then a wallet
+  // nobody holds a key for.
+  it('refuses a live ledger beside a keystore that has never seen it', () => {
+    let err: unknown;
+    try { assertLedgerNotRestored({ ...live, reservations: 40, watermark: null }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(LedgerWipeError);
+    expect((err as Error).message).toMatch(/keystore/i);
+  });
+
+  // ...AND A FRESH DEPLOYMENT HAS BOTH AT REST, which is the conjunct that
+  // keeps the row above from firing on every new installation. Without this the
+  // control would refuse the first boot of every deployment, which is the
+  // failure mode that gets a control deleted rather than fixed.
+  it('starts a fresh deployment, where the store has reserved nothing', () => {
+    expect(() => assertLedgerNotRestored({ ...live, reservations: 0, watermark: null })).not.toThrow();
+  });
+
+  it('the acknowledgement releases it, as it releases the wipe control', () => {
+    expect(() =>
+      assertLedgerNotRestored({ ...live, reservations: 12, watermark: 40, acknowledged: true }),
+    ).not.toThrow();
+  });
+});
+
+// THE COUNTER ITSELF, against a real store - because the control above is only
+// as good as the number it compares, and the whole reason this is a counter
+// rather than MAX(rowid) is that the obvious measure FALLS on an ordinary
+// release.
+describe('the reservation counter only goes up', () => {
+  const args = (intentId: string) => ({
+    intentId, agentId: 'orch:a', stage: 's1', amount: 10n,
+    stageCap: { cap: 10n ** 24n }, token: 'play',
+  }) as Parameters<Store['reserve']>[0];
+
+  it('counts every reservation', () => {
+    const s = new Store(':memory:');
+    expect(s.reservationsEverMade()).toBe(0);
+    s.reserve(args('a'));
+    s.reserve(args('b'));
+    expect(s.reservationsEverMade()).toBe(2);
+    s.close();
+  });
+
+  // THE ROW THE SPEC'S FIRST MECHANISM WOULD HAVE FAILED. `release` DELETEs the
+  // row, and sqlite reuses the top rowid when the highest row goes - so
+  // MAX(rowid) falls, and a control built on it refuses the next boot because a
+  // wallet released its most recent reservation.
+  it('does not fall when an intent is released', () => {
+    const s = new Store(':memory:');
+    s.reserve(args('a'));
+    s.reserve(args('b'));
+    s.release('orch:a', 'b');
+    expect(s.reservationsEverMade()).toBe(2);
+    // ...and the id is genuinely free again, so this is the ordinary path
+    // rather than a release that did nothing.
+    expect(s.reserve(args('b')).outcome).toBe('reserved');
+    expect(s.reservationsEverMade()).toBe(3);
+    s.close();
+  });
+
+  // A DUPLICATE IS NOT A RESERVATION. The counter measures what was TAKEN, and
+  // counting refused attempts would let a caller inflate the mark by retrying.
+  it('does not count a duplicate', () => {
+    const s = new Store(':memory:');
+    s.reserve(args('a'));
+    expect(s.reserve(args('a')).outcome).toBe('duplicate');
+    expect(s.reservationsEverMade()).toBe(1);
+    s.close();
+  });
 });

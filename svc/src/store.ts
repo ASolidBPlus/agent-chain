@@ -38,7 +38,16 @@ export interface MemoRecord {
 
 export type Reservation =
   | { outcome: 'reserved'; txHash: null }
-  | { outcome: 'over_stage_cap'; txHash: null }
+  /// WHICH LIMIT TRIPPED, because two different ones produce this outcome and
+  /// the caller's message has to name the one that fired.
+  ///
+  ///   'stage_amount'  the WALLET's per-stage spend bound, from its policy
+  ///   'entry_calls'   the ENTRY's per-stage call count, from calls.json
+  ///
+  /// They are not interchangeable to an operator: one is money the wallet may
+  /// move, the other is how many times a function may be invoked, and they are
+  /// configured in different files by different people.
+  | { outcome: 'over_stage_cap'; txHash: null; limit: 'stage_amount' | 'entry_calls' }
   | { outcome: 'duplicate'; txHash: string | null };
 
 import { migrate } from './migrate.ts';
@@ -293,6 +302,28 @@ export class Store {
         next_attempt_at INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL
       );
+      -- ONE ROW, AND A NUMBER THAT ONLY EVER GOES UP (finding 22).
+      --
+      -- reservations counts every intent this store has ever RESERVED. Not how
+      -- many exist: release deletes rows, and a count of what is present goes
+      -- DOWN in the ordinary course of business. This is the fact a restored
+      -- backup cannot fake, and the reason it is a counter rather than
+      -- MAX(rowid) - sqlite reuses the top rowid when the highest row is
+      -- deleted, so the obvious measure falls when a wallet merely releases its
+      -- most recent reservation.
+      --
+      -- (No backticks in this block: it is inside a JS template literal, and a
+      -- backtick in a SQL comment ends the string. Cost me the same five
+      -- minutes in the v8 migration.)
+      --
+      -- The CHECK pins it to one row: a second row would make "the counter" a
+      -- question with two answers, and the comparison at boot reads it as a
+      -- scalar.
+      CREATE TABLE IF NOT EXISTS ledger_facts (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        reservations INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO ledger_facts (id, reservations) VALUES (1, 0);
     `), () => this.db.exec(`
       CREATE INDEX IF NOT EXISTS intents_topic ON intents (topic);
     `));
@@ -317,6 +348,23 @@ export class Store {
   /// boot found anything. `spawns` is written only by a spawn request.
   walletsRecorded(): number {
     return (this.db.query(`SELECT COUNT(*) AS n FROM spawns`).get() as { n: number }).n;
+  }
+
+  /// EVERY INTENT THIS STORE HAS EVER RESERVED, monotonically (finding 22).
+  ///
+  /// Never how many exist. `release` deletes rows and this number does not
+  /// move, which is what makes it comparable against a copy kept OUTSIDE the
+  /// store: if the file goes back in time and the copy does not, the two
+  /// disagree, and nothing an operator does in the normal course of a game can
+  /// produce that disagreement.
+  reservationsEverMade(): number {
+    const row = this.db.query(`SELECT reservations FROM ledger_facts WHERE id = 1`).get() as
+      | { reservations: number }
+      | null;
+    // A store older than this table reads as zero rather than throwing: the
+    // guard starts protecting from the first boot that has it, which is the
+    // honest answer for a history it never recorded.
+    return row?.reservations ?? 0;
   }
 
   close(): void {
@@ -662,7 +710,7 @@ export class Store {
       // same stale figure the check-then-act acted on.
       const current = this.spentThisStage(agentId, stage, token);
       if (bound !== null && current + amount > bound) {
-        return { outcome: 'over_stage_cap', txHash: null };
+        return { outcome: 'over_stage_cap', txHash: null, limit: 'stage_amount' };
       }
 
       // The per-entry limit, read inside the same transaction and for the same
@@ -675,7 +723,7 @@ export class Store {
         ? this.callCount(agentId, stage, call!.contract, call!.function)
         : 0;
       if (counted && usedThisStage + 1 > call!.maxPerStage!) {
-        return { outcome: 'over_stage_cap', txHash: null };
+        return { outcome: 'over_stage_cap', txHash: null, limit: 'entry_calls' };
       }
 
       this.db
@@ -703,6 +751,15 @@ export class Store {
           token,
           Date.now(),
         );
+      // FINDING 22. THE COUNTER GOES UP HERE AND NOWHERE ELSE, inside the same
+      // transaction as the reservation - so it cannot record a reservation that
+      // did not happen, and a reservation cannot happen without it.
+      //
+      // `release` does NOT decrement it. That is the whole point: a count of
+      // live rows falls in the ordinary course of business, and a measure that
+      // falls legitimately cannot distinguish "this store went backwards in
+      // time" from "somebody released an intent".
+      this.db.query(`UPDATE ledger_facts SET reservations = reservations + 1 WHERE id = 1`).run();
       if (counted) {
         this.db
           .query(

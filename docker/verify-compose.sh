@@ -62,10 +62,30 @@ check() {
     - $1: got '$2' want '$3'"
   fi
 }
-cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
+# FINDING 29's CLASS, one file over. This script needs a cold start, and a cold
+# start needs no local.json - but the file it was deleting is the DEVELOPER'S,
+# recording whatever they had deployed. verify-chain.sh stages into a mktemp dir
+# and touches nothing; this one cannot, because the manifest reaches the
+# containers through a bind mount that compose.chain.yml declares.
+#
+# So: MOVED ASIDE AND PUT BACK, rather than deleted or guarded behind a flag. A
+# force flag would make the ordinary invocation the one that needs remembering,
+# and the destruction it gates is not something anybody wants even once.
+#
+# Restored in `cleanup`, which runs on the EXIT trap - so it comes back whether
+# the script passes, fails, or is interrupted. `cleanup` runs once before the
+# stack comes up too, and the guard is what makes that call harmless.
+STASHED="$HERE/deployments/local.json.verify-stash"
+restore_manifest() {
+  [ -f "$STASHED" ] && mv "$STASHED" "$HERE/deployments/local.json"
+}
+cleanup() {
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  restore_manifest
+}
 trap cleanup EXIT
-cleanup
-rm -f "$HERE/deployments/local.json"
+"${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+[ -f "$HERE/deployments/local.json" ] && mv "$HERE/deployments/local.json" "$STASHED"
 
 A=(-H "Authorization: Bearer $CHAIN_SVC_TOKEN")
 
