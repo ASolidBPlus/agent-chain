@@ -708,6 +708,14 @@ export class Store {
 
       // Re-read INSIDE the transaction: a value read before it began is the
       // same stale figure the check-then-act acted on.
+      //
+      // THIS IS WHERE THE TIE-BREAK IS DECIDED. Two limits produce
+      // `over_stage_cap` - this stage AMOUNT and the per-entry call COUNT below
+      // - and when both would trip, the caller reports whichever is tested
+      // first. That is this one. `Treasury.call` names the limit from
+      // `reservation.limit`, so reordering these two checks silently changes
+      // what an operator is told to go and edit; a test asserts the amount wins
+      // and says it is asserting the order rather than a preference.
       const current = this.spentThisStage(agentId, stage, token);
       if (bound !== null && current + amount > bound) {
         return { outcome: 'over_stage_cap', txHash: null, limit: 'stage_amount' };
