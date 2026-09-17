@@ -5,7 +5,13 @@ names or contracts for agents to test against, inside a private environment
 with nothing reaching a public network. One `docker compose` profile brings up:
 
 - **`chain`** — a single-node [Anvil](https://github.com/foundry-rs/foundry) node
-  (chain id 31337), loopback only, zero gas, state persisted to a volume.
+  (chain id 31337), zero gas, state persisted to a volume. It publishes **no host
+  port at all**; everything from outside reaches it through `front`.
+- **`front`** — the whole published surface: a small nginx that serves the block
+  explorer, answers JSON-RPC on an allowlist, and renders a plain server-side
+  overview of recent blocks and registered names. Admin namespaces (`anvil_*`,
+  `evm_*`, `debug_*`) are refused, so a reachable RPC is not a reachable admin
+  console.
 - **`chain-deploy`** — a one-shot Foundry script that deploys the contracts and
   writes their addresses to `deployments/local.json`.
 - **`chain-svc`** — the only process that holds keys. It custodies one key per
@@ -189,7 +195,8 @@ generated into `svc/src/abi.ts` and drift-checked in CI.
 contracts/          Foundry project: src/, script/Deploy.s.sol, test/, mutation/
 deployments/        manifest.json (what to deploy) and local.json (what was), both
                     for THIS deployment and gitignored; examples/ ships four manifests
-docker/             the Anvil image and verification scripts
+docker/             the Anvil image and verification scripts; front/ is the
+                    published nginx (config, two njs modules, their unit tests)
 svc/                chain-svc (bun, HTTP on 127.0.0.1:7000)
 wallet-mcp/         the MCP server (bun, stdio)
 compose.chain.yml   the `chain` profile
@@ -203,6 +210,21 @@ bun install
 cp deployments/examples/token-and-names.json deployments/manifest.json   # a manifest is required
 docker compose -f compose.chain.yml --profile chain up --build
 ```
+
+Two ports are published, both on loopback: **`127.0.0.1:5100`** for the explorer
+(`/overview` is the dependency-free summary page) and **`127.0.0.1:8545`** for
+the filtered JSON-RPC. The node and the explorer publish nothing themselves.
+
+Where the front points and where it listens are values, not literals, so a
+deployment that cannot resolve service names or choose its own ports can set
+`NODE_UPSTREAM`, `OTTERSCAN_UPSTREAM`, `FRONT_HTTP_PORT` and `FRONT_RPC_PORT`
+without keeping a copy of the config. The explorer needs an *absolute* RPC
+address, which is a fact about how the deployment is reached — something the
+container cannot know, since it sees only the hop that arrived. It is therefore
+derived from the request host and `X-Forwarded-Proto`, which is the best guess
+available and no more than a guess: set **`ERIGON_URL`** wherever something
+rewrites the Host header. No real address would make a good default, because it
+would be wrong for everyone else.
 
 Compose reads three secrets from a `.env` in this directory (or from the
 environment): `ANVIL_MNEMONIC` (a BIP-39 phrase), `CHAIN_SVC_TOKEN` (the
@@ -228,9 +250,14 @@ taught us), so a release is not done until a consumer has built it.
 Keys never leave `chain-svc`. Agents authenticate to it with a per-wallet token
 and can act only on their own wallet, within caps the operator sets; the
 operator's platform token can mint, fund, spawn, freeze and read anything, and is
-held by nothing an agent can reach. The RPC is bound to loopback because it is
-unauthenticated. The chain is play money by construction: private, zero-fee, and
-refusing to start against anything that is not a private chain.
+held by nothing an agent can reach. The published RPC is unauthenticated and
+therefore read-only: it is served by `front`, which forwards an allowlist and
+refuses the admin namespaces that could mint balances, mine blocks or rewrite
+state. **Administrative access to the chain now means access to the Docker host**
+— the node's own unrestricted RPC exists only on the container network, so
+whoever can run `docker compose exec` has it and nobody else does. The chain is
+play money by construction: private, zero-fee, and refusing to start against
+anything that is not a private chain.
 
 ## Status
 

@@ -26,18 +26,34 @@ STATE_FILE="${ANVIL_STATE_FILE:-/state/anvil.json}"
 # FINDING 9: ONE ORIGIN, NOT ALL OF THEM.
 #
 # anvil's default is `--allow-origin *`, which sets
-# `Access-Control-Allow-Origin: *` on the JSON-RPC endpoint - so ANY page the
-# facilitator's browser loads can make RPC calls to this node. The node is bound
-# to 127.0.0.1 by compose, and that is exactly the reach a browser has: a
-# same-machine origin is not a barrier to it. On a chain where the treasury key
-# signs, "any web page may call eth_sendTransaction" is worth one flag.
+# `Access-Control-Allow-Origin: *` on the JSON-RPC endpoint - so ANY page an
+# operator's browser loads could make RPC calls to this node. When this was
+# written the node was bound to 127.0.0.1 by compose, and that is exactly the
+# reach a browser has: a same-machine origin is not a barrier to it. On a chain
+# where the treasury key signs, "any web page may call eth_sendTransaction" is
+# worth one flag.
 #
-# THE VALUE IS MEASURED, not chosen: Otterscan is the one browser client, and
-# compose publishes it at `127.0.0.1:5100:80` - so `http://127.0.0.1:5100` is
-# the origin its pages actually carry. Overridable, because a deployment that
-# serves it elsewhere needs to say so, and a wrong value here fails visibly (the
-# block explorer stops loading) rather than silently.
-ALLOW_ORIGIN="${ANVIL_ALLOW_ORIGIN:-http://127.0.0.1:5100}"
+# NO LONGER LOAD-BEARING, AND KEPT ANYWAY. This node has no host binding as of
+# the front service: nothing outside the container network can reach it, so no
+# browser can send it a cross-origin request and this header decides nothing.
+# The flag stays as defence in depth, for the deployment that republishes the
+# port against advice.
+#
+# THE DEFAULT NAMES AN ORIGIN THAT CANNOT EXIST. `.invalid` is reserved by
+# RFC 2606 and never resolves, so no page can ever carry this origin and the
+# header can never match one.
+#
+# DELIBERATELY NOT THE FRONT'S ORIGIN, which is the trap this default exists to
+# avoid: pointing it at the front would re-arm browser access to the node the
+# moment anyone republished the port, and the front's whole purpose is that
+# requests arrive THROUGH it. A deployment that has been setting this to an
+# explorer origin should stop - the explorer now calls the front, same-origin,
+# and needs nothing from this flag.
+#
+# It was `http://127.0.0.1:5100` - the explorer's published origin, measured at
+# v0.9.0 when the explorer was published and the node was on loopback beside it.
+# Both halves of that arrangement are gone.
+ALLOW_ORIGIN="${ANVIL_ALLOW_ORIGIN:-https://node-rpc.invalid}"
 
 # --state both LOADS the file when it exists and DUMPS to it, so there is no
 # separate --load-state branch to write; a cold start with no file just begins

@@ -1,0 +1,186 @@
+# The front for every published port. The node has NO host binding at all, so
+# every request from outside arrives here first.
+#
+# THIS IS A TEMPLATE, rendered by entrypoint.sh at container start. Exactly five
+# names are substituted and nothing else is:
+#
+#   NODE_UPSTREAM       where the node is            http://chain:8545
+#   OTTERSCAN_UPSTREAM  where the explorer is        http://otterscan:80
+#   FRONT_HTTP_PORT     the port the explorer is on  80
+#   FRONT_RPC_PORT      the port the RPC is on       8545
+#   ERIGON_URL          what config.json advertises  derived from the request
+#
+# They are values rather than literals because a deployment that runs every
+# service in ONE network namespace has no `chain` to resolve and no free choice
+# of port: it points the front at 127.0.0.1 and binds where it can. The defaults
+# are exactly what was hard-coded before, so a compose deployment sees no
+# change, and a consumer needs no copy of this file to move either one.
+#
+# `listen` cannot read the environment and neither can a `return` body, which is
+# why this is templated rather than done with `env` and njs. envsubst is given
+# an EXPLICIT variable list; without it, it would also eat `$http_host`,
+# `$scheme`, `$request_uri`, `$node` and `$otterscan`, which are nginx's and
+# must reach nginx unexpanded.
+#
+# That is stronger than it sounds and it is the point of this service. A
+# loopback binding on the node would still be reachable by any browser running
+# on the host, which is the same reach this front exists to mediate - so a
+# filter sitting beside a published node port is decorative. `chain` and
+# `otterscan` are on the container network only; this file is the whole of the
+# published surface.
+load_module modules/ngx_http_js_module.so;
+
+# WARN, not the default `error`, because the refusal line in rpc_filter.js is
+# logged at warn - and a log level that swallows the instrument makes the
+# instrument decorative. This is how an operator learns that the allowlist and
+# the client in front of it disagree, and it is how the allowlist for a new
+# client is measured in the first place. Method names only; see the filter.
+error_log /dev/stderr warn;
+
+env RPC_ALLOW_ORIGIN;
+env RPC_ALLOWED_METHODS;
+env OVERVIEW_BLOCKS;
+env OVERVIEW_POLL_SECONDS;
+
+events {
+    worker_connections 256;
+}
+
+http {
+    access_log off;
+    resolver 127.0.0.11 ipv6=off valid=10s;
+
+    js_path "/etc/nginx/njs/";
+
+    # THE SCHEME COMES FROM THE PROXY WHEN THERE IS ONE. Behind a gateway that
+    # terminates TLS, `$scheme` is http - the scheme of the hop between the
+    # gateway and here - so advertising it would put an http RPC address on an
+    # https page, which browsers block outright. The symptom is the explorer
+    # loading and then sitting there failing to read anything, which is the
+    # exact failure this service exists to remove.
+    map $http_x_forwarded_proto $fwd_scheme {
+        default $http_x_forwarded_proto;
+        ''      $scheme;
+    }
+
+    # NJS BUFFERS A SUBREQUEST RESPONSE IN ONE BUFFER, and the default is a
+    # single 4k page. Exceeding it is not a soft failure: nginx logs
+    # "too big subrequest response" and drops the connection, so the page does
+    # not degrade, it disappears. There is no way to catch that from njs.
+    #
+    # MEASURED on a real deployment, per item of each thing that grows:
+    #   an eth_getBlockByNumber reply  ~2.0 kB  (+ ~68 B per transaction hash)
+    #   a Registered log                765 B
+    #   an eth_call resolve reply       102 B
+    #
+    # The largest batch is OVERVIEW_BLOCKS blocks plus every Registered log ever
+    # emitted, so at the default of 10 blocks this holds roughly 1,300 names, or
+    # a chain whose last ten blocks carry some 14,000 transactions between them.
+    # Far above anything this is for, and deliberately so, because the failure
+    # is abrupt.
+    #
+    # This was found by running it: at 4k the page worked on a two-block chain
+    # and died on a three-block one, and every unit test stayed green because
+    # they exercise the pure functions and never the subrequest.
+    subrequest_output_buffer_size 1m;
+
+    # TWO MODULES, AND WHICH LOCATIONS MAY USE WHICH IS THE POINT.
+    #
+    # `rpcfilter.handle` reads a method name and parameters off the request and
+    # forwards them - correct for an RPC endpoint, and forbidden for the
+    # overview pages, which must never let a caller choose either. `overview`
+    # constructs every call it makes and cannot import `handle`, so the
+    # constraint holds because the wrong function is not reachable rather than
+    # because someone remembered it. These two lines are the map: /rpc and
+    # :8545/ use the filter, /overview* uses the overview module, and nothing
+    # uses both.
+    js_import rpcfilter from rpc_filter.js;
+    js_import overview from overview.js;
+
+    # The explorer, served with its RPC on the same origin.
+    server {
+        listen ${FRONT_HTTP_PORT};
+        client_max_body_size 2m;
+        client_body_buffer_size 2m;
+
+        # Rewritten per request so the RPC the browser calls is always the
+        # origin it loaded the page from, including through an ssh forward.
+        location = /config.json {
+            default_type application/json;
+            # ABSOLUTE, AND THAT IS MEASURED RATHER THAN PREFERRED. A relative
+            # "/rpc" would survive a gateway that rewrites Host as well as an ssh
+            # forward, so it was tried first: with a relative value the bundle
+            # made NO request at all, while the identical run with an absolute
+            # one produced the two refusals in the log. The explorer's provider
+            # does not accept a relative URL, so the absolute form stays - and
+            # ERIGON_URL is the way out for a deployment behind something that
+            # rewrites Host, which is the one case the derived value cannot
+            # survive.
+            return 200 '{"erigonURL":"${ERIGON_URL}","beaconAPI":"","assetsURLPrefix":"","experimental":""}';
+        }
+
+        location = /rpc {
+            js_content rpcfilter.handle;
+        }
+
+        # EXACT-MATCH for the two that can be, so neither can shadow an
+        # explorer route; the third cannot be exact because it carries a name,
+        # so it is an anchored regex rooted under /overview/ - which keeps the
+        # property that mattered (nothing outside /overview is reachable
+        # through it) even though the wording "exact match" does not fit.
+        location = /overview {
+            js_content overview.page;
+        }
+
+        # The page's own feed. Fixed shape, nothing from the request.
+        location = /overview/state.json {
+            js_content overview.stateJson;
+        }
+
+        location = /overview/names.json {
+            js_content overview.namesJson;
+        }
+
+        location ~ ^/overview/names/.+$ {
+            js_content overview.nameRedirect;
+        }
+
+        # Through a variable so the name is resolved per request: a literal
+        # upstream is resolved at startup and nginx refuses to start without it.
+        location / {
+            set $otterscan "${OTTERSCAN_UPSTREAM}";
+            proxy_pass $otterscan$request_uri;
+            proxy_set_header Host $host;
+        }
+
+        # Only the filter and the overview reach this, and only with calls they
+        # constructed or allowed. Duplicated in the second server block on
+        # purpose: `r.subrequest()` resolves within the CURRENT server, so one
+        # shared location does not work.
+        location /__node {
+            internal;
+            set $node "${NODE_UPSTREAM}";
+            proxy_pass $node/;
+            proxy_set_header Content-Type "application/json";
+        }
+    }
+
+    # The published RPC.
+    server {
+        listen ${FRONT_RPC_PORT};
+        client_max_body_size 2m;
+        client_body_buffer_size 2m;
+
+        location / {
+            js_content rpcfilter.handle;
+        }
+
+        # Only the filter reaches this, and only with the calls it allowed.
+        location /__node {
+            internal;
+            set $node "${NODE_UPSTREAM}";
+            proxy_pass $node/;
+            proxy_set_header Content-Type "application/json";
+        }
+    }
+}

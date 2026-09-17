@@ -119,20 +119,30 @@ check "supply unchanged" "$AFTER" "$BEFORE"
 step "otterscan (both halves - a served page that cannot reach the chain must not pass)"
 OTS_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5100/)
 check "frontend served" "$OTS_CODE" "200"
-# The page fetches config.json and then dials the RPC from the BROWSER, so the
-# published port is what has to answer - curling the frontend proves nothing
+# The page fetches config.json and then dials the RPC from the BROWSER, so what
+# that file NAMES is what has to answer - curling the frontend proves nothing
 # about that.
 CONFIG=$(curl -fsS http://127.0.0.1:5100/config.json)
 echo "  config.json -> $CONFIG"
 # Parsed as JSON, not by pattern: the entrypoint writes it with jq, which
 # spaces its output, and a sed pattern that assumed otherwise reported an
 # empty value as a mismatch rather than as a broken matcher.
-check "erigonURL is the published port" "$(echo "$CONFIG" | python3 -c "import sys,json;print(json.load(sys.stdin)['erigonURL'])")" "http://127.0.0.1:8545"
+ERIGON=$(echo "$CONFIG" | python3 -c "import sys,json;print(json.load(sys.stdin)['erigonURL'])")
+# SAME ORIGIN AS THE PAGE, which is the change the `front` service made: the
+# node publishes no host port at all now, and the explorer's RPC is a path
+# beside it rather than a second published port. This check asserted
+# `http://127.0.0.1:8545` and went red on exactly that, which is the red it
+# should have produced.
+check "erigonURL is the page's own origin" "$ERIGON" "http://127.0.0.1:5100/rpc"
+# DIALLED AT THE ADDRESS config.json GAVE, not at a port written here. The
+# browser has no other source, so a check against a literal is a check on
+# something the browser does not do - and that is how the assertion above came
+# to outlive the topology it described.
 OTS_LEVEL=$(curl -s -X POST -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"ots_getApiLevel","params":[]}' http://127.0.0.1:8545 \
+  --data '{"jsonrpc":"2.0","id":1,"method":"ots_getApiLevel","params":[]}' "$ERIGON" \
   | sed -n 's/.*"result":\([0-9]*\).*/\1/p')
-echo "  ots_getApiLevel on the published RPC -> $OTS_LEVEL"
-[ -n "$OTS_LEVEL" ] && echo "  ok   the browser's RPC target answers the ots_* namespace" \
+echo "  ots_getApiLevel at the advertised RPC ($ERIGON) -> $OTS_LEVEL"
+[ -n "$OTS_LEVEL" ] && echo "  ok   the browser's RPC target answers the ots_* namespace through the filter" \
   || { echo "  FAIL ots_getApiLevel did not answer"; FAIL=1; }
 
 step "the unauthenticated route exposes liveness and nothing else"

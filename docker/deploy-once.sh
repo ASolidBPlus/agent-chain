@@ -145,6 +145,21 @@ fi
 # had nothing to write, which is not an error.
 if [ -f "$PENDING" ]; then
   mv "$PENDING" "$LOCAL"
+  # AN EXPLICIT MODE, BECAUSE THE UMASK ABOVE IS NOT ABOUT THIS FILE.
+  #
+  # `umask 077` is set for the mnemonic file - the one real secret this script
+  # touches - but a umask is process-wide, so `forge` inherited it and wrote the
+  # manifest 0600 owned by the deploying uid. Nothing noticed while the only
+  # reader ran as root with capabilities. The front does not: it drops
+  # CAP_DAC_OVERRIDE and serves as `nginx`, so the manifest was unreadable and
+  # its overview reported "this deployment has no name registry" about a
+  # registry that was deployed and working.
+  #
+  # The manifest holds deployed contract ADDRESSES, which anyone who can reach
+  # the chain can read off it - there is nothing here to withhold, and the 0600
+  # was collateral rather than a decision. Set deliberately so the next reader
+  # does not have to rediscover this.
+  chmod 0644 "$LOCAL"
   echo "deploy: promoted $PENDING to $LOCAL"
 else
   echo "deploy: nothing to promote; $LOCAL is up to date"
