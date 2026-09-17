@@ -111,21 +111,54 @@ eq('a 32-byte name needs no padding word',
 console.log('\n=== the method allowlist');
 
 // `permitted` closes over the env read at module load, so these exercise the
-// matcher through its own default set: eth_*, net_version, web3_clientVersion.
-eq('an eth_ method is allowed', filter.permitted('eth_call'), true);
+// matcher through its own default set: named reads plus the ots_ prefix.
+eq('a read method is allowed', filter.permitted('eth_call'), true);
 eq('an exact entry is allowed', filter.permitted('net_version'), true);
 eq('an admin method is refused', filter.permitted('anvil_setBalance'), false);
-eq('a near-miss prefix is refused', filter.permitted('ethx_call'), false);
+eq('a near-miss prefix is refused', filter.permitted('otsx_getApiLevel'), false);
 eq('a non-string method is refused', filter.permitted(undefined), false);
 eq('a method that merely CONTAINS an allowed prefix is refused',
-   filter.permitted('evil_eth_call'), false);
+   filter.permitted('evil_ots_getApiLevel'), false);
+eq('eth_ is NOT a prefix in the default set', filter.permitted('eth_somethingNew'), false);
 
 // The parse, rather than the matcher: a trailing star is a prefix, anything
 // else is exact, and whitespace and empty entries are tolerated.
 var parsed = filter.allowList();
-eq('the default parses to one prefix and two exact entries',
-   [parsed.prefixes.length, Object.keys(parsed.exact).sort()],
-   [1, ['net_version', 'web3_clientVersion']]);
+eq('the default parses to one prefix and the rest exact',
+   [parsed.prefixes, parsed.passThrough],
+   [['ots_'], false]);
+eq('whitespace and empty entries are tolerated',
+   Object.keys(filter.allowList(' net_version , , web3_clientVersion ').exact).sort(),
+   ['net_version', 'web3_clientVersion']);
+
+// ------------------------------------------------------------------ the floor
+//
+// THE PROPERTY THAT MATTERS is not that the default refuses these - it does not
+// list them, so that would pass with no floor at all. It is that an allowlist
+// WIDE ENOUGH TO ADMIT THEM still cannot reach them. `eth_*` is the exact value
+// that shipped, and the reason the floor exists.
+console.log('\n=== the signing floor holds under a wider allowlist');
+
+var SIGNING = ['eth_sendTransaction', 'eth_sendUnsignedTransaction',
+               'eth_sendRawTransaction', 'eth_sign', 'eth_signTransaction',
+               'eth_signTypedData', 'eth_signTypedData_v3', 'eth_signTypedData_v4'];
+
+var wide = filter.allowList('eth_*,net_version');
+for (var si = 0; si < SIGNING.length; si++) {
+    eq(SIGNING[si] + ' is refused even under eth_*',
+       filter.permitted(SIGNING[si], wide), false);
+}
+eq('...while a read under the same wide list is still allowed',
+   filter.permitted('eth_getBalance', wide), true);
+
+// A bare `*` is a deployment asking for an admin RPC on purpose, and the floor
+// must get out of its way or that deployment gets a node that cannot transact.
+var through = filter.allowList('*');
+eq('pass-through is recognised', through.passThrough, true);
+eq('the floor does not apply under pass-through',
+   filter.permitted('eth_sendUnsignedTransaction', through), true);
+eq('and pass-through still admits the admin namespace',
+   filter.permitted('anvil_setBalance', through), true);
 
 // ------------------------------------------------ batch reply placement
 

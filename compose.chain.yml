@@ -248,21 +248,32 @@ services:
       # A comma list; a trailing `*` is a prefix and `*` alone is pass-through,
       # so filtered and unfiltered are the same code path rather than two.
       #
-      # The entries past the default are what the EXPLORER needs, and they are
-      # measured rather than read off its source: docker/verify-front.sh drives
-      # a real browser over the landing, block, block-txs, transaction and
-      # address pages with the default set in place and reports what the filter
-      # refused. That set is exactly two - `ots_getApiLevel` and
-      # `erigon_getHeaderByNumber` - and re-running with the value below leaves
-      # the log silent.
+      # NOT `eth_*`. That prefix was here until it was measured: the eth_ namespace
+      # on anvil is not a read namespace. It carries `eth_sendTransaction`,
+      # `eth_sign`, `eth_signTransaction`, three `eth_signTypedData` variants,
+      # `eth_sendRawTransaction` and `eth_sendUnsignedTransaction`, and this node
+      # holds the treasury key unlocked - so the published RPC looked filtered and
+      # was an unauthenticated console onto the treasury. Measured on the pinned
+      # image: `eth_sendUnsignedTransaction` moved treasury funds with no signature
+      # and from an address the node never held a key for, and because anvil runs
+      # here with `--gas-price 0 --base-fee 0`, `eth_sendRawTransaction` alone let
+      # an unfunded stranger deploy a contract. Both while `anvil_setBalance`
+      # returned -32601 throughout, which is what made it look filtered.
       #
-      # `ots_*` stays a PREFIX rather than the one method the measurement named:
-      # the pages driven are the ones that exist today, and the whole namespace
-      # is read-only and anvil-implemented, so the prefix costs nothing and a
-      # page nobody drove does not become a support question. An earlier version
-      # of this comment claimed the explorer calls "eleven other ots_ methods" -
-      # that number came from reading, and the browser disagrees with it.
-      RPC_ALLOWED_METHODS: "${RPC_ALLOWED_METHODS:-eth_*,net_version,web3_clientVersion,ots_*,erigon_getHeaderByNumber}"
+      # The entries are what the EXPLORER needs, measured rather than read off its
+      # source: docker/verify-front.sh drives a real browser over the landing,
+      # block, block-txs, transaction and address pages and reports what the filter
+      # refused. Reading the explorer's bundle instead gives a list that includes
+      # `eth_sendTransaction` and `eth_sign`, because the bundle carries a whole
+      # ethers provider; the browser is the only thing that says which are called.
+      #
+      # `ots_*` stays a PREFIX: the whole namespace is read-only and
+      # anvil-implemented, so the prefix costs nothing and a page nobody drove does
+      # not become a support question. (`ots2_*` is NOT covered by it and is not
+      # implemented by this anvil either, so those pages degrade with or without.)
+      # The filter refuses the eight signing and submitting methods underneath any
+      # allowlist anyway, unless the value is a bare `*`.
+      RPC_ALLOWED_METHODS: "${RPC_ALLOWED_METHODS:-net_version,web3_clientVersion,ots_*,erigon_getHeaderByNumber,eth_chainId,eth_blockNumber,eth_getBalance,eth_getCode,eth_getStorageAt,eth_getTransactionCount,eth_getBlockByNumber,eth_getBlockByHash,eth_getBlockReceipts,eth_getBlockTransactionCountByNumber,eth_getBlockTransactionCountByHash,eth_getTransactionByHash,eth_getTransactionByBlockNumberAndIndex,eth_getTransactionByBlockHashAndIndex,eth_getTransactionReceipt,eth_getLogs,eth_call,eth_estimateGas,eth_gasPrice,eth_maxPriorityFeePerGas,eth_feeHistory,eth_blobBaseFee,eth_syncing,eth_getProof,eth_createAccessList}"
       RPC_ALLOW_ORIGIN: "${RPC_ALLOW_ORIGIN:-*}"
       OVERVIEW_BLOCKS: "${OVERVIEW_BLOCKS:-10}"
       # 0 disables the page's inline poll entirely - markup with nothing to run,
