@@ -50,6 +50,20 @@ http {
     access_log off;
     resolver 127.0.0.11 ipv6=off valid=10s;
 
+    # RELATIVE REDIRECTS, because this server does not know how it is reached.
+    #
+    # With this on (nginx's default) a redirect to "/address/0x..." is rewritten
+    # into an absolute URL built from the LISTENING port - measured:
+    # `http://127.0.0.1/address/0x...` for a browser that is on :5100, because
+    # inside the container this server listens on 80. Same failure as advertising
+    # an RPC address the container guessed: the port, the host and the scheme are
+    # facts about the hop the request arrived on, not about the client.
+    #
+    # A relative Location is resolved by the browser against the URL it already
+    # has, so it is correct through a published port, an ssh forward and a
+    # gateway alike, with nothing to configure.
+    absolute_redirect off;
+
     js_path "/etc/nginx/njs/";
 
     # THE SCHEME COMES FROM THE PROXY WHEN THERE IS ONE. Behind a gateway that

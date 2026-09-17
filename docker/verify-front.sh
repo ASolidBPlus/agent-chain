@@ -233,6 +233,29 @@ case "$PAGE" in
   *) bad "the page has no table in its markup" ;;
 esac
 
+step "a name redirects with EXACTLY ONE Location header"
+# THE ROUTE THIS STEP EXISTS FOR HAD NO TEST AT ALL, which is how it shipped
+# emitting two Location headers - the one njs set on headersOut and the empty
+# one nginx adds for a redirect status. A browser refuses that outright
+# ("Corrupted Content Error"); curl follows it and reports success. So the
+# assertion is on the COUNT, not on where the redirect lands: `curl -L` ending
+# at the right page is exactly what the broken version also did.
+HDRS=$(curl -s -D- -o /dev/null "$WEB/overview/names/treasury.play")
+echo "  $(echo "$HDRS" | head -1)"
+echo "$HDRS" | grep -i '^location:' | sed 's/^/    /'
+check "exactly one Location header" "$(echo "$HDRS" | grep -ci '^location:')" "1"
+check "the status is 302" "$(echo "$HDRS" | sed -n '1s/.* \([0-9]*\) .*/\1/p')" "302"
+# ...and it points at the address the registry actually resolves, read back
+# through the filter rather than written here.
+TREASURY=$(post "$RPC" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$(python3 -c "
+import json;m=json.load(open('$HERE/deployments/local.json'))['modules']
+print([x for x in m if x['kind']=='names'][0]['address'])")\",\"data\":\"0x461a4478$(printf '%064x' 32)$(printf '%064x' 13)$(python3 -c "print('74726561737572792e706c6179'.ljust(64,'0'))")\"},\"latest\"]}"   | jqp "print('0x' + d['result'][-40:])")
+check "Location names the resolved address" \
+  "$(echo "$HDRS" | grep -i '^location:' | head -1 | tr -d '\r' | sed 's/^[Ll]ocation: *//')" \
+  "/address/$TREASURY"
+check "an unregistered name is 404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$WEB/overview/names/nobody.registered.this")" "404"
+
 step "the state feed agrees with the node about the height"
 # Two independent paths to one fact: the page's own feed, and eth_blockNumber
 # through the filter. They are computed by different code and must not disagree.

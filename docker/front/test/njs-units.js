@@ -224,6 +224,56 @@ var nasty = overview.renderPage({
 eq('a name carrying markup is escaped', nasty.indexOf('<script>x') === -1, true);
 eq('...and is still shown, escaped', nasty.indexOf('&lt;script&gt;x') > -1, true);
 
+// --------------------------------------------- identities beside vanity names
+
+console.log('\n=== agent identities are separated from names somebody chose');
+
+eq('a qualified id is an identity', overview.looksLikeIdentity('drip:a-1789619721'), true);
+eq('a vanity name is not', overview.looksLikeIdentity('treasury.play'), false);
+eq('a non-string is not', overview.looksLikeIdentity(undefined), false);
+
+// The page puts them in separate tables, and BOTH are shown: an identity is a
+// real entry and a reader looking for one must be able to find it.
+var mixed = overview.renderPage({
+    chainId: 31337, height: 2, blocks: [],
+    names: [{ name: 'treasury.play', address: '0x' + '11'.repeat(20), block: 1 },
+            { name: 'drip:a-42', address: '0x' + '22'.repeat(20), block: 2 }]
+});
+eq('both rows are on the page', [mixed.indexOf('treasury.play') > -1, mixed.indexOf('drip:a-42') > -1],
+   [true, true]);
+eq('...in two separate tables', mixed.indexOf('Agent identities') > -1, true);
+// THE ORDER IS THE POINT, not just the separation: the curated names come
+// first, or the identities still bury them.
+eq('the chosen names come before the identities',
+   mixed.indexOf('treasury.play') < mixed.indexOf('drip:a-42'), true);
+
+// A deployment with nothing but identities says so, rather than showing an
+// empty "names" table above a full one - which reads as the bug being reported.
+var onlyIds = overview.renderPage({
+    chainId: 1, height: 1, blocks: [],
+    names: [{ name: 'drip:a-42', address: '0x' + '22'.repeat(20), block: 1 }]
+});
+eq('all-identities says so rather than showing an empty table',
+   onlyIds.indexOf('beyond the agent identities') > -1, true);
+eq('...and still lists them', onlyIds.indexOf('drip:a-42') > -1, true);
+
+// No identities at all: no empty second section.
+var onlyNames = overview.renderPage({
+    chainId: 1, height: 1, blocks: [],
+    names: [{ name: 'treasury.play', address: '0x' + '11'.repeat(20), block: 1 }]
+});
+eq('with no identities there is no identities section',
+   onlyNames.indexOf('Agent identities') === -1, true);
+
+// An identity is attacker-influenced like any other name, and it reaches a
+// second code path now, so it is escaped there too.
+var nastyId = overview.renderPage({
+    chainId: 1, height: 1, blocks: [],
+    names: [{ name: 'a:<script>x</script>', address: '0x' + '33'.repeat(20), block: 1 }]
+});
+eq('an identity carrying markup is escaped in the identities table',
+   [nastyId.indexOf('<script>x') === -1, nastyId.indexOf('&lt;script&gt;x') > -1], [true, true]);
+
 // ------------------------------------------------------- reading the manifest
 
 console.log('\n=== the deployment manifest: absent, unreadable and broken are not the same');
