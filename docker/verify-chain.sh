@@ -35,13 +35,38 @@ CONTRACTS_DIR="$(cd "$HERE/../contracts" && pwd)"
 # `DEPLOYMENTS_DIR` is already a parameter of Deploy.s.sol's `run()`, so pointing
 # it at a staging directory needs no change to the contracts - only for this
 # script to stop assuming `../deployments`.
-STAGE="$(mktemp -d)"
+# STAGED INSIDE `deployments/`, NOT IN /tmp, and the reason is foundry's rather
+# than this script's. Deploy.s.sol reads its manifest through `vm.exists`, which
+# is governed by `fs_permissions` in contracts/foundry.toml - and that grants
+# `../deployments` and nothing else. A `mktemp -d` staging directory therefore
+# failed with "the path /tmp/... is not allowed to be accessed for read
+# operations" no matter what was in it.
+#
+# `deployments/test-*/` is already in deployments/.gitignore, which is what this
+# pattern was for. Finding 29's requirement is untouched: this is a directory of
+# this run's own, so the developer's local.json is never read, written or moved.
+STAGE="$HERE/../deployments/test-chain-$$"
+mkdir -p "$STAGE"
 export DEPLOYMENTS_DIR="$STAGE"
 
 step() { printf '\n=== %s\n' "$1"; }
-cleanup() {
+# TWO TEARDOWNS, AND THEY ARE NOT THE SAME ONE.
+#
+# `reset_containers` is what a step runs to get a clean chain; `cleanup` is what
+# the EXIT trap runs to leave nothing behind. They used to be one function, and
+# the script called it at the top to clear a previous run - which also deleted
+# the staging directory created moments earlier, so every write to `$STAGE`
+# after that point failed with "No such file or directory".
+#
+# It stayed invisible because this script needs `cast` and `forge` on PATH and
+# dies at the first one when they are absent, which is long before the line that
+# would have shown it.
+reset_containers() {
   docker rm -f "$NAME" "$NAME-noq" "$NAME-argv" "$NAME-argv-control" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+}
+cleanup() {
+  reset_containers
   # The staging directory, which exists only for this run. The container and the
   # volume above are this script's own by name; the repo's deployments/ is no
   # longer touched at all, which is what finding 29 was about.
@@ -61,7 +86,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || {
   exit 1
 }
 
-cleanup
+reset_containers
 
 step "the entrypoint refuses to start without a mnemonic"
 if docker run --rm "$IMAGE" >/dev/null 2>&1; then

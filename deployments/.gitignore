@@ -1,3 +1,7 @@
 local.json
+# The stash a verify script leaves if it is killed between moving the
+# developer's manifest aside and putting it back. Ignored so a crashed run
+# cannot present somebody's deployment record as a file to commit.
+local.json.*-stash
 manifest.json
 test-*/

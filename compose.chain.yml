@@ -35,8 +35,14 @@ services:
       - /tmp
     volumes:
       - chain-state:/state
-    ports:
-      - "127.0.0.1:8545:8545"
+    # NO HOST BINDING. The `front` service publishes 8545 and mediates every
+    # request; a loopback binding here would still be reachable by any browser
+    # running on the host, which is the same reach the front exists to control -
+    # so a filter beside a published node port would be decorative.
+    #
+    # Admin access to the node is now "you have docker on this host": `compose
+    # exec chain cast ...`, or attach to the network. That is the intended bar,
+    # and it is the answer to somebody looking for the old port.
     healthcheck:
       test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
       interval: 5s
@@ -160,24 +166,39 @@ services:
       # cannot write a file it has no reason to write cannot corrupt it when
       # something goes wrong inside it.
       - ./deployments:/deployments:ro
+    # KEPT, DELIBERATELY, and it is the only service outside the front that
+    # publishes anything.
+    #
+    # The node lost its binding because the front mediates it and a published
+    # node port is admin access. Neither is true here: this service authenticates
+    # every request with a bearer token, and nothing fronts it - so unpublishing
+    # it would not move the access somewhere safer, it would make the stack
+    # unusable out of the box, since this API is how the whole system is driven.
+    #
+    # Stated rather than inherited, because a binding nobody decided to keep is
+    # indistinguishable from one nobody noticed. A deployment that wants this
+    # unreachable removes the binding - which is why the other services ship with
+    # none: an override can ADD a port binding by merging but cannot take one
+    # away without `!override`, so a default binding is a floor every consumer
+    # inherits, and a default absence is a choice each one makes.
     ports:
       - "127.0.0.1:7000:7000"
 
-  # The facilitator's block viewer. Raw addresses, no auth
-  # beyond the host binding; the students' names-aware view is a later frontend
-  # over /history, /resolve and /reverse.
+  # The block explorer. Raw addresses; a names-aware view over /history,
+  # /resolve and /reverse is a later frontend.
   otterscan:
     image: otterscan/otterscan:v2.11.0@sha256:7636f835fcdfc550c205a78876013d6e54c95846f3566e59cc71bc6136c80cc9
     profiles: [chain]
     depends_on:
       chain:
         condition: service_healthy
-    environment:
-      # The BROWSER makes the JSON-RPC calls, not this container: the entrypoint
-      # writes this value into config.json, which the page then fetches. So it
-      # must be the published loopback port and never chain:8545, which resolves
-      # only inside the compose network.
-      ERIGON_URL: http://127.0.0.1:8545
+    # NO ERIGON_URL HERE ANY MORE. This image's entrypoint writes the value into
+    # its own config.json, but the front answers `= /config.json` itself and an
+    # exact-match location wins over the prefix that proxies here - so nothing
+    # ever fetches this image's copy. Measured: the served config.json carries
+    # the front's derived value, not this one. It is removed rather than left,
+    # because a setting that still names a port the node no longer publishes is
+    # worse than no setting at all.
     # FINDING 27, and this is the service where "drop ALL" is not free.
     #
     # nginx starts as root, chowns its cache directories and drops to the
@@ -203,7 +224,88 @@ services:
     # NOT read_only: the same startup writes its cache and pid paths under /var,
     # and a tmpfs for each would be guessing at sizes. Stated rather than left
     # blank, so the asymmetry with the other three reads as a decision.
+    #
+    # NO HOST BINDING either: the front proxies it, so the explorer and the RPC
+    # it calls are the same origin. That is what makes `erigonURL` correct
+    # through an ssh forward or any other address a viewer reaches it by - a
+    # value baked at deploy time is wrong for every route except the one it was
+    # baked for.
+
+  # Everything a browser or an external caller touches. nginx with njs, from the
+  # explorer's own image - so this adds a container and no new dependency.
+  #
+  # Three jobs: publish the JSON-RPC behind a method allowlist, serve the
+  # explorer same-origin with a `config.json` rewritten per request, and render
+  # the overview pages under /overview.
+  front:
+    image: otterscan/otterscan:v2.11.0@sha256:7636f835fcdfc550c205a78876013d6e54c95846f3566e59cc71bc6136c80cc9
+    profiles: [chain]
+    depends_on:
+      chain:
+        condition: service_healthy
+    entrypoint: ["/entrypoint.sh"]
+    environment:
+      # A comma list; a trailing `*` is a prefix and `*` alone is pass-through,
+      # so filtered and unfiltered are the same code path rather than two.
+      #
+      # The entries past the default are what the EXPLORER needs, and they are
+      # measured rather than read off its source: docker/verify-front.sh drives
+      # a real browser over the landing, block, block-txs, transaction and
+      # address pages with the default set in place and reports what the filter
+      # refused. That set is exactly two - `ots_getApiLevel` and
+      # `erigon_getHeaderByNumber` - and re-running with the value below leaves
+      # the log silent.
+      #
+      # `ots_*` stays a PREFIX rather than the one method the measurement named:
+      # the pages driven are the ones that exist today, and the whole namespace
+      # is read-only and anvil-implemented, so the prefix costs nothing and a
+      # page nobody drove does not become a support question. An earlier version
+      # of this comment claimed the explorer calls "eleven other ots_ methods" -
+      # that number came from reading, and the browser disagrees with it.
+      RPC_ALLOWED_METHODS: "${RPC_ALLOWED_METHODS:-eth_*,net_version,web3_clientVersion,ots_*,erigon_getHeaderByNumber}"
+      RPC_ALLOW_ORIGIN: "${RPC_ALLOW_ORIGIN:-*}"
+      OVERVIEW_BLOCKS: "${OVERVIEW_BLOCKS:-10}"
+      # 0 disables the page's inline poll entirely - markup with nothing to run,
+      # for a deployment that wants no scripting at all.
+      OVERVIEW_POLL_SECONDS: "${OVERVIEW_POLL_SECONDS:-5}"
+      # WHERE THE FRONT POINTS AND WHERE IT LISTENS, as values. These defaults
+      # are what the config used to hard-code, so this deployment is unchanged.
+      # A deployment that runs everything in one network namespace has no
+      # `chain` to resolve and no free choice of port: it sets these. Changing
+      # a listen port means changing the mapping below to match.
+      NODE_UPSTREAM: "${NODE_UPSTREAM:-http://chain:8545}"
+      OTTERSCAN_UPSTREAM: "${OTTERSCAN_UPSTREAM:-http://otterscan:80}"
+      FRONT_HTTP_PORT: "${FRONT_HTTP_PORT:-80}"
+      FRONT_RPC_PORT: "${FRONT_RPC_PORT:-8545}"
+      # Empty means "derive it from the request", which is right for compose and
+      # for an ssh forward. A deployment behind a gateway that rewrites Host
+      # states its public RPC address here instead.
+      ERIGON_URL: "${ERIGON_URL:-}"
+    volumes:
+      - ./docker/front/rpc-proxy.conf.template:/etc/nginx/rpc-proxy.conf.template:ro
+      - ./docker/front/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/front/rpc_filter.js:/etc/nginx/njs/rpc_filter.js:ro
+      - ./docker/front/overview.js:/etc/nginx/njs/overview.js:ro
+      # READ-ONLY, and the overview reads the registry's address out of it per
+      # request. The deploy one-shot owns this file; nothing here writes it.
+      - ./deployments:/deployments:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The same four the explorer needs, and for the same reason: nginx starts as
+    # root, chowns its cache and drops to `nginx`. Measured on that image at
+    # v0.9.0, and this service is the same image.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
     ports:
+      # The published surface, on loopback by default so a developer's local
+      # experience is unchanged and only the mediation moved. A deployment that
+      # wants these reachable overrides the binding.
+      - "127.0.0.1:8545:8545"
       - "127.0.0.1:5100:80"
 
 volumes:
