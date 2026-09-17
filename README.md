@@ -251,6 +251,30 @@ interface. A consumer at a different directory depth than this repo is the only
 build that can catch a wrong `COPY` (see `.dockerignore` for the case that
 taught us), so a release is not done until a consumer has built it.
 
+### Names, identities and retirement
+
+Every wallet's **agent identity** — a qualified id of the form `org:id` — is
+registered in the name registry when the wallet is created, alongside any
+**vanity names** (`vendor.play`) anyone registers afterwards. Both are ordinary
+registry entries; the colon is what separates them, and `chain-svc` refuses a
+colon in a vanity name precisely so one can never impersonate an identity. The
+`/overview` page lists them in separate tables for that reason, and
+`/overview/names.json` marks each entry `"kind": "identity"` or `"kind": "name"`.
+
+**Retiring a wallet does not remove its registry entry, and nothing can.** The
+registry has no deregistration primitive at all — `register`, `transfer` and
+`setTarget` are the whole surface, so a name that has been registered exists for
+as long as the chain does. Only its owner and its target can change.
+
+`DELETE /wallets/:id` therefore marks the wallet retired and points each of its
+**vanity aliases** at the zero address; the **identity** registration is left
+alone and still resolves to the wallet. `/overview` omits any name resolving to
+the zero address, so retired aliases drop off the page on their own, while
+identities stay. A long-running deployment accumulates one identity per wallet
+ever created and its identity list only grows. That is a property of the
+registry rather than a decision about retirement, which is why it is written
+here instead of being fixed.
+
 ## Trust model, in one paragraph
 
 Keys never leave `chain-svc`. Agents authenticate to it with a per-wallet token

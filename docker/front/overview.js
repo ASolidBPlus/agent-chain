@@ -378,36 +378,68 @@ function renderPage(state) {
     }
     html += '</section>';
 
+    // TWO TABLES, BECAUSE ONE MIXED LIST READS AS A BROKEN PAGE. Every wallet's
+    // agent identity is registered at spawn, so on a busy deployment the
+    // identities outnumber the names somebody chose and bury them. Reported
+    // from a live range: a reader seeing `drip:a-1789619721` beside
+    // `treasury.play` concludes the page is malfunctioning.
     html += '<section><h2>Registered names</h2>';
     if (names === null) {
         html += (state.manifestFault
             ? '<p class="empty">The deployment manifest could not be read, so this page cannot say '
               + 'whether a registry exists: ' + escapeHtml(state.manifestFault) + '</p>'
             : '<p class="empty">This deployment has no name registry.</p>');
-    } else if (names.length === 0) {
-        html += '<p class="empty">No names are registered yet.</p>';
     } else {
-        html += '<div class="scroll"><table><thead><tr><th>Name</th><th>Address</th>'
-            + '<th>Registered</th></tr></thead><tbody id="names">';
+        var vanity = [];
+        var identities = [];
         for (var j = 0; j < names.length; j++) {
-            var n = names[j];
-            html += '<tr>'
-                + '<td><a href="/address/' + escapeHtml(n.address) + '">' + escapeHtml(n.name) + '</a></td>'
-                + '<td><a href="/address/' + escapeHtml(n.address) + '">' + escapeHtml(n.address) + '</a></td>'
-                + '<td>' + (n.block === null ? '' : 'block <a href="/block/' + n.block + '">' + n.block + '</a>')
-                + '</td></tr>';
+            (looksLikeIdentity(names[j].name) ? identities : vanity).push(names[j]);
         }
-        html += '</tbody></table></div>';
+        if (names.length === 0) {
+            html += '<p class="empty">No names are registered yet.</p>';
+        } else if (vanity.length === 0) {
+            html += '<p class="empty">No names have been registered beyond the agent identities below.</p>';
+        } else {
+            html += nameTable(vanity, 'names');
+        }
+        // The identities are shown rather than hidden: they are real entries and
+        // a reader looking for one must be able to find it. Second, and headed
+        // for what they are, so the list above is the one somebody curated.
+        if (identities.length > 0) {
+            html += '<h2>Agent identities</h2>'
+                + '<p class="empty">Registered automatically when a wallet is created, one per wallet. '
+                + 'They are qualified ids of the form <code>org:id</code>.</p>'
+                + nameTable(identities, 'identities');
+        }
     }
     html += '</section>';
 
-    html += '<footer>Every block number and address links into the explorer on this same origin, so the '
-        + 'page works over a VPN, an SSH forward or a published port without configuration.<br>'
-        + 'Machine-readable list at <code>/overview/names.json</code>; a single name resolves at '
+    // The footer says only what a reader cannot discover by looking. A sentence
+    // about links working over a forward or a published port explained the
+    // implementation to someone who wanted the data, and described a property
+    // they experience rather than need telling about: if the links work, they
+    // work. These two routes are not visible from the page, so they stay.
+    html += '<footer>Machine-readable list at <code>/overview/names.json</code>; a single name resolves at '
         + '<code>/overview/names/&lt;name&gt;</code>, which redirects to its address page or answers 404 '
         + 'when nobody has registered it.</footer>';
 
     return html + '</div>' + pollScript(pollSeconds()) + '</body></html>';
+}
+
+/// One table of registered names. Shared by both sections so a column added to
+/// one cannot quietly go missing from the other.
+function nameTable(rows, id) {
+    var html = '<div class="scroll"><table><thead><tr><th>Name</th><th>Address</th>'
+        + '<th>Registered</th></tr></thead><tbody id="' + id + '">';
+    for (var i = 0; i < rows.length; i++) {
+        var n = rows[i];
+        html += '<tr>'
+            + '<td><a href="/address/' + escapeHtml(n.address) + '">' + escapeHtml(n.name) + '</a></td>'
+            + '<td><a href="/address/' + escapeHtml(n.address) + '">' + escapeHtml(n.address) + '</a></td>'
+            + '<td>' + (n.block === null ? '' : 'block <a href="/block/' + n.block + '">' + n.block + '</a>')
+            + '</td></tr>';
+    }
+    return html + '</tbody></table></div>';
 }
 
 /// A block's timestamp as HH:MM:SS UTC.
@@ -667,15 +699,42 @@ function namesJson(r) {
             r.return(503, JSON.stringify({ error: 'the node did not answer' }));
             return;
         }
-        // NAMES AND ADDRESSES ONLY. This is not a proxy and must not become one
-        // by growing a field that echoes something a caller asked for.
+        // NAMES, ADDRESSES AND WHICH KIND. This is not a proxy and must not
+        // become one by growing a field that echoes something a caller asked
+        // for - `kind` is derived here from the name itself and echoes nothing.
+        // Added rather than replacing anything, so an existing reader of this
+        // feed keeps working.
         var out = [];
         var names = state.names === null ? [] : state.names;
         for (var i = 0; i < names.length; i++) {
-            out.push({ name: names[i].name, address: names[i].address });
+            out.push({
+                name: names[i].name,
+                address: names[i].address,
+                kind: looksLikeIdentity(names[i].name) ? 'identity' : 'name'
+            });
         }
         r.return(200, JSON.stringify({ names: out }));
     });
+}
+
+/// Whether a registered name is an agent identity rather than a vanity name.
+///
+/// A PRESENTATION TEST THAT DECIDES NOTHING, and it is written weak on purpose.
+/// `svc/src/validate.ts` owns what "canonical" means - exactly one colon,
+/// lowercase, per CANONICAL_ID - and its own comment is the reason this is not
+/// a copy of that regex: "a second copy of the rule is a second authority".
+/// That file's authority is consulted on the money path. This one chooses which
+/// table a row is drawn in, so the worst it can be is untidy.
+///
+/// IT HOLDS BECAUSE OF WHO MAY REGISTER, not because of the registry. The
+/// contract admits `:` in any name and deliberately cannot tell the two kinds
+/// apart - putting that rule on-chain would freeze a game-layer distinction
+/// into the ABI. What makes the split real is that REGISTRAR_ROLE goes to the
+/// treasury alone, and chain-svc rejects a colon in a vanity alias precisely so
+/// an alias can never impersonate an identity. A deployment that granted the
+/// role elsewhere would make this a guess, and a misfiled row is the whole cost.
+function looksLikeIdentity(name) {
+    return typeof name === 'string' && name.indexOf(':') !== -1;
 }
 
 function nameRedirect(r) {
@@ -713,8 +772,15 @@ function nameRedirect(r) {
                 r.return(404, 'no such name\n');
                 return;
             }
-            r.headersOut['Location'] = '/address/' + addr;
-            r.return(302);
+            // THE TARGET GOES IN `r.return`, NOT IN headersOut.
+            //
+            // Setting headersOut['Location'] and then calling `r.return(302)`
+            // emits TWO Location headers - the one set here and an empty one
+            // nginx adds for the redirect status - and a browser refuses the
+            // response outright ("Corrupted Content Error" in Firefox). curl
+            // follows it without complaint, which is why this survived: the
+            // duplicate is invisible to every client that is not a browser.
+            r.return(302, '/address/' + addr);
         });
 }
 
@@ -724,6 +790,6 @@ function nameRedirect(r) {
 export default {
     page, stateJson, namesJson, nameRedirect,
     decodeRegistered, encodeResolve, addressFromWord, intFromWord, blockCount, escapeHtml,
-    readRegistry,
+    readRegistry, looksLikeIdentity,
     pollSeconds, pollScript, shortHash, clockFromHexSeconds, renderPage
 };
