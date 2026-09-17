@@ -279,14 +279,19 @@ here instead of being fixed.
 
 Keys never leave `chain-svc`. Agents authenticate to it with a per-wallet token
 and can act only on their own wallet, within caps the operator sets; the
-operator's platform token can mint, fund, spawn, freeze and read anything, and is
-held by nothing an agent can reach. The published RPC is unauthenticated and
-therefore read-only: it is served by `front`, which forwards an allowlist and
-refuses the admin namespaces that could mint balances, mine blocks or rewrite
-state. **Administrative access to the chain now means access to the Docker host**
-— the node's own unrestricted RPC exists only on the container network, so
-whoever can run `docker compose exec` has it and nobody else does. The chain is
-play money by construction: private, zero-fee, and refusing to start against
+operator's platform token can mint, fund, spawn, freeze and read anything, and
+is held by nothing an agent can reach. The published RPC is unauthenticated, and
+it is read-only because `front` forwards a named list of read methods and
+refuses everything else. The list names methods one at a time rather than a
+namespace, because `eth_` is not a read namespace: it carries the node's signing
+and transaction-submitting methods, and the node holds the treasury key
+unlocked, so a prefix there publishes the treasury rather than the chain. Those
+eight methods are refused underneath any allowlist, unless a deployment sets the
+value to a bare `*` - which is how it asks for an unrestricted admin RPC on
+purpose. **Administrative access to the chain now means access to the Docker
+host** — the node's own unrestricted RPC exists only on the container network,
+so whoever can run `docker compose exec` has it and nobody else does. The chain
+is play money by construction: private, zero-fee, and refusing to start against
 anything that is not a private chain.
 
 ## Status

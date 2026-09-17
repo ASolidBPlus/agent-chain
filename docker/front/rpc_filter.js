@@ -12,10 +12,62 @@
 
 // Entries ending in '*' are prefixes. The explorer needs more than this set;
 // see the config for what a deployment running one has to add.
-var DEFAULT_ALLOWED = 'eth_*,net_version,web3_clientVersion';
+//
+// NAMED ONE BY ONE RATHER THAN AS `eth_*`. The eth_ namespace on this node is
+// not a read namespace: it carries `eth_sendTransaction`, `eth_sign`, three
+// `eth_signTypedData` variants, `eth_sendRawTransaction` and
+// `eth_sendUnsignedTransaction`, and the node holds the treasury key unlocked.
+// A prefix admits all of them, so a published RPC that looked filtered was an
+// unauthenticated console onto the treasury: measured on the pinned anvil,
+// `eth_sendUnsignedTransaction` moved treasury funds with no signature at all,
+// and `eth_sendRawTransaction` let an unfunded stranger deploy a contract,
+// because the node runs with zero gas price.
+//
+// The cost of this list being short by one is an explorer page that fails and
+// says so at test time. The cost of the prefix was the above, silently. That
+// asymmetry is the whole reason it is a list.
+var DEFAULT_ALLOWED = [
+    'net_version', 'web3_clientVersion',
+    'ots_*', 'erigon_getHeaderByNumber',
+    'eth_chainId', 'eth_blockNumber', 'eth_syncing', 'eth_gasPrice',
+    'eth_maxPriorityFeePerGas', 'eth_feeHistory', 'eth_blobBaseFee',
+    'eth_getBalance', 'eth_getCode', 'eth_getStorageAt', 'eth_getProof',
+    'eth_getTransactionCount',
+    'eth_getBlockByNumber', 'eth_getBlockByHash', 'eth_getBlockReceipts',
+    'eth_getBlockTransactionCountByNumber', 'eth_getBlockTransactionCountByHash',
+    'eth_getTransactionByHash', 'eth_getTransactionReceipt',
+    'eth_getTransactionByBlockNumberAndIndex',
+    'eth_getTransactionByBlockHashAndIndex',
+    'eth_getLogs', 'eth_call', 'eth_estimateGas', 'eth_createAccessList'
+].join(',');
 
-function allowList() {
-    var raw = process.env.RPC_ALLOWED_METHODS;
+// THE FLOOR. Refused before the allowlist is consulted, so an allowlist that is
+// wider than its author realised - a future `eth_*`, or a prefix added for one
+// method that quietly admits these - still cannot reach them. Every entry either
+// signs with a key the node holds or submits a transaction.
+//
+// EXEMPT UNDER PASS-THROUGH. A bare `*` is a deployment that has asked for an
+// unrestricted admin RPC on purpose and documented it as such; the floor exists
+// to catch an allowlist that is wrong by accident, not to overrule a choice that
+// was made deliberately. Without this exemption a pass-through deployment gets a
+// node that silently cannot transact.
+var DENIED = {
+    eth_sendTransaction: true,
+    eth_sendUnsignedTransaction: true,
+    eth_sendRawTransaction: true,
+    eth_sign: true,
+    eth_signTransaction: true,
+    eth_signTypedData: true,
+    eth_signTypedData_v3: true,
+    eth_signTypedData_v4: true
+};
+
+// `raw` is a parameter so the tests can build a matcher for a list other than
+// the one this process was started with; production calls it with nothing.
+function allowList(raw) {
+    if (raw === undefined || raw === null || raw === '') {
+        raw = process.env.RPC_ALLOWED_METHODS;
+    }
     if (raw === undefined || raw === null || raw === '') {
         raw = DEFAULT_ALLOWED;
     }
@@ -36,20 +88,34 @@ function allowList() {
         }
     }
 
-    return { exact: exact, prefixes: prefixes };
+    // A bare '*' becomes the empty prefix, which matches every method.
+    var passThrough = false;
+    for (var p = 0; p < prefixes.length; p++) {
+        if (prefixes[p] === '') {
+            passThrough = true;
+        }
+    }
+
+    return { exact: exact, prefixes: prefixes, passThrough: passThrough };
 }
 
 var ALLOWED = allowList();
 
-function permitted(method) {
+function permitted(method, allowed) {
     if (typeof method !== 'string') {
         return false;
     }
-    if (ALLOWED.exact[method] === true) {
+    if (allowed === undefined) {
+        allowed = ALLOWED;
+    }
+    if (!allowed.passThrough && DENIED[method] === true) {
+        return false;
+    }
+    if (allowed.exact[method] === true) {
         return true;
     }
-    for (var i = 0; i < ALLOWED.prefixes.length; i++) {
-        if (method.substr(0, ALLOWED.prefixes[i].length) === ALLOWED.prefixes[i]) {
+    for (var i = 0; i < allowed.prefixes.length; i++) {
+        if (method.substr(0, allowed.prefixes[i].length) === allowed.prefixes[i]) {
             return true;
         }
     }
