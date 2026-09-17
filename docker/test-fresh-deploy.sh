@@ -57,6 +57,14 @@ chmod +x "$WORK/bin/cast" "$WORK/bin/forge"
 export PATH="$WORK/bin:$PATH"
 export FLAG_LOG="$WORK/flag"
 
+# THE FIXTURE HAS TO SATISFY THE PRECONDITIONS IT IS NOT TESTING. The script
+# now checks its deploy script exists before it decides anything, so every row
+# below needs one - an empty file is enough, because the `forge` above is a stub
+# that never reads it. Without this the rows would all fail at the preflight and
+# report nothing about the fresh-chain decision they exist to measure.
+mkdir -p "$WORK/script"
+: > "$WORK/script/Deploy.s.sol"
+
 # `cd /contracts` is the one thing the stubs cannot stand in for; the script
 # reaches it after the decision this test is about, so a missing directory does
 # not matter - but it must not be the reason a row passes, which is what the
@@ -145,6 +153,52 @@ if [ "$rc" != "0" ] && grep -q "refusing to guess" "$WORK/out.log"; then
   echo "ok   an unreadable block height refuses rather than guessing"
 else
   echo "FAIL an unreadable block height did not refuse (exit $rc)"
+  sed -n '1,4p' "$WORK/out.log"
+  fail=1
+fi
+
+# ── a deploy script that is not where CONTRACTS_DIR says ───────────────────
+# forge answers this with "Error: No such file or directory (os error 2)" and
+# no path at all, after the RPC has already connected - so the chain looks
+# healthy and the fault looks like any other missing file. The refusal must
+# NAME the path it looked at; a refusal that merely refuses leaves the operator
+# exactly where forge did.
+rm -f "$FLAG_LOG"
+D="$WORK/d7"; mkdir -p "$D"
+EMPTY="$WORK/not-the-contracts"; mkdir -p "$EMPTY"
+ANVIL_MNEMONIC="test test test test test test test test test test test junk" \
+DEPLOYMENTS_DIR="$D" STUB_HEIGHT="0" CONTRACTS_DIR="$EMPTY" \
+  env -u ALLOW_FRESH_DEPLOY sh "$HERE/deploy-once.sh" >"$WORK/out.log" 2>&1 && rc=0 || rc=$?
+if [ "$rc" != "0" ] \
+   && grep -q "$EMPTY/script/Deploy.s.sol" "$WORK/out.log" \
+   && grep -q "CONTRACTS_DIR" "$WORK/out.log"; then
+  echo "ok   a missing deploy script refuses and names the path it looked at"
+else
+  echo "FAIL a missing deploy script did not name its path (exit $rc)"
+  sed -n '1,4p' "$WORK/out.log"
+  fail=1
+fi
+# ...and it refuses BEFORE doing anything: no pending manifest, no promotion.
+if [ -f "$D/local.json.pending" ] || [ -f "$D/local.json" ]; then
+  echo "FAIL it wrote a manifest despite having no deploy script"
+  fail=1
+else
+  echo "ok   ...and wrote nothing before refusing"
+fi
+
+# THE CONTROL FOR THE ROW ABOVE. The same call with the file present must reach
+# forge - otherwise "it refused" is just "this invocation never works" and the
+# check is about the fixture rather than the guard.
+rm -f "$FLAG_LOG"
+D="$WORK/d8"; mkdir -p "$D"
+mkdir -p "$EMPTY/script"; : > "$EMPTY/script/Deploy.s.sol"
+ANVIL_MNEMONIC="test test test test test test test test test test test junk" \
+DEPLOYMENTS_DIR="$D" STUB_HEIGHT="0" CONTRACTS_DIR="$EMPTY" \
+  env -u ALLOW_FRESH_DEPLOY sh "$HERE/deploy-once.sh" >"$WORK/out.log" 2>&1 || true
+if [ -f "$FLAG_LOG" ]; then
+  echo "ok   control - with the script present the same call reaches forge"
+else
+  echo "FAIL control - the call never reaches forge even with the script present"
   sed -n '1,4p' "$WORK/out.log"
   fail=1
 fi

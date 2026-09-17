@@ -221,10 +221,16 @@ deployment that cannot resolve service names or choose its own ports can set
 without keeping a copy of the config. The explorer needs an *absolute* RPC
 address, which is a fact about how the deployment is reached — something the
 container cannot know, since it sees only the hop that arrived. It is therefore
-derived from the request host and `X-Forwarded-Proto`, which is the best guess
-available and no more than a guess: set **`ERIGON_URL`** wherever something
-rewrites the Host header. No real address would make a good default, because it
-would be wrong for everyone else.
+derived from the request host and `X-Forwarded-Proto`. That is a guess, but it
+is usually the right one: a gateway that terminates TLS and passes `Host` and
+`X-Forwarded-Proto` through needs **no override at all** — measured against a
+real one, where the derived value came back as the correct public `https` URL.
+
+Set **`ERIGON_URL`** only where something *rewrites* `Host`, which is the one
+case a derived value cannot survive. "Behind a gateway, set it" is the wrong
+rule and the easy one to copy: TLS termination and proxying in general are
+already handled. No real address would make a good default, because it would be
+wrong for everyone else.
 
 Compose reads three secrets from a `.env` in this directory (or from the
 environment): `ANVIL_MNEMONIC` (a BIP-39 phrase), `CHAIN_SVC_TOKEN` (the

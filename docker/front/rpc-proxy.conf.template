@@ -107,6 +107,22 @@ http {
         # origin it loaded the page from, including through an ssh forward.
         location = /config.json {
             default_type application/json;
+            # WHY AN OVERRIDE EXISTS AT ALL. An absolute RPC address is a fact
+            # about how a deployment is REACHED, and this container cannot know
+            # that - it sees the hop that arrived, not the chain of names and
+            # schemes in front of it. Deriving it from the request is the best
+            # guess available, and it is only ever a guess. It follows that no
+            # real address would be a good default, because it would be wrong
+            # for everybody else.
+            #
+            # IT IS USUALLY THE RIGHT GUESS, AND THAT IS THE HALF THAT GETS
+            # MISREAD. Measured behind a real TLS-terminating gateway passing
+            # Host and X-Forwarded-Proto through: the derived value came back as
+            # the correct public https URL and that deployment set nothing.
+            # ERIGON_URL is for a gateway that REWRITES Host - not for TLS, and
+            # not for being proxied in general. "Behind a gateway, set it" is
+            # the wrong rule and the one people copy.
+            #
             # ABSOLUTE, AND THAT IS MEASURED RATHER THAN PREFERRED. A relative
             # "/rpc" would survive a gateway that rewrites Host as well as an ssh
             # forward, so it was tried first: with a relative value the bundle
