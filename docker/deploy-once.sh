@@ -16,12 +16,37 @@ set -eu
 
 DEPLOYMENTS="${DEPLOYMENTS_DIR:-/deployments}"
 CONTRACTS="${CONTRACTS_DIR:-/contracts}"
+# NAMED ONCE, used twice: the check below and the invocation at the bottom. A
+# preflight that tests a different path from the one the command uses is worse
+# than no preflight, because it reports a file as present that was never the
+# file in question.
+DEPLOY_SCRIPT="script/Deploy.s.sol"
+DEPLOY_TARGET="Deploy"
 RPC="${RPC_URL:-http://chain:8545}"
 LOCAL="$DEPLOYMENTS/local.json"
 PENDING="$LOCAL.pending"
 
 if [ -z "${ANVIL_MNEMONIC:-}" ]; then
   echo "deploy: ANVIL_MNEMONIC is unset - it derives the treasury key" >&2
+  exit 1
+fi
+
+# THE DEPLOY SCRIPT, CHECKED BY NAME, because forge does not name it.
+#
+# With the contracts somewhere other than where CONTRACTS_DIR points - one
+# directory too deep is the way it happens - `forge script` exits with exactly
+#
+#   Error: No such file or directory (os error 2)
+#
+# and nothing else: no path, no clue which of the files it touches was missing,
+# and it comes AFTER the RPC connects, so the chain looks fine and the fault
+# looks like anything at all. Measured against forge 1.8.1, not quoted.
+#
+# This fails closed either way; the difference is entirely in what the operator
+# reads. It names the path it looked at, so a wrong CONTRACTS_DIR says so.
+if [ ! -f "$CONTRACTS/$DEPLOY_SCRIPT" ]; then
+  echo "deploy: no deploy script at $CONTRACTS/$DEPLOY_SCRIPT" >&2
+  echo "deploy: CONTRACTS_DIR must be the Foundry project root - the directory holding foundry.toml and $DEPLOY_SCRIPT - and is currently $CONTRACTS" >&2
   exit 1
 fi
 
@@ -125,7 +150,7 @@ status=0
 DEPLOYER_PRIVATE_KEY="$KEY" \
 DEPLOYMENTS_DIR="$DEPLOYMENTS" \
 ALLOW_FRESH_DEPLOY="$ALLOW" \
-  forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC" --broadcast || status=$?
+  forge script "$DEPLOY_SCRIPT:$DEPLOY_TARGET" --rpc-url "$RPC" --broadcast || status=$?
 
 if [ "$status" -ne 0 ]; then
   rm -f "$PENDING"
