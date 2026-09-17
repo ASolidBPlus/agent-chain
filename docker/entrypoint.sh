@@ -26,11 +26,12 @@ STATE_FILE="${ANVIL_STATE_FILE:-/state/anvil.json}"
 # FINDING 9: ONE ORIGIN, NOT ALL OF THEM.
 #
 # anvil's default is `--allow-origin *`, which sets
-# `Access-Control-Allow-Origin: *` on the JSON-RPC endpoint - so ANY page the
-# facilitator's browser loads can make RPC calls to this node. The node is bound
-# to 127.0.0.1 by compose, and that is exactly the reach a browser has: a
-# same-machine origin is not a barrier to it. On a chain where the treasury key
-# signs, "any web page may call eth_sendTransaction" is worth one flag.
+# `Access-Control-Allow-Origin: *` on the JSON-RPC endpoint - so ANY page an
+# operator's browser loads could make RPC calls to this node. When this was
+# written the node was bound to 127.0.0.1 by compose, and that is exactly the
+# reach a browser has: a same-machine origin is not a barrier to it. On a chain
+# where the treasury key signs, "any web page may call eth_sendTransaction" is
+# worth one flag.
 #
 # NO LONGER LOAD-BEARING, AND KEPT ANYWAY. This node has no host binding as of
 # the front service: nothing outside the container network can reach it, so no
