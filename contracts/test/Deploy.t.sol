@@ -523,6 +523,41 @@ contract DeployTest is Test {
         _clean(dir);
     }
 
+    /// A TREASURY THAT HAS SPENT IS STILL A CORRECT DEPLOYMENT.
+    ///
+    /// The skip path verified that the treasury still held its entire initial
+    /// supply, which is true only of a chain nobody has used. One funded wallet
+    /// and every subsequent run refused a deployment that its own checks had
+    /// just found complete - so any orchestration that re-runs the deploy on
+    /// start (compose `up` after a stop, a restart policy, a platform with no
+    /// run-once semantics) failed permanently the moment the chain was used,
+    /// and the only way out was to discard the chain state the idempotency path
+    /// exists to preserve.
+    ///
+    /// The balance was never a property of a DEPLOYMENT; it is a post-condition
+    /// of the mint, and it is asserted where that mint happens.
+    function test_TheSkipPathToleratesATreasuryThatHasSpent() public {
+        string memory dir = _dir("spent-skip");
+        _write(dir, _example("token-and-names.json"));
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        address token = vm.parseJsonAddress(vm.readFile(string.concat(dir, "/local.json")), ".modules[0].address");
+        uint256 before = Token(token).balanceOf(treasury);
+        // ONE UNIT IS ENOUGH, and that is the point: the old check failed on any
+        // spend at all, so the smallest possible one is the honest fixture.
+        vm.prank(treasury);
+        Token(token).transfer(vm.addr(0xBEEF), 1);
+        assertEq(Token(token).balanceOf(treasury), before - 1, "the fixture must actually move a token");
+
+        // Nothing about the CODE or the ROLES changed: same addresses, same
+        // codehashes, same treasury administering them.
+        Deploy again = _script();
+        bool promoted = _deployed(again, dir, "");
+        assertFalse(promoted, "the skip path writes no manifest, so there is nothing to promote");
+        _clean(dir);
+    }
+
     // ── the rotation cases, now possible in ONE forge process ───────────────
 
     /// A ROTATED DEPLOYER KEY over an existing deployment is refused, and the

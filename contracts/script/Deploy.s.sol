@@ -189,7 +189,37 @@ contract Deploy is Script {
                 Token t = new Token{salt: saltFor(mods[i].kind, mods[i].key)}(
                     mods[i].name, mods[i].symbol, treasury
                 );
-                if (mods[i].initialSupply > 0) t.mint(treasury, mods[i].initialSupply * 1e18);
+                if (mods[i].initialSupply > 0) {
+                    t.mint(treasury, mods[i].initialSupply * 1e18);
+                    // THE POST-CONDITION OF THE MINT ABOVE, and it lives here
+                    // because that is the only moment it is true of anything.
+                    //
+                    // It used to sit in `_assertDeployment`, which runs on BOTH
+                    // paths - so the idempotency path required the treasury to
+                    // still hold its entire initial supply, which is a property
+                    // of a chain NOBODY HAS USED rather than of a correct
+                    // deployment. One funded wallet and every later run refused
+                    // a deployment its own checks had just found complete;
+                    // observed as a container restarting 565 times against a
+                    // healthy chain, with discarding the chain state as the only
+                    // way out - the exact thing the idempotency path exists to
+                    // avoid.
+                    //
+                    // NOT A FLAG ON THE OLD ASSERTION. `_assertDeployment` says
+                    // what it is in its own doc block - read-only, both paths,
+                    // roles and wiring - and a balance does not become part of
+                    // that contract by being guarded. The token is minutes old
+                    // and nothing has touched it, so this compares against the
+                    // whole supply here and could not anywhere else.
+                    //
+                    // It is not tautological: `mint` belongs to Token, and this
+                    // is what would notice a mint that credited a different
+                    // account or nothing at all.
+                    require(
+                        t.balanceOf(treasury) == mods[i].initialSupply * 1e18,
+                        "Deploy: treasury was not seeded"
+                    );
+                }
                 plan.addrs[i] = address(t);
                 haveToken = true;
             } else if (_eq(mods[i].kind, KIND_NAMES)) {
@@ -967,9 +997,6 @@ contract Deploy is Script {
                         "Deploy: converter must not hold FREEZER_ROLE"
                     );
                 }
-                require(
-                    t.balanceOf(treasury) == mods[i].initialSupply * 1e18, "Deploy: treasury was not seeded"
-                );
                 // FINDING 20. WHO ADMINISTERS THIS TOKEN, asserted rather than
                 // assumed. DEFAULT_ADMIN_ROLE is the role that grants every
                 // other one, so an unintended holder is not a smaller problem

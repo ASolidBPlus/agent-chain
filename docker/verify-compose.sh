@@ -116,6 +116,47 @@ echo "  before: $BEFORE"
 echo "  after:  $AFTER"
 check "supply unchanged" "$AFTER" "$BEFORE"
 
+step "a chain that has been SPENT FROM can still be brought back up"
+# THE SEQUENCE THAT BLOCKED A DEPLOYMENT, and it is a restart rather than a
+# restart of one service: `down` without `-v` keeps the volumes, so `up` runs
+# chain-deploy again over an intact chain and takes the idempotency path. That
+# path used to require the treasury to still hold its entire initial supply -
+# true only of a chain nobody has used - so one funded wallet made every later
+# `up` fail: chain-deploy exited 1, compose reported `service "chain-deploy"
+# didn't complete successfully`, and chain-svc never left `created`. A used
+# chain could not be restarted at all, and discarding the chain state was the
+# only way out, which is what the idempotency path exists to avoid.
+#
+# The spend is the whole fixture: without it this is just the cold start again.
+quietly "spawn a wallet to fund" curl -fsS "${A[@]}" -H 'content-type: application/json' \
+  -X POST http://127.0.0.1:7000/wallets -d '{"agentId":"restart:probe","kind":"agent"}'
+quietly "fund it from the treasury" curl -fsS "${A[@]}" -H 'content-type: application/json' \
+  -X POST http://127.0.0.1:7000/fund \
+  -d '{"to":"restart:probe","amount":"1","intentId":"restart-probe-fund"}'
+SPENT=$(curl -fsS "${A[@]}" http://127.0.0.1:7000/supply)
+echo "  after funding: $SPENT"
+
+quietly "compose down (volumes kept)" "${COMPOSE[@]}" down
+# NOT `quietly`, WHICH WOULD ABORT THE SCRIPT. When the defect is present this
+# `up` exits non-zero - that is the symptom - and the checks below are what
+# describe it. Its output is kept and shown, because a compose failure here is
+# the thing being measured rather than an accident.
+UPLOG=$(mktemp)
+"${COMPOSE[@]}" up -d >"$UPLOG" 2>&1 || {
+  echo "  compose up exited $? -- last lines:"
+  tail -5 "$UPLOG" | sed 's/^/    /'
+}
+rm -f "$UPLOG"
+for _ in $(seq 1 45); do curl -fsS "${A[@]}" http://127.0.0.1:7000/supply >/dev/null 2>&1 && break; sleep 1; done
+# THE DEPLOY'S EXIT CODE, not just "the service came back": a chain-deploy that
+# exits 1 is what compose refuses to proceed past, so this is the fact.
+check "chain-deploy exited 0 over a used chain" \
+  "$("${COMPOSE[@]}" ps -a --format '{{.Service}}:{{.ExitCode}}' | sed -n 's/^chain-deploy://p')" "0"
+check "chain-svc is running, not stuck in created" \
+  "$("${COMPOSE[@]}" ps --format '{{.Service}}:{{.State}}' | sed -n 's/^chain-svc://p')" "running"
+check "the supply is the one the spend left behind" \
+  "$(curl -fsS "${A[@]}" http://127.0.0.1:7000/supply)" "$SPENT"
+
 step "otterscan (both halves - a served page that cannot reach the chain must not pass)"
 OTS_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5100/)
 check "frontend served" "$OTS_CODE" "200"
