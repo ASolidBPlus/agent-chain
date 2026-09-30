@@ -237,6 +237,54 @@ environment): `ANVIL_MNEMONIC` (a BIP-39 phrase), `CHAIN_SVC_TOKEN` (the
 operator's platform token) and `KEYSTORE_SECRET` (encrypts wallet keys at rest).
 Generate them; never commit them.
 
+### Two ways to deploy the contracts
+
+**The boot container (the default).** The stack above: the `chain-deploy`
+one-shot runs the Foundry script against `deployments/manifest.json`, writes
+`deployments/local.json`, and chain-svc starts only after it succeeds. Pick it
+when the manifest is known when the stack starts and the host has the checkout.
+
+**From chain-svc itself.** Add the overlay:
+
+```
+docker compose -f compose.chain.yml -f compose.chain-admin.yml --profile chain up -d --build
+curl -X POST http://127.0.0.1:7000/admin/deploy \
+  -H "authorization: Bearer $CHAIN_SVC_TOKEN" -H 'content-type: application/json' \
+  --data-binary @deployments/examples/two-tokens.json
+```
+
+chain-svc (`DEPLOY_MODE=admin`) starts with no deployment. `/health` answers
+`{"ok":true,"deployed":false}` and every other route answers 503
+`not_deployed` until a `POST /admin/deploy` with a manifest succeeds. Pick it
+when the manifest is decided after the stack is up, or comes from somewhere
+that can reach the API but not the host's files. The route:
+
+- deploys the same contracts to the same addresses as the container: the same
+  CREATE2 salts and init code, the same roles, and on a fresh chain the same
+  transactions in the same order. CI deploys one manifest both ways and
+  compares the results.
+- sends only what is missing and checks the result before writing anything.
+  Repeating the same manifest sends nothing. A different manifest, once one is
+  deployed, is 409 `deployment_conflict`. "Different" compares numbers by their
+  text, so `1000` and `1e3` conflict.
+- writes the record to `deployment/local.json` in chain-svc's store volume, and
+  the accepted manifest beside it (0600). The overlay mounts that one
+  directory, read-only, as the front's `/deployments`.
+- deploys a `contract` entry only for a contract under `contracts/src`, whose
+  bytecode ships with chain-svc.
+
+Differences from the container that matter:
+
+- **An existing converter pair is left at its rate.** The container re-sends
+  `setPair` on every run, so a changed rate in the manifest takes effect there.
+  The route sends a pair only when it is missing.
+- **Container to admin works**: the same manifest finds every module present
+  and sends nothing. **Admin to container is refused** by `deploy-once.sh`,
+  which will not deploy onto a chain with blocks and no `deployments/local.json`.
+  That is the safe direction to refuse.
+- **Start wallet-mcp after the deploy.** Until then chain-svc answers
+  `not_deployed` to everything it would ask.
+
 `contracts/` needs Foundry v1.8.1 (`forge test`); `svc/` and `wallet-mcp/` need
 only bun. `svc/src/abi.ts` is generated from the contract build and committed —
 CI regenerates it and fails on a diff, so a contract change that is not reflected
