@@ -96,6 +96,16 @@ export type ErrorCode =
   | 'revert'
   | 'chain_error'
   | 'chain_unreachable'
+  /// This service has no deployment yet: it was started to deploy one itself,
+  /// and nothing has. Every route but the deploy answers this until one exists.
+  | 'not_deployed'
+  /// A deploy was asked for that this chain cannot have: the stack deploys
+  /// with the boot container, a different manifest is already deployed here,
+  /// or an address holds code that is not the module it should be.
+  | 'deployment_conflict'
+  /// Every send the treasury signs goes through one queue so nonces cannot
+  /// interleave; this request waited on it too long.
+  | 'treasury_busy'
   | 'internal_error';
 
 /// Exported so a RUNTIME check can enumerate the codes: `ErrorCode` is a type
@@ -149,6 +159,16 @@ export const STATUS: Record<ErrorCode, number> = {
   treasury_insufficient: 409,
   chain_error: 502,
   chain_unreachable: 503,
+  // 503: the service is up and the request well formed; what it needs does not
+  // exist yet. A retry after the deploy succeeds.
+  not_deployed: 503,
+  // 409 with the other "the far side says no" refusals: well formed and
+  // authorised, and the chain's state is what stops it. Retrying it unchanged
+  // cannot help.
+  deployment_conflict: 409,
+  // 503: nothing is wrong with the request, only with the moment. A retry
+  // after the queue drains succeeds.
+  treasury_busy: 503,
   internal_error: 500,
 };
 
