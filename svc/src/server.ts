@@ -668,7 +668,8 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/call', prefix: false, scope: 'wallet', handler: postCall, requires: [] },
   { method: 'POST', path: '/admin-call', prefix: false, scope: 'platform', handler: postAdminCall, requires: [] },
   { method: 'POST', path: '/read', prefix: false, scope: 'any', handler: postRead, requires: [], mutates: false },
-  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },  // The one route the not-deployed gate lets through. `requires: []` because it
+  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },
+  // The one route the not-deployed gate lets through. `requires: []` because it
   // is how modules come to exist; platform-only, checked again in the handler.
   { method: DEPLOY_ROUTE.method, path: DEPLOY_ROUTE.path, prefix: false, scope: 'platform', handler: postAdminDeploy, requires: [] },
 ];
