@@ -329,7 +329,11 @@ export class Chain {
   /// Outside the activation swap - a Chain outlives it - so a send queued
   /// before a deploy completes is still ordered against one queued after.
   private readonly treasuryLock = new TreasuryLock();
-  readonly deployment: Deployment;
+  /// SET BY ACTIVATION, not by the constructor. A Chain exists before this
+  /// service has a deployment - booted to deploy one itself - so the record is
+  /// attached when one is activated, in the same swap that sets `modules`.
+  /// Every reader is behind a route the not-deployed gate closes until then.
+  deployment!: Deployment;
   readonly treasury: Address;
   readonly viemChain: ViemChain;
   /// The ONLY non-readonly field here, and it is populated immediately after
@@ -339,21 +343,11 @@ export class Chain {
   /// call. `Chain` stays a viem wrapper; the boot sequence owns the order.
   modules!: Modules;
 
-  constructor(config: Config, deployment: Deployment) {
-    this.deployment = deployment;
+  constructor(config: Config) {
     // Account 0 of the chain's own mnemonic is the deployer and the treasury
     // (spec S2). Derived in memory; never written to the keystore volume.
     const account = mnemonicToAccount(config.anvilMnemonic);
     this.treasury = account.address;
-
-    if (account.address.toLowerCase() !== deployment.treasury.toLowerCase()) {
-      // Silently signing as the wrong account would mint from an address with
-      // no MINTER_ROLE and fail deep inside a transfer, so say it at startup.
-      throw new Error(
-        `chain-svc: ANVIL_MNEMONIC derives ${account.address} but the deployment ` +
-          `names ${deployment.treasury} as treasury - wrong mnemonic for this chain`,
-      );
-    }
 
     // viem needs a chain object to send a transaction at all. Defined here
     // rather than imported from viem/chains so the id is the one this service
@@ -380,13 +374,13 @@ export class Chain {
     this.publicClient = createPublicClient({ chain: this.viemChain, transport, pollingInterval }) as PublicClient;
     this.walletClient = createWalletClient({ account, chain: this.viemChain, transport, pollingInterval });
   }
+
   /// The only way to send as the treasury. `fn` is handed the wallet client and
   /// returns the transaction's hash; it runs under TreasuryLock, and the lock is
   /// released as the hash comes back, before anything waits for a receipt.
   sendAsTreasury(fn: (wallet: WalletClient) => Promise<Hash>): Promise<Hash> {
     return this.treasuryLock.run(() => fn(this.walletClient));
   }
-
 }
 
 /// Refuses any RPC host that could be a public endpoint. Checked BEFORE the
@@ -452,10 +446,31 @@ export async function assertPrivateChain(chain: Chain): Promise<void> {
         `and only ever runs against the game's private chain.`,
     );
   }
-  if (chainId !== chain.deployment.chainId) {
+}
+
+/// ACTIVATION STEP (a): the mnemonic this service holds is the one the record
+/// was deployed from. It used to be checked in the constructor; a Chain now
+/// exists before there is a record to check it against. The text is unchanged.
+export function assertTreasuryMatchesRecord(chain: Chain, record: Deployment): void {
+  if (chain.treasury.toLowerCase() !== record.treasury.toLowerCase()) {
+    // Silently signing as the wrong account would mint from an address with
+    // no MINTER_ROLE and fail deep inside a transfer, so say it at startup.
+    throw new Error(
+      `chain-svc: ANVIL_MNEMONIC derives ${chain.treasury} but the deployment ` +
+        `names ${record.treasury} as treasury - wrong mnemonic for this chain`,
+    );
+  }
+}
+
+/// ACTIVATION STEP (b): the chain answering is the one the record was made on.
+/// The half of assertPrivateChain that needs a record; the half that does not
+/// - that this is the private chain at all - still runs at boot. Text unchanged.
+export async function assertChainIdMatchesRecord(chain: Chain, record: Deployment): Promise<void> {
+  const chainId = await chain.publicClient.getChainId();
+  if (chainId !== record.chainId) {
     throw new Error(
       `chain-svc: wrong_chain_id - RPC reports ${chainId} but the deployment in local.json was ` +
-        `made on ${chain.deployment.chainId}`,
+        `made on ${record.chainId}`,
     );
   }
 }

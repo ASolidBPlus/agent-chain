@@ -15,6 +15,7 @@ import { resolveBareName } from './resolver.ts';
 import type { Resolver } from './resolver.ts';
 import type { Spawner } from './spawn.ts';
 import type { Store } from './store.ts';
+import type { Keystore } from './keystore.ts';
 import type { Treasury } from './treasury.ts';
 import { assertCanonicalAgentId, assertLookupName, formatVee } from './validate.ts';
 import { defaultToken, resolveToken, type ModuleKind, type Modules } from './modules.ts';
@@ -26,6 +27,56 @@ export interface Services {
   store: Store;
   spawner: Spawner;
   treasury: Treasury;
+}
+
+/// What exists before this service has a deployment: enough to authenticate a
+/// caller and to deploy one, and nothing that can move money.
+export interface BootServices {
+  config: Config;
+  chain: Chain;
+  store: Store;
+  keystore: Keystore;
+}
+
+/// The one route that runs before there is a deployment, because it is how
+/// one comes to exist. Every other route answers not_deployed until then.
+export const DEPLOY_ROUTE = { method: 'POST', path: '/admin/deploy' } as const;
+
+/// What the server reads its services from, PER REQUEST.
+///
+/// A bundle handed to the server once would pin whatever existed at startup;
+/// this service can start with no deployment and gain one while listening, so
+/// the server asks the holder each time. Activation swaps the whole set at once
+/// - never a half-built one - and until it has, `current` is null.
+export class ServicesHolder {
+  private active: Services | null = null;
+  /// The event tail activation starts. Kept here because activation can happen
+  /// after boot - through the deploy route - and shutdown must stop whichever
+  /// one is running.
+  events: { stop(): void } | null = null;
+
+  constructor(readonly boot: BootServices) {}
+
+  /// A holder that is already activated, for a caller - a test, mostly - that
+  /// has a complete set of services and no deployment step to go through.
+  static activated(services: Services): ServicesHolder {
+    const h = new ServicesHolder({
+      config: services.config,
+      chain: services.chain,
+      store: services.store,
+      keystore: (services as Services & { keystore?: Keystore }).keystore as Keystore,
+    });
+    h.active = services;
+    return h;
+  }
+
+  get current(): Services | null {
+    return this.active;
+  }
+
+  swap(services: Services): void {
+    this.active = services;
+  }
 }
 
 /// Bodies are small JSON objects. The cap is here so a caller cannot make this
@@ -43,7 +94,11 @@ type Handler = (ctx: RouteContext) => Promise<unknown>;
 type Scope = 'platform' | 'wallet' | 'any';
 
 interface RouteContext {
+  /// The activated services. Before activation only DEPLOY_ROUTE reaches a
+  /// handler at all - the not-deployed gate stops every other - and that one
+  /// handler reads `holder`, never this.
   services: Services;
+  holder: ServicesHolder;
   /// Path parameter, already percent-decoded. Canonical ids contain a colon,
   /// which is legal in a path segment but arrives encoded from most clients.
   param: string;
@@ -755,8 +810,9 @@ function send(
   res.end(text);
 }
 
-export async function handle(services: Services, req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function handle(holder: ServicesHolder, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://chain-svc');
+  const services = holder.current;
   // Declared outside the try so the REFUSAL path carries it too: a caller whose
   // deprecated field was the reason for the refusal must still be told the
   // field is deprecated.
@@ -764,17 +820,37 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
   try {
     // Unauthenticated on purpose: compose's healthcheck must not need the
     // token, and it reveals nothing a caller could not learn by connecting.
+    //
+    // ONCE ACTIVATED, EXACTLY THE BODY IT ALWAYS HAD, in both modes, so a stack
+    // that deploys with the boot container sees no change at all. Before
+    // activation it says so, rather than listing modules that do not exist.
     if (req.method === 'GET' && url.pathname === '/health') {
-      return send(res, 200, { ok: true, modules: healthModules(services.chain.modules) });
+      return services === null
+        ? send(res, 200, { ok: true, deployed: false })
+        : send(res, 200, { ok: true, modules: healthModules(services.chain.modules) });
     }
 
-    const principal = authenticate(req.headers.authorization, services.config.token, services.store);
+    // Authentication needs only what exists at boot, so it runs first in both
+    // states: an unauthenticated caller gets 401 before and after activation,
+    // never a 503 that would tell it something about the deployment.
+    const principal = authenticate(req.headers.authorization, holder.boot.config.token, holder.boot.store);
 
     const found = match(req.method ?? 'GET', url.pathname);
     if (!found) throw new HttpError('invalid_request', `no route for ${req.method} ${url.pathname}`);
 
     assertRouteScope(found.route, principal, `${req.method} ${url.pathname}`);
-    assertModulesDeployed(found.route, services.chain.modules, `${req.method} ${url.pathname}`);
+
+    // THE NOT-DEPLOYED GATE, after scope and before anything else. Nothing that
+    // can move money runs until activation has passed every check in it - which
+    // is how the ledger and deployment controls still precede every spend, now
+    // that the server can be listening before a deployment exists.
+    const isDeploy = found.route.method === DEPLOY_ROUTE.method && found.route.path === DEPLOY_ROUTE.path;
+    if (services === null && !isDeploy) {
+      throw new HttpError('not_deployed', 'this service has no deployment yet; POST /admin/deploy creates one');
+    }
+    if (services !== null) {
+      assertModulesDeployed(found.route, services.chain.modules, `${req.method} ${url.pathname}`);
+    }
 
     const method = req.method ?? 'GET';
     const raw = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
@@ -784,7 +860,10 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
 
     const marker = req.headers['x-wallet-client'];
     const result = await found.route.handler({
-      services,
+      // Null only for DEPLOY_ROUTE before activation, and that handler reads
+      // `holder`; the gate above is what makes that the only case.
+      services: services as Services,
+      holder,
       param: found.param,
       url,
       body,
@@ -815,8 +894,12 @@ export async function handle(services: Services, req: IncomingMessage, res: Serv
   }
 }
 
-export function createChainSvcServer(services: Services): Server {
+/// Serves from a holder, read per request. A complete set of services is also
+/// accepted and treated as already activated, which is what every caller with
+/// no deployment step to go through - the tests - wants.
+export function createChainSvcServer(source: Services | ServicesHolder): Server {
+  const holder = source instanceof ServicesHolder ? source : ServicesHolder.activated(source);
   return createServer((req, res) => {
-    void handle(services, req, res);
+    void handle(holder, req, res);
   });
 }
