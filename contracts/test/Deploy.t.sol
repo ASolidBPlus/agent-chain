@@ -1249,7 +1249,16 @@ contract DeployTest is Test {
             '{"schema":1,"modules":[{"kind":"contract","key":"shop","contract":"NoSuchContract","args":[]}]}'
         );
         Deploy d = _script();
-        vm.expectRevert(bytes('Deploy: manifest: no artifact for "NoSuchContract"'));
+        // The whole sentence, because its second half is the point: it says what
+        // to do. Forge's own reason is deliberately not passed on - for a contract
+        // it did not compile, getCode reports the path "is not allowed to be
+        // accessed" even when no such file exists, which would send a misspelt
+        // name off to look for a permission problem.
+        vm.expectRevert(
+            bytes(
+                'Deploy: manifest: no artifact for "NoSuchContract" - a contract entry must name a contract declared under contracts/src, spelled exactly as declared'
+            )
+        );
         d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
