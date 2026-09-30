@@ -170,6 +170,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closedCallPolicy } from '../src/calls.ts';
+import { treasurySender } from './support/treasury.ts';
 
 const PKG = new URL('..', import.meta.url).pathname;
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play']);
@@ -192,7 +193,7 @@ function detector(entries: Record<string, string | null>) {
       viemChain: {},
       deployment: {}, modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },
       publicClient: { waitForTransactionReceipt: async () => ({}) },
-      walletClient: { writeContract: async () => '0xsent' },
+      ...treasurySender({ writeContract: async () => '0xsent' }),
     } as unknown as Chain,
     { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: addr('9') }) } as unknown as Keystore,
     store,

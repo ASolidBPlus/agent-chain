@@ -21,6 +21,7 @@ import type { Chain } from '../src/chain.ts';
 import type { Keystore } from '../src/keystore.ts';
 import type { Resolver } from '../src/resolver.ts';
 import { closedCallPolicy } from '../src/calls.ts';
+import { treasurySender } from './support/treasury.ts';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play']);
@@ -245,7 +246,7 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
         readContract: async () => seed, // already holds the full seed
         waitForTransactionReceipt: async () => ({}),
       },
-      walletClient: {
+      ...treasurySender({
         account: { address: '0x5' },
         sendTransaction: async () => {
           writes.push('sendTransaction');
@@ -255,7 +256,7 @@ describe('a resumed spawn (marker missing, wallet already funded)', () => {
           writes.push('writeContract');
           return '0xbeef';
         },
-      },
+      }),
     } as unknown as Chain;
 
     const keystore = {
@@ -396,14 +397,14 @@ describe('POST /wallets fund: [{token, amount}]', () => {
         readContract: async () => 0n, // holds nothing yet, so both seeds move
         waitForTransactionReceipt: async () => ({}),
       },
-      walletClient: {
+      ...treasurySender({
         account: { address: '0x5' },
         sendTransaction: async () => '0xdead',
         writeContract: async (a: { address: string; args: unknown[] }) => {
           sent.push({ to: a.address, args: a.args });
           return '0xbeef';
         },
-      },
+      }),
     } as unknown as Chain;
 
     const s = new Spawner(
@@ -1362,14 +1363,14 @@ describe('POST /wallets/:agentId/balance', () => {
             args?.[0] === TREASURY ? treasuryFloat : t.balance,
           waitForTransactionReceipt: async () => ({}),
         },
-        walletClient: {
+        ...treasurySender({
           account: {},
           writeContract: async ({ args }: { args: [string, bigint] }) => {
             t.sent.push({ to: args[0], amount: args[1] });
             t.balance += args[1];
             return '0xfunded' as `0x${string}`;
           },
-        },
+        }),
       } as unknown as Chain,
       { load: async () => ({ privateKey: `0x${'11'.repeat(32)}`, address: WALLET }) } as unknown as Keystore,
       store,
@@ -1688,7 +1689,7 @@ describe('PATCH /wallets/:agentId/policy', () => {
       deployment: {},
       modules: { tokens: [{ key: 'play', address: '0x0', symbol: 'PLAY', decimals: 18 }] },
       publicClient: { getBalance: async () => 10n ** 18n, waitForTransactionReceipt: async () => ({}) },
-      walletClient: { account: {}, sendTransaction: async () => '0xdead' },
+      ...treasurySender({ account: {}, sendTransaction: async () => '0xdead' }),
     } as unknown as Chain;
     // NO KIND DEFAULTS, which is the condition: with defaults loaded the
     // written document carries allow/deny from them and the old gate passed.
@@ -1823,11 +1824,11 @@ describe('spawn records the kind it enforced', () => {
         readContract: async () => 10n ** 30n,    // already funded
         waitForTransactionReceipt: async () => ({}),
       },
-      walletClient: {
+      ...treasurySender({
         account: { address: '0x5' },
         sendTransaction: async () => '0xdead',
         writeContract: async () => '0xbeef',
-      },
+      }),
     } as unknown as Chain;
     const keystore = { has: async () => true, load: async () => ({ address, privateKey: '0x00' }) } as unknown as Keystore;
     const resolver = {

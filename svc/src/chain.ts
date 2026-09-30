@@ -9,6 +9,7 @@ import {
   getAddress,
   type Address,
   type Chain as ViemChain,
+  type Hash,
   type PublicClient,
   type WalletClient,
 } from 'viem';
@@ -268,9 +269,66 @@ export function loadDeployment(deploymentsDir: string): Deployment {
 /// play money.
 export const ZERO_FEES = { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n } as const;
 
+/// One queue for every transaction the treasury key signs.
+///
+/// WHY IT EXISTS. viem gives a request its nonce when it prepares it, from the
+/// node's count of the account's pending transactions. Two sends prepared at
+/// the same moment read the same count, and one of them is rejected. Measured on
+/// anvil with eight concurrent fund requests and no lock: one succeeded.
+///
+/// HELD FROM PREPARATION TO THE RETURNED HASH, and no longer. By the time a hash
+/// comes back the node holds the transaction, so the next preparation reads the
+/// new count. Waiting for the receipt as well would serialise every send behind
+/// every other's confirmation for nothing a nonce needs.
+///
+/// FIFO, AND BOUNDED - AND A WAITER THAT GIVES UP DOES NOT SIMPLY LEAVE. It
+/// hands its place on only once the send ahead of it has finished. Leaving at
+/// once would let the one behind it start while that send is still in flight,
+/// which is exactly the overlap this exists to prevent.
+export class TreasuryLock {
+  private tail: Promise<void> = Promise.resolve();
+
+  constructor(private readonly waitLimitMs: number = 30_000) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    const ahead = this.tail;
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.tail = mine;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), this.waitLimitMs);
+    });
+    const outcome = await Promise.race([ahead.then(() => 'turn' as const), timedOut]);
+    clearTimeout(timer);
+
+    if (outcome === 'timeout') {
+      void ahead.then(release);
+      throw new HttpError(
+        'treasury_busy',
+        `a treasury send waited more than ${this.waitLimitMs / 1000}s for the queue`,
+      );
+    }
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
+
 export class Chain {
   readonly publicClient: PublicClient;
-  readonly walletClient: WalletClient;
+  /// PRIVATE, so that the type checker is what enforces the lock: nothing
+  /// outside this class can reach the client that signs as the treasury, and
+  /// `sendAsTreasury` is the only thing here that hands it out.
+  private readonly walletClient: WalletClient;
+  /// Outside the activation swap - a Chain outlives it - so a send queued
+  /// before a deploy completes is still ordered against one queued after.
+  private readonly treasuryLock = new TreasuryLock();
   readonly deployment: Deployment;
   readonly treasury: Address;
   readonly viemChain: ViemChain;
@@ -322,6 +380,13 @@ export class Chain {
     this.publicClient = createPublicClient({ chain: this.viemChain, transport, pollingInterval }) as PublicClient;
     this.walletClient = createWalletClient({ account, chain: this.viemChain, transport, pollingInterval });
   }
+  /// The only way to send as the treasury. `fn` is handed the wallet client and
+  /// returns the transaction's hash; it runs under TreasuryLock, and the lock is
+  /// released as the hash comes back, before anything waits for a receipt.
+  sendAsTreasury(fn: (wallet: WalletClient) => Promise<Hash>): Promise<Hash> {
+    return this.treasuryLock.run(() => fn(this.walletClient));
+  }
+
 }
 
 /// Refuses any RPC host that could be a public endpoint. Checked BEFORE the
