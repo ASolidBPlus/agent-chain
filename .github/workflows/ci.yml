@@ -40,3 +40,12 @@ jobs:
       # Invoke the package script rather than `bun test` directly, so CI and
       # `bun run test` can't drift into two different definitions of "the tests".
       - run: bun run test
+      # The shell tests that need no Docker: each runs a shipped script with its
+      # external tools stubbed on PATH. Here rather than left as manual scripts,
+      # because a check that runs only when somebody remembers it is one that
+      # drifts from the code it guards - and two of these did. A preflight added
+      # to deploy-once.sh made the argv test vacuous, and nothing noticed for
+      # ten days because nothing ran it.
+      - run: sh docker/test-state-file.sh
+      - run: sh docker/test-fresh-deploy.sh
+      - run: sh docker/test-mnemonic-argv.sh
