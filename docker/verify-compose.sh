@@ -76,8 +76,12 @@ check() {
 # the script passes, fails, or is interrupted. `cleanup` runs once before the
 # stack comes up too, and the guard is what makes that call harmless.
 STASHED="$HERE/deployments/local.json.verify-stash"
+# AN `if`, NOT `[ -f ] && mv`: with nothing stashed the `&&` form returns 1,
+# which is cleanup's status, and under `set -e` the EXIT trap hands that to the
+# script - so a run with no local.json printed PASS and exited 1 (MEASURED on a
+# fresh checkout).
 restore_manifest() {
-  [ -f "$STASHED" ] && mv "$STASHED" "$HERE/deployments/local.json"
+  if [ -f "$STASHED" ]; then mv "$STASHED" "$HERE/deployments/local.json"; fi
 }
 cleanup() {
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
