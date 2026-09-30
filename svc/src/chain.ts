@@ -86,8 +86,17 @@ export function loadDeployment(deploymentsDir: string): Deployment {
         `compose does this before starting the service (spec S7).`,
     );
   }
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  return validateDeployment(JSON.parse(raw) as Record<string, unknown>, path);
+}
 
+/// Every rule a deployment record must satisfy, applied to one already parsed.
+///
+/// Split out of loadDeployment so the admin deploy route can hold the record it
+/// is about to write to the SAME rules before sending a transaction - reserved
+/// keys, contract names with no ABI, a second names module - rather than find
+/// out at activation, after the contracts are on chain. `path` only labels the
+/// messages. Returns the record as activation consumes it.
+export function validateDeployment(parsed: Record<string, unknown>, path: string): Deployment {
   // The old four-key shape is retired rather than supported. Reading it would
   // mean inventing a key and a TLD for contracts deployed before either
   // existed, and inventing them is how a wallet ends up looked up under a name

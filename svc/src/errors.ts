@@ -106,6 +106,11 @@ export type ErrorCode =
   /// Every send the treasury signs goes through one queue so nonces cannot
   /// interleave; this request waited on it too long.
   | 'treasury_busy'
+  /// A deploy sent its transactions and the result failed a check: a role not
+  /// held, a pair not set, a seed not minted. Named, so the operator learns
+  /// WHICH check - which is why it is not `internal_error`, whose detail the
+  /// server strips from every response by design.
+  | 'deployment_failed'
   | 'internal_error';
 
 /// Exported so a RUNTIME check can enumerate the codes: `ErrorCode` is a type
@@ -169,6 +174,9 @@ export const STATUS: Record<ErrorCode, number> = {
   // 503: nothing is wrong with the request, only with the moment. A retry
   // after the queue drains succeeds.
   treasury_busy: 503,
+  // 500 like internal_error, and unlike it, carries its detail to the caller:
+  // the detail is which post-deploy check failed, and nothing in it is secret.
+  deployment_failed: 500,
   internal_error: 500,
 };
 

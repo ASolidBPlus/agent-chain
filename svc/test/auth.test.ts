@@ -176,7 +176,7 @@ describe('the route table', () => {
   });
 
   it('keeps every wallet-mutating platform action off the wallet scope', () => {
-    const platformOnly = ['/wallets', '/aliases', '/fund', '/stage'];
+    const platformOnly = ['/wallets', '/aliases', '/fund', '/stage', '/admin/deploy'];
     for (const path of platformOnly) {
       const route = ROUTES.find((r) => r.path === path && r.method === 'POST');
       expect(route?.scope).toBe('platform');

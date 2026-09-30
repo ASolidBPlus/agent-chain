@@ -206,6 +206,7 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   not_deployed: null,
   deployment_conflict: null,
   treasury_busy: null,
+  deployment_failed: null,
 };
 /// The reason a persona sees for a chain-svc error code, or null for generic.
 ///

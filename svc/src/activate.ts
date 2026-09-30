@@ -22,7 +22,7 @@ import {
 } from './chain.ts';
 import type { Config } from './config.ts';
 import { TokenAbi } from './abi.ts';
-import { buildModules, requireNames } from './modules.ts';
+import { buildModules, requireNames, type Modules } from './modules.ts';
 import { Resolver } from './resolver.ts';
 import { loadPolicyDefaults } from './policy.ts';
 import { Spawner } from './spawn.ts';
@@ -31,9 +31,24 @@ import { assertDeploymentUnchanged } from './deployment.ts';
 import { Treasury } from './treasury.ts';
 import { EventTail } from './events.ts';
 import { CallPolicy } from './calls.ts';
-import type { ServicesHolder } from './server.ts';
+import type { ServicesHolder, Services } from './server.ts';
 
+/// What (a) through (g) produce: checked, built, and not yet visible to anything.
+export interface PreparedActivation {
+  deployment: Deployment;
+  modules: Modules;
+  services: Services;
+}
+
+/// Boot's activation: prepare, then commit, with nothing between them.
 export async function activate(holder: ServicesHolder, deployment: Deployment): Promise<void> {
+  await commitActivation(holder, await prepareActivation(holder, deployment));
+}
+
+/// Steps (a) to (g). Every check runs here, and nothing the server reads
+/// changes. The deploy route writes its record between this and the commit, so
+/// a record reaches disk only for a deployment that has passed every check.
+export async function prepareActivation(holder: ServicesHolder, deployment: Deployment): Promise<PreparedActivation> {
   const { config, chain, store, keystore } = holder.boot;
 
   // (a) The mnemonic this service holds is the one the record was deployed from.
@@ -107,11 +122,17 @@ export async function activate(holder: ServicesHolder, deployment: Deployment): 
     ),
   };
 
+  return { deployment, modules, services };
+}
+
+/// Steps (h) and (i): make a prepared activation live.
+export async function commitActivation(holder: ServicesHolder, prepared: PreparedActivation): Promise<void> {
+  const { config, chain, store } = holder.boot;
   // (h) THE SWAP - one step, after every check. The treasury's send lock lives
   // on Chain, outside this, so a send queued before it stays ordered after.
-  chain.deployment = deployment;
-  chain.modules = modules;
-  holder.swap(services);
+  chain.deployment = prepared.deployment;
+  chain.modules = prepared.modules;
+  holder.swap(prepared.services);
 
   // (i) Only now does anything tail the chain. No event tail exists before
   // activation, so nothing is emitted about a deployment that was never checked.

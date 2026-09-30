@@ -106,7 +106,7 @@ const READ_TOOLS: Array<[string, (w: Wallet) => Promise<unknown>]> = [
 // two describe how the deployment was set up, and `treasury_busy` would tell a
 // persona that a treasury key exists and is under contention.
 describe('the deploy codes are withheld from personas', () => {
-  for (const code of ['not_deployed', 'deployment_conflict', 'treasury_busy'] as const) {
+  for (const code of ['not_deployed', 'deployment_conflict', 'treasury_busy', 'deployment_failed'] as const) {
     it(`${code} maps to the generic refusal`, () => {
       expect(REFUSAL_FOR[code]).toBeNull();
     });

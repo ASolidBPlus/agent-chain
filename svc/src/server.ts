@@ -9,6 +9,7 @@ import { TokenAbi } from './abi.ts';
 import type { Chain } from './chain.ts';
 import { asChainError } from './chain.ts';
 import { assertMayRead, authenticate, requirePlatform, type Principal } from './auth.ts';
+import { adminDeploy } from './admin-deploy.ts';
 import type { Config } from './config.ts';
 import { HttpError, errorBody, toHttpError } from './errors.ts';
 import { resolveBareName } from './resolver.ts';
@@ -99,6 +100,9 @@ interface RouteContext {
   /// handler reads `holder`, never this.
   services: Services;
   holder: ServicesHolder;
+  /// The request body exactly as sent. Every other route reads `body`; the
+  /// deploy route reads this, because JSON.parse rounds an integer past 2^53.
+  rawBody: string;
   /// Path parameter, already percent-decoded. Canonical ids contain a colon,
   /// which is legal in a path segment but arrives encoded from most clients.
   param: string;
@@ -628,6 +632,10 @@ async function postRead({ services, body, principal }: RouteContext): Promise<un
   return services.treasury.read(principal, body);
 }
 
+function postAdminDeploy({ holder, principal, rawBody }: RouteContext) {
+  return adminDeploy(holder, principal, rawBody);
+}
+
 export const ROUTES: Route[] = [
   { method: 'GET', path: '/modules', prefix: false, scope: 'any', handler: getModules, requires: [] },
   { method: 'GET', path: '/supply', prefix: false, scope: 'platform', handler: getSupply, requires: ['token'] },
@@ -660,7 +668,9 @@ export const ROUTES: Route[] = [
   { method: 'POST', path: '/call', prefix: false, scope: 'wallet', handler: postCall, requires: [] },
   { method: 'POST', path: '/admin-call', prefix: false, scope: 'platform', handler: postAdminCall, requires: [] },
   { method: 'POST', path: '/read', prefix: false, scope: 'any', handler: postRead, requires: [], mutates: false },
-  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },
+  { method: 'DELETE', path: '/wallets/', prefix: true, scope: 'platform', handler: deleteWallet, requires: [] },  // The one route the not-deployed gate lets through. `requires: []` because it
+  // is how modules come to exist; platform-only, checked again in the handler.
+  { method: DEPLOY_ROUTE.method, path: DEPLOY_ROUTE.path, prefix: false, scope: 'platform', handler: postAdminDeploy, requires: [] },
 ];
 
 /// @throws HttpError for a malformed percent-escape - a caller error, not a
@@ -703,7 +713,9 @@ function match(method: string, pathname: string): { route: Route; param: string 
   return null;
 }
 
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+/// The body parsed, and the text it was parsed from. The text is kept for the
+/// one route that must not read numbers through JSON.parse - see manifest.ts.
+async function readBody(req: IncomingMessage): Promise<{ body: Record<string, unknown>; text: string }> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -712,7 +724,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
     chunks.push(chunk as Buffer);
   }
   const text = Buffer.concat(chunks).toString('utf8').trim();
-  if (text === '') return {};
+  if (text === '') return { body: {}, text };
 
   let parsed: unknown;
   try {
@@ -723,7 +735,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new HttpError('invalid_request', 'body must be a JSON object');
   }
-  return parsed as Record<string, unknown>;
+  return { body: parsed as Record<string, unknown>, text };
 }
 
 /// §1. `vee` was one deployment's currency in a field name. It becomes `amount`
@@ -853,8 +865,8 @@ export async function handle(holder: ServicesHolder, req: IncomingMessage, res: 
     }
 
     const method = req.method ?? 'GET';
-    const raw = method === 'GET' || method === 'DELETE' ? {} : await readBody(req);
-    const aliased = aliasVee(raw);
+    const read = method === 'GET' || method === 'DELETE' ? { body: {}, text: '' } : await readBody(req);
+    const aliased = aliasVee(read.body);
     deprecated = aliased.deprecated;
     const body = aliased.body;
 
@@ -864,6 +876,7 @@ export async function handle(holder: ServicesHolder, req: IncomingMessage, res: 
       // `holder`; the gate above is what makes that the only case.
       services: services as Services,
       holder,
+      rawBody: read.text,
       param: found.param,
       url,
       body,
