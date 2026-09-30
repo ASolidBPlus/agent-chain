@@ -345,13 +345,15 @@ export class Spawner {
     try {
       const balance = await this.chain.publicClient.getBalance({ address });
       if (balance >= GAS_ENDOWMENT) return; // already endowed by an earlier attempt
-      const hash = await this.chain.walletClient.sendTransaction({
-        account: this.chain.walletClient.account!,
-        chain: this.chain.viemChain,
-        to: address,
-        value: GAS_ENDOWMENT - balance,
-        ...ZERO_FEES,
-      });
+      const hash = await this.chain.sendAsTreasury((wallet) =>
+        wallet.sendTransaction({
+          account: wallet.account!,
+          chain: this.chain.viemChain,
+          to: address,
+          value: GAS_ENDOWMENT - balance,
+          ...ZERO_FEES,
+        }),
+      );
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
     } catch (err) {
       throw asChainError(err);
@@ -370,15 +372,17 @@ export class Spawner {
       // must not double-fund one that did.
       if (balance >= amount) return;
 
-      const hash = await this.chain.walletClient.writeContract({
-        account: this.chain.walletClient.account!,
-        chain: this.chain.viemChain,
-        address: token.address,
-        abi: TokenAbi,
-        functionName: 'transfer',
-        args: [address, amount - balance],
-        ...ZERO_FEES,
-      });
+      const hash = await this.chain.sendAsTreasury((wallet) =>
+        wallet.writeContract({
+          account: wallet.account!,
+          chain: this.chain.viemChain,
+          address: token.address,
+          abi: TokenAbi,
+          functionName: 'transfer',
+          args: [address, amount - balance],
+          ...ZERO_FEES,
+        }),
+      );
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
     } catch (err) {
       throw asChainError(err);
@@ -413,15 +417,17 @@ export class Spawner {
   /// used to reject is the natural place to witness that it no longer does.
   private async send(functionName: 'registerFor' | 'setTargetFor', args: unknown[]): Promise<string> {
     try {
-      const hash = await this.chain.walletClient.writeContract({
-        account: this.chain.walletClient.account!,
-        chain: this.chain.viemChain,
-        address: requireNames(this.chain.modules).address,
-        abi: NameRegistryAbi,
-        functionName,
-        args: args as never,
-        ...ZERO_FEES,
-      });
+      const hash = await this.chain.sendAsTreasury((wallet) =>
+        wallet.writeContract({
+          account: wallet.account!,
+          chain: this.chain.viemChain,
+          address: requireNames(this.chain.modules).address,
+          abi: NameRegistryAbi,
+          functionName,
+          args: args as never,
+          ...ZERO_FEES,
+        }),
+      );
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       return hash;
     } catch (err) {

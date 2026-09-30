@@ -532,16 +532,18 @@ export class Treasury {
     memo: string | null;
   }): Promise<{ txHash: string; intentId: string }> {
     try {
-      const hash = await this.chain.walletClient.writeContract({
-        account: this.chain.walletClient.account!,
-        chain: this.chain.viemChain,
-        address: args.token.address,
-        abi: TokenAbi,
-        functionName: 'transferWithIntent',
-        // FROM THE ROW, never re-derived.
-        args: [args.to, args.amount, this.storedTopic(args.recipient, args.intentId)],
-        ...ZERO_FEES,
-      });
+      const hash = await this.chain.sendAsTreasury((wallet) =>
+        wallet.writeContract({
+          account: wallet.account!,
+          chain: this.chain.viemChain,
+          address: args.token.address,
+          abi: TokenAbi,
+          functionName: 'transferWithIntent',
+          // FROM THE ROW, never re-derived.
+          args: [args.to, args.amount, this.storedTopic(args.recipient, args.intentId)],
+          ...ZERO_FEES,
+        }),
+      );
       await this.chain.publicClient.waitForTransactionReceipt({ hash });
       this.store.recordMemo({
         txHash: hash,
@@ -2078,15 +2080,17 @@ export class Treasury {
       : shaped;
     let hash: `0x${string}`;
     try {
-      hash = await this.chain.walletClient.writeContract({
-        account: this.chain.walletClient.account!,
-        chain: this.chain.viemChain,
-        address: contract.address,
-        abi: contract.abi,
-        functionName: fnName,
-        args: finalArgs as never,
-        ...ZERO_FEES,
-      });
+      hash = await this.chain.sendAsTreasury((wallet) =>
+        wallet.writeContract({
+          account: wallet.account!,
+          chain: this.chain.viemChain,
+          address: contract.address,
+          abi: contract.abi,
+          functionName: fnName,
+          args: finalArgs as never,
+          ...ZERO_FEES,
+        }),
+      );
     } catch (err) {
       // --- AT OR AFTER THE BROADCAST --------------------------------------
       // NO RELEASE HERE, and it is not an omission. `writeContract` simulates

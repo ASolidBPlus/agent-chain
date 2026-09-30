@@ -31,6 +31,8 @@ import type { Config } from '../src/config.ts';
 import { loadPolicyDefaults } from '../src/policy.ts';
 import { buildModules, type Modules } from '../src/modules.ts';
 import type { Deployment } from '../src/chain.ts';
+import { treasurySender } from './support/treasury.ts';
+import { TreasuryLock } from '../src/chain.ts';
 
 const PKG = join(import.meta.dir, '..');
 const DEFAULTS = loadPolicyDefaults(join(PKG, 'policy-defaults.example.json'), 'play', ['play', 'gold']);
@@ -260,6 +262,12 @@ async function harness(
   opts: {
     reverted?: boolean;
     store?: Store;
+    /// A real TreasuryLock for the treasury's sends to go through. Without one
+    /// the fake hands the wallet straight over, as every other test here wants.
+    lock?: TreasuryLock;
+    /// Runs inside every treasury write before its hash comes back: how the
+    /// concurrency test gives a send some time in flight, and watches for two.
+    send?: () => Promise<void>;
     keystoreThrows?: boolean;
     /// What the treasury holds OF THE DEFAULT TOKEN, in its smallest unit.
     /// Ample by default, and deliberately per-token: gold's float stays ample
@@ -322,9 +330,10 @@ async function harness(
         return 40n;
       },
     },
-    walletClient: {
+    ...treasurySender({
       account: { address: PLAY },
       writeContract: async (a: { address?: string; args?: readonly unknown[] }) => {
+        if (opts.send) await opts.send();
         written.push(String(a.address));
         // THE ARGUMENTS THE CHAIN RECEIVES. `written` records which contract was
         // addressed and says nothing about what was sent to it - so the admin
@@ -338,7 +347,7 @@ async function harness(
         }
         return '0xadminhash';
       },
-    },
+    }, opts.lock),
   } as unknown as Chain;
 
   const t = new RecordingTreasury(
@@ -1607,5 +1616,34 @@ describe('over_stage_cap says which limit tripped', () => {
     try { await t.call(asWallet('orch:both'), convertBody({ intentId: 'x-4' })); } catch (e) { err = e as HttpError; }
     expect(err?.detail).toMatch(/^max_per_stage is 1 for this stage$/);
     store.close();
+  });
+});
+
+// THE LOCK, THROUGH THE SERVICE. treasury-lock.test.ts proves the lock itself;
+// this proves the routes use it - fund and admin-call fired together, with every
+// treasury write held in flight briefly and watched for company. Two in flight
+// at once is the nonce collision that made seven of eight concurrent funds fail
+// on a real chain.
+describe('concurrent treasury sends', () => {
+  it('fund and admin-call fired together never have two sends in flight', async () => {
+    let inFlight = 0;
+    let most = 0;
+    const { t } = await harness(undefined, {
+      lock: new TreasuryLock(),
+      send: async () => {
+        inFlight++;
+        most = Math.max(most, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+      },
+    });
+    await Promise.all([
+      t.fund({ to: 'bob.play', amount: '1', intentId: 'conc-1' }),
+      t.adminCall({ contract: 'converter', function: 'setPair', args: [PLAY, GOLD, '1'], intentId: 'conc-2' }),
+      t.fund({ to: 'bob.play', amount: '1', intentId: 'conc-3' }),
+      t.adminCall({ contract: 'converter', function: 'setPair', args: [PLAY, GOLD, '1'], intentId: 'conc-4' }),
+      t.fund({ to: 'bob.play', amount: '1', intentId: 'conc-5' }),
+    ]);
+    expect(most).toBe(1);
   });
 });

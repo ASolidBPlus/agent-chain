@@ -41,6 +41,11 @@ export interface Config {
   storePath: string;
   acknowledgeLedgerReset: boolean;
   acknowledgeChainReset: boolean;
+  /// Which path deploys this stack's contracts. `container`, the default, is
+  /// the boot-time deploy container writing local.json, exactly as before.
+  /// `admin` is this service deploying them itself through POST /admin/deploy,
+  /// and booting without a deployment until it has one.
+  deployMode: 'container' | 'admin';
   /// Per-`kind` policy caps applied when POST /wallets carries no explicit
   /// policy. Provisional game balance, tuned by the game owner - deliberately a
   /// file rather than a constant in the code (ruled).
@@ -122,6 +127,15 @@ export function loadConfig(env = process.env): Config {
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       throw new Error(`chain-svc: PORT must be a valid port number, got ${optional('PORT', '7000')}`);
     }
+    // A REFUSAL FOR ANYTHING ELSE, by the variable's name. An unrecognised
+    // value falling back to the default would boot a stack in the mode its
+    // operator did not ask for - and the two modes read their deployment from
+    // different places, so the failure would surface as a missing deployment
+    // rather than as the typo it was.
+    const deployMode = optional('DEPLOY_MODE', 'container');
+    if (deployMode !== 'container' && deployMode !== 'admin') {
+      throw new Error(`chain-svc: DEPLOY_MODE must be "container" or "admin", got "${deployMode}"`);
+    }
     return {
       port,
       rpcUrl: optional('RPC_URL', 'http://chain:8545'),
@@ -137,6 +151,7 @@ export function loadConfig(env = process.env): Config {
       acknowledgeChainReset:
         process.argv.includes('--acknowledge-chain-reset') ||
         optional('CHAIN_SVC_ACKNOWLEDGE_CHAIN_RESET', '') === '1',
+      deployMode,
       token: required('CHAIN_SVC_TOKEN'),
       keystoreSecret: required('KEYSTORE_SECRET'),
       anvilMnemonic: required('ANVIL_MNEMONIC'),

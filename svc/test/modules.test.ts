@@ -275,6 +275,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closedCallPolicy } from '../src/calls.ts';
+import { treasurySender } from './support/treasury.ts';
 
 describe('spawning without a names module', () => {
   const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -295,12 +296,12 @@ describe('spawning without a names module', () => {
       // Any registry write would have to come through here; recording rather
       // than throwing, so the assertion can be "it was never attempted" instead
       // of "it threw something".
-      walletClient: {
+      ...treasurySender({
         writeContract: async ({ functionName }: { functionName: string }) => {
           registryCalls.push(functionName);
           return '0xtx';
         },
-      },
+      }),
       viemChain: {},
       treasury: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
     } as unknown as import('../src/chain.ts').Chain;
@@ -411,7 +412,7 @@ describe('deny entries without a names module', () => {
       viemChain: {},
       modules: { tokens: [{ key: 'play', address: '0xplay', symbol: 'PLAY', decimals: 18 }] },
       publicClient: { waitForTransactionReceipt: async () => ({}) },
-      walletClient: { writeContract: async () => '0xsent' },
+      ...treasurySender({ writeContract: async () => '0xsent' }),
     } as unknown as import('../src/chain.ts').Chain;
 
     const resolver = new Resolver(chain, store);

@@ -134,9 +134,13 @@ describe('the store records which chain it belongs to', () => {
 
 // THE CALL SITE, structurally - the same idiom as the ledger-lifetime guard,
 // and for the same reason: the decision and the facts are pinned above, and the
-// WIRE that connects them lives in index.ts where no test reaches. A constant
-// there would leave this control dormant with every test green.
-describe('the call site in index.ts', () => {
+// WIRE that connects them lives where no test reaches. A constant there would
+// leave this control dormant with every test green.
+//
+// It lived in index.ts and now lives in activate.ts, which both boot and the
+// deploy route call - one copy of the check rather than two that can drift.
+describe('the call site in activate.ts', () => {
+  const activateSrc = () => Bun.file(new URL('../src/activate.ts', import.meta.url)).text();
   const indexSrc = () => Bun.file(new URL('../src/index.ts', import.meta.url)).text();
 
   it('wires the check to the real store and the real deployment', async () => {
@@ -145,7 +149,7 @@ describe('the call site in index.ts', () => {
     // form - an honest weaker instrument, used because the helper was on an
     // unmerged branch - and the weaker one is gone rather than left in the tree
     // with a promise to collapse it later.
-    const src = blankComments(await indexSrc());
+    const src = blankComments(await activateSrc());
     const call = src.indexOf('assertDeploymentUnchanged(');
     expect(call).toBeGreaterThan(-1);
     const wiring = src.slice(src.indexOf('const liveDeployment ='), call + 160);
@@ -164,16 +168,32 @@ describe('the call site in index.ts', () => {
   // ORDER MATTERS. A store pointed at a chain it was not written against cannot
   // resolve any name it recorded, so a later check would be reasoning about a
   // pairing that is already known to be wrong - and nothing may serve first.
-  it('runs BEFORE the ledger check and before the server listens', async () => {
-    const src = blankComments(await indexSrc());
-    const swap = src.indexOf('assertDeploymentUnchanged(');
+  //
+  // "NOTHING MAY SERVE FIRST" HAS A NEW MEANING, and this asserts it rather than
+  // the old wording. The server can now be listening before there is a
+  // deployment, but until activation swaps the services in, the not-deployed
+  // gate answers every money route with 503 - so the point after which money
+  // can move is `holder.swap(`, and the check must precede it. Container boot
+  // still activates before it listens, and that is asserted separately below.
+  it('runs BEFORE the ledger check and before any service is swapped in', async () => {
+    const src = blankComments(await activateSrc());
+    const check = src.indexOf('assertDeploymentUnchanged(');
     const ledger = src.indexOf('assertLedgerLifetimeIntact(');
-    const listen = src.indexOf('server.listen');
-    expect(swap).toBeGreaterThan(-1);
+    const swap = src.indexOf('holder.swap(');
+    expect(check).toBeGreaterThan(-1);
     expect(ledger).toBeGreaterThan(-1);
+    expect(swap).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(ledger);
+    expect(check).toBeLessThan(swap);
+  });
+
+  it('container boot activates before the server listens', async () => {
+    const src = blankComments(await indexSrc());
+    const activation = src.indexOf('await activate(holder, containerRecord)');
+    const listen = src.indexOf('server.listen');
+    expect(activation).toBeGreaterThan(-1);
     expect(listen).toBeGreaterThan(-1);
-    expect(swap).toBeLessThan(ledger);
-    expect(swap).toBeLessThan(listen);
+    expect(activation).toBeLessThan(listen);
   });
 
   // RECORDED ONLY WHEN THERE IS NOTHING RECORDED. If the entrypoint recorded
@@ -182,7 +202,7 @@ describe('the call site in index.ts', () => {
   // nothing was fixed. The store refuses the overwrite too; this pins that the
   // entrypoint does not ask for it.
   it('records only on a store that has never seen a deployment', async () => {
-    const src = blankComments(await indexSrc());
+    const src = blankComments(await activateSrc());
     const at = src.indexOf('store.recordDeployment(');
     expect(at).toBeGreaterThan(-1);
     const line = src.slice(src.lastIndexOf('\n', at) + 1, at);

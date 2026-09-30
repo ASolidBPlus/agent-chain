@@ -1,0 +1,42 @@
+# The chain stack with chain-svc deploying the contracts itself, over
+# POST /admin/deploy, instead of the boot container.
+#
+#   docker compose -f compose.chain.yml -f compose.chain-admin.yml --profile chain up -d
+#
+# An overlay rather than a second stack, so the two paths share every other
+# line. compose.chain.yml alone is the container path, unchanged.
+services:
+  # Moved to a profile nothing starts. Still defined, so `--profile
+  # container-deploy` can run it by hand; never started by `--profile chain`.
+  chain-deploy:
+    profiles: !override [container-deploy]
+
+  chain-svc:
+    # Without the one-shot to wait for: chain-svc starts on a healthy node and
+    # answers `{ok:true, deployed:false}` until a deploy.
+    depends_on: !override
+      chain:
+        condition: service_healthy
+    environment:
+      DEPLOY_MODE: admin
+
+  front:
+    # The record now lives in chain-svc's store volume, at deployment/local.json.
+    # The front mounts THAT SUBDIRECTORY and nothing else: it sees the record,
+    # never the sqlite beside it.
+    volumes: !override
+      - ./docker/front/rpc-proxy.conf.template:/etc/nginx/rpc-proxy.conf.template:ro
+      - ./docker/front/entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/front/rpc_filter.js:/etc/nginx/njs/rpc_filter.js:ro
+      - ./docker/front/overview.js:/etc/nginx/njs/overview.js:ro
+      - type: volume
+        source: svc-store
+        target: /deployments
+        read_only: true
+        volume:
+          subpath: deployment
+    # chain-svc creates the subdirectory at boot, before it listens; a missing
+    # subpath fails the front's start. Healthy is after both.
+    depends_on:
+      chain-svc:
+        condition: service_healthy

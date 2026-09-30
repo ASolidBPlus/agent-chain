@@ -199,6 +199,14 @@ export const REFUSAL_FOR: Record<ErrorCode, Refusal | null> = {
   // fact about the deployment, not about the persona's request, and it goes to
   // the log sink by name like every other generic mapping.
   module_not_deployed: null,
+  // GENERIC, all three: none is a fact about the persona's own wallet. The first
+  // two are about how this deployment was set up, and the third is contention
+  // on a key the persona must never learn exists. Each goes to the log sink by
+  // name like every other generic mapping.
+  not_deployed: null,
+  deployment_conflict: null,
+  treasury_busy: null,
+  deployment_failed: null,
 };
 /// The reason a persona sees for a chain-svc error code, or null for generic.
 ///

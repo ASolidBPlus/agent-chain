@@ -100,6 +100,19 @@ const READ_TOOLS: Array<[string, (w: Wallet) => Promise<unknown>]> = [
   ['read', (w) => w.read({ contract: 'converter', function: 'quote', args: [] })],
 ];
 
+// THE THREE CODES A SELF-DEPLOYING SERVICE ADDED, pinned to WITHHELD. The type
+// makes each one appear in the map; it does not say what each one is mapped to,
+// and the value is the decision. None is a fact about the persona's own wallet:
+// two describe how the deployment was set up, and `treasury_busy` would tell a
+// persona that a treasury key exists and is under contention.
+describe('the deploy codes are withheld from personas', () => {
+  for (const code of ['not_deployed', 'deployment_conflict', 'treasury_busy', 'deployment_failed'] as const) {
+    it(`${code} maps to the generic refusal`, () => {
+      expect(REFUSAL_FOR[code]).toBeNull();
+    });
+  }
+});
+
 describe('every read tool applies the disclosure decision', () => {
   // The fixture is only a fixture if the map still says what it assumes.
   it('the fixture codes are what the map says they are', () => {

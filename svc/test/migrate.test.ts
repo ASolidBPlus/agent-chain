@@ -498,9 +498,11 @@ describe('the reset notice', () => {
 // they extract, mock "temporarily", or refactor an entrypoint - and no test
 // reaches index.ts to notice. So this asserts each fact is wired to its REAL
 // source by name.
-describe('the call site in index.ts', () => {
+// It lived in index.ts and now lives in activate.ts, which boot and the deploy
+// route both call.
+describe('the call site in activate.ts', () => {
   it('wires every fact to its real source, not to a stub', async () => {
-    const src = await Bun.file(new URL('../src/index.ts', import.meta.url)).text();
+    const src = await Bun.file(new URL('../src/activate.ts', import.meta.url)).text();
     const start = src.indexOf('gatherLifetimeFacts({');
     expect(start).toBeGreaterThan(-1);
     // Brace-balanced rather than up-to-the-first-`})`: the getCode wire contains
@@ -535,13 +537,16 @@ describe('the call site in index.ts', () => {
   //     `-1 < anything` is the SUCCESS condition - so ABSENCE READ AS CORRECT
   //     ORDERING. COMPARE TO A VALUE, NOT TO EMPTINESS: both indices have to
   //     exist before their order means anything.
-  it('refuses BEFORE the server starts listening', async () => {
-    const src = await Bun.file(new URL('../src/index.ts', import.meta.url)).text();
+  // The point after which money can move is now `holder.swap(`: before it the
+  // not-deployed gate answers every money route with 503, whether or not the
+  // server is listening yet.
+  it('refuses BEFORE any service is swapped in', async () => {
+    const src = await Bun.file(new URL('../src/activate.ts', import.meta.url)).text();
     const call = src.indexOf('gatherLifetimeFacts({'); // the call, not the import
-    const listen = src.indexOf('server.listen');
+    const swap = src.indexOf('holder.swap(');
     expect(call).toBeGreaterThan(-1);
-    expect(listen).toBeGreaterThan(-1);
-    expect(call).toBeLessThan(listen);
+    expect(swap).toBeGreaterThan(-1);
+    expect(call).toBeLessThan(swap);
   });
 });
 

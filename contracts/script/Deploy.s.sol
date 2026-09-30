@@ -564,22 +564,42 @@ contract Deploy is Script {
     }
 
     /// Reverts, before anything is broadcast, for any custom-contract entry whose
-    /// Solidity contract has no compiled artifact - a readable message instead of
-    /// forge's raw getCode failure mid-deploy.
+    /// Solidity contract has no compiled artifact - a message naming the contract
+    /// instead of forge's raw getCode failure mid-deploy.
+    ///
+    /// `try vm.getCode(...)` DIRECTLY, NOT THROUGH THE SCRIPT ITSELF. This used to
+    /// call an external wrapper on the script, on the belief that a cheatcode's
+    /// revert could not be caught without one. It can: `vm` is an external
+    /// contract like any other, so its revert reaches this catch. And the wrapper
+    /// was the defect - a call from the script to its own address, which `forge
+    /// script --broadcast` refuses outright ("Usage of address(this) detected in
+    /// script contract") - so EVERY manifest with a `contract` entry failed on the
+    /// container path, before planning. `forge test` allows the self-call, which
+    /// is why the unit test for this kind passed throughout.
+    ///
+    /// THE MESSAGE SAYS WHAT TO DO, AND DOES NOT PASS ON FORGE'S. That was tried
+    /// and measured: getCode's revert is a CheatcodeError, and for a contract it
+    /// did not compile it reports that the artifact path "is not allowed to be
+    /// accessed" - even when no such file exists, because the permission check
+    /// comes before the existence check. Passing that on would tell whoever reads
+    /// it to fix a permission, for what is usually a misspelt name. For a typo and
+    /// for a contract under test/ alike the truth is the same, and it is what the
+    /// message below says: `forge script` compiles src/ and not test/, so only a
+    /// contract declared under src/ can be deployed from a manifest.
     function _requireContractArtifacts(ModuleSpec[] memory mods) internal view {
         for (uint256 i = 0; i < mods.length; i++) {
             if (!_eq(mods[i].kind, KIND_CONTRACT)) continue;
-            try this.getCodeExternal(string.concat(mods[i].name, ".sol:", mods[i].name)) {}
+            try vm.getCode(string.concat(mods[i].name, ".sol:", mods[i].name)) {}
             catch {
-                revert(string.concat('Deploy: manifest: no artifact for "', mods[i].name, '"'));
+                revert(
+                    string.concat(
+                        'Deploy: manifest: no artifact for "',
+                        mods[i].name,
+                        '" - a contract entry must name a contract declared under contracts/src, spelled exactly as declared'
+                    )
+                );
             }
         }
-    }
-
-    /// An external wrapper purely so `_requireContractArtifacts` can try/catch the
-    /// getCode cheatcode; a missing artifact reverts and the catch renames it.
-    function getCodeExternal(string memory what) external view returns (bytes memory) {
-        return vm.getCode(what);
     }
 
     /// Deploys one custom contract: getCode ‖ encoded args as init code, CREATE2

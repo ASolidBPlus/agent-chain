@@ -160,7 +160,12 @@ describe('every send site carries explicit zero fees', () => {
     // treasury's, and both spread ZERO_FEES. The number is the point of the
     // assertion, so it moves only when a send site is genuinely added or
     // removed - and it moving is what makes somebody look.
-    expect(total).toBe(8);
+    //
+    // 8 -> 10 with the admin deploy route: deploy.ts creates each module through
+    // the CREATE2 factory (`sendTransaction`) and wires it (`writeContract`), and
+    // both send as the treasury, under its queue, spreading ZERO_FEES. Two call
+    // sites for every deploy transaction, however many modules it creates.
+    expect(total).toBe(10);
   });
 
   // THE SKIP, MADE VISIBLE - and this is the assertion the fix actually needs.
