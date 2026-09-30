@@ -12,7 +12,8 @@
 //
 // What it shows, in order:
 //   1  a service with no record boots, answers deployed:false and refuses money
-//   2  the route deploys two-tokens.json on chain A; the files and their modes
+//   2  the route deploys the manifest (MANIFEST, default two-tokens.json) on
+//      chain A; the files and their modes
 //   3  the seed mint's Transfer reached the outbox (the tail started after the
 //      modules were known, and read from the start)
 //   4  a repeat sends zero transactions
@@ -39,7 +40,10 @@ const SVC = join(ROOT, 'svc');
 const RPC_A = process.env.RPC_A ?? 'http://127.0.0.1:8545';
 const RPC_B = process.env.RPC_B ?? 'http://127.0.0.1:8546';
 const MNEMONIC = process.env.ANVIL_MNEMONIC;
-const MANIFEST = readFileSync(join(ROOT, 'deployments/examples/two-tokens.json'), 'utf8');
+// Two-tokens by default. CI also runs deployments/cases/contract-entries.json,
+// whose `contract` entries are the path the container once could not deploy.
+const MANIFEST_FILE = resolve(ROOT, process.env.MANIFEST ?? 'deployments/examples/two-tokens.json');
+const MANIFEST = readFileSync(MANIFEST_FILE, 'utf8');
 const TOKEN = 'verify-admin-deploy-token';
 const PORT = Number(process.env.SVC_PORT ?? 7391);
 const URL_ = `http://127.0.0.1:${PORT}`;
@@ -50,14 +54,22 @@ const check = (what: string, ok: boolean, detail = '') => {
   if (!ok) failures++;
 };
 const step = (s: string) => console.log(`\n=== ${s}`);
-const die = (why: string): never => {
+// BEFORE anything is started, `bail` exits. After, `die` THROWS, so the
+// `finally` stops chain-svc and removes its directories: an exit from inside
+// the try left the service holding the port and its store, and the next run in
+// the same job talked to it (MEASURED - the CI job runs this twice).
+class Abort extends Error {}
+const bail = (why: string): never => {
   console.error(`FAIL ${why}`);
   process.exit(1);
 };
+const die = (why: string): never => {
+  throw new Abort(why);
+};
 
-if (!MNEMONIC) die('ANVIL_MNEMONIC is unset');
+if (!MNEMONIC) bail('ANVIL_MNEMONIC is unset');
 for (const tool of ['forge', 'cast']) {
-  if (spawnSync(['sh', '-c', `command -v ${tool}`]).exitCode !== 0) die(`${tool} is not on PATH`);
+  if (spawnSync(['sh', '-c', `command -v ${tool}`]).exitCode !== 0) bail(`${tool} is not on PATH`);
 }
 
 const rpc = async (url: string, method: string, params: unknown[] = []) => {
@@ -70,7 +82,7 @@ for (const url of [RPC_A, RPC_B]) {
   try {
     await rpc(url, 'eth_blockNumber');
   } catch (err) {
-    die(`no chain at ${url}: ${(err as Error).message}`);
+    bail(`no chain at ${url}: ${(err as Error).message}`);
   }
 }
 
@@ -156,17 +168,21 @@ const notDeployed = async () => JSON.stringify(await (await fetch(`${URL_}/healt
 
 async function roleTable(url: string, record: DeployReply['deployment'], treasury: Address): Promise<string[]> {
   const client = createPublicClient({ transport: http(url) });
-  const converter = record.modules.find((m) => m.kind === 'converter')?.address;
+  // Every holder that could matter: the treasury, zero, and every module - a
+  // contract entry's admin can be another module (`@play`).
   const who: [string, Address][] = [['treasury', treasury], ['zero', '0x0000000000000000000000000000000000000000']];
-  if (converter) who.push(['converter', converter]);
+  for (const m of record.modules) who.push([`${m.kind}${m.key ? `:${m.key}` : ''}`, m.address]);
   const rows: string[] = [];
   for (const m of record.modules) {
-    const [abi, names] =
+    const contract = (m as { contract?: string }).contract;
+    const [abi, names]: [unknown, string[]] =
       m.kind === 'token'
         ? [TokenAbi, ['DEFAULT_ADMIN_ROLE', 'MINTER_ROLE', 'BURNER_ROLE', 'FREEZER_ROLE']]
         : m.kind === 'names'
           ? [NameRegistryAbi, ['DEFAULT_ADMIN_ROLE', 'REGISTRAR_ROLE']]
-          : [ConverterAbi, ['DEFAULT_ADMIN_ROLE', 'RATE_ADMIN_ROLE']];
+          : m.kind === 'converter' || contract === 'Converter'
+            ? [ConverterAbi, ['DEFAULT_ADMIN_ROLE', 'RATE_ADMIN_ROLE']]
+            : die(`no role table for ${m.kind} ${contract}; add one rather than skip it`);
     for (const name of names) {
       const role = (await client.readContract({ address: m.address, abi: abi as never, functionName: name as never })) as Hex;
       for (const [label, addr] of who) {
@@ -206,7 +222,7 @@ try {
   await Bun.sleep(2500);
   check('no event tail has polled', cursors().length === 0, JSON.stringify(cursors()));
 
-  step('2  the route deploys two-tokens.json on chain A');
+  step(`2  the route deploys ${MANIFEST_FILE.slice(ROOT.length + 1)} on chain A`);
   const first = await deploy();
   check('POST /admin/deploy answers 200', first.status === 200, JSON.stringify(first.body).slice(0, 400));
   const reply = first.body as unknown as DeployReply;
@@ -255,7 +271,7 @@ try {
   const control = join(ROOT, 'deployments', 'test-control');
   rmSync(control, { recursive: true, force: true });
   mkdirSync(control, { recursive: true });
-  cpSync(join(ROOT, 'deployments/examples/two-tokens.json'), join(control, 'manifest.json'));
+  cpSync(MANIFEST_FILE, join(control, 'manifest.json'));
   const once = spawnSync(['sh', join(ROOT, 'docker/deploy-once.sh')], {
     cwd: ROOT,
     env: { ...process.env, CONTRACTS_DIR: join(ROOT, 'contracts'), DEPLOYMENTS_DIR: control, RPC_URL: RPC_B, ANVIL_MNEMONIC: MNEMONIC },
@@ -358,6 +374,10 @@ try {
   wipeStore();
   await startSvc();
   await refusesWiped('8b');
+} catch (err) {
+  if (!(err instanceof Abort)) throw err;
+  console.error(`FAIL ${err.message}`);
+  failures++;
 } finally {
   await stopSvc();
   rmSync(work, { recursive: true, force: true });

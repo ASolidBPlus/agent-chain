@@ -179,8 +179,8 @@ jobs:
           fi
 
   # POST /admin/deploy against real chains (svc/scripts/verify-admin-deploy.ts).
-  # Two anvils: A is deployed by the route, B by the container's deploy-once.sh
-  # as the control, and the script compares the two results field by field,
+  # Per manifest, two anvils: A is deployed by the route, B by the container's
+  # deploy-once.sh as the control, and the script compares the two results field by field,
   # call by call and role by role. A script and not a *.test.ts, so ci.yml's
   # unit job - which has no chain - never collects it.
   admin-deploy:
@@ -209,13 +209,13 @@ jobs:
 
       # The chain image's flags (docker/entrypoint.sh), minus the state file:
       # these chains live for one job.
-      - name: start two anvils
+      - name: start four anvils (a fresh pair per manifest)
         run: |
-          for port in 8545 8546; do
+          for port in 8545 8546 8547 8548; do
             anvil -q --host 127.0.0.1 --port "$port" --chain-id 31337 --gas-price 0 --base-fee 0 \
               --accounts 1 --balance 1000000 --mnemonic "$ANVIL_MNEMONIC" > "anvil-$port.log" 2>&1 &
           done
-          for port in 8545 8546; do
+          for port in 8545 8546 8547 8548; do
             for _ in $(seq 1 50); do
               cast block-number --rpc-url "http://127.0.0.1:$port" > /dev/null 2>&1 && break
               sleep 0.2
@@ -223,6 +223,16 @@ jobs:
             cast block-number --rpc-url "http://127.0.0.1:$port"
           done
 
-      - name: verify-admin-deploy
+      - name: verify-admin-deploy (two-tokens)
         working-directory: svc
+        run: bun run scripts/verify-admin-deploy.ts
+
+      # `contract` entries from contracts/src, one of them administered by
+      # another module (@play): the path the container once could not deploy.
+      - name: verify-admin-deploy (contract entries)
+        working-directory: svc
+        env:
+          MANIFEST: deployments/cases/contract-entries.json
+          RPC_A: http://127.0.0.1:8547
+          RPC_B: http://127.0.0.1:8548
         run: bun run scripts/verify-admin-deploy.ts
