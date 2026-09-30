@@ -68,6 +68,11 @@ function fakeChain(opts: FakeOptions = {}) {
     ...treasurySender(wallet),
     publicClient: {
       getChainId: async () => 31337,
+      // The event tail's first read. Counted: nothing should tail before activation.
+      getBlockNumber: async () => {
+        reads.push('getBlockNumber');
+        return 0n;
+      },
       getCode: async () => {
         reads.push('getCode');
         return opts.code ?? '0x';
@@ -267,6 +272,10 @@ describe('POST /admin/deploy writes no record', () => {
     expect(existsSync(recordPath)).toBe(false);
     expect(existsSync(manifestPath)).toBe(false);
     expect(holder.current).toBeNull();
+    // Nor did anything start tailing the chain it never activated.
+    expect(holder.events).toBeNull();
+    await Bun.sleep(1100);
+    expect(f.reads).not.toContain('getBlockNumber');
   });
 });
 
