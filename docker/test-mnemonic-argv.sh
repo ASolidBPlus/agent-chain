@@ -77,11 +77,23 @@ chmod +x "$WORK/bin/forge"
 
 : > "$ARGV_LOG"
 mkdir -p "$WORK/deployments"
-# `cast` is called BEFORE the script cd's to /contracts, so the missing
-# directory stops it after the part this test is about - which is why the
-# "did it call cast" row below is the one that says the run got far enough.
+# A CONTRACTS DIRECTORY WITH A DEPLOY SCRIPT IN IT, because the script now
+# checks for one before it does anything else. An empty file is enough: the
+# `forge` above is a stub that never reads it.
+#
+# THIS COMMENT USED TO SAY THE OPPOSITE, and the test went vacuous for it. It
+# read "cast is called BEFORE the script cd's to /contracts, so the missing
+# directory stops it after the part this test is about" - true when written,
+# and made false by a preflight added to deploy-once.sh that checks the deploy
+# script exists and refuses by name. That refusal comes before `cast`, so the
+# key was never derived, the phrase was never anywhere, and "put the phrase on
+# no command line" passed on a run that never reached the question. The
+# "did it call cast" row below is what noticed, which is what it is for.
+mkdir -p "$WORK/contracts/script"
+: > "$WORK/contracts/script/Deploy.s.sol"
 ANVIL_MNEMONIC="$PHRASE" \
 DEPLOYMENTS_DIR="$WORK/deployments" \
+CONTRACTS_DIR="$WORK/contracts" \
   sh "$SCRIPT_DIR/deploy-once.sh" >"$WORK/out.log" 2>&1 || true
 
 if grep -q "junk" "$ARGV_LOG"; then
