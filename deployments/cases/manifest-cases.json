@@ -1,0 +1,552 @@
+[
+  {
+    "name": "example names-only.json",
+    "manifest": "{\n  \"schema\": 1,\n  \"modules\": [\n    { \"kind\": \"names\", \"tld\": \"play\" }\n  ]\n}",
+    "ok": true,
+    "canon": "names||||0|play#"
+  },
+  {
+    "name": "example token-and-names.json",
+    "manifest": "{\n  \"schema\": 1,\n  \"modules\": [\n    { \"kind\": \"token\", \"key\": \"play\", \"name\": \"Play Token\", \"symbol\": \"PLAY\", \"initialSupply\": \"1000000\" },\n    { \"kind\": \"names\", \"tld\": \"play\" }\n  ]\n}",
+    "ok": true,
+    "canon": "token|play|Play Token|PLAY|1000000|;names||||0|play#"
+  },
+  {
+    "name": "example token-only.json",
+    "manifest": "{\n  \"schema\": 1,\n  \"modules\": [\n    { \"kind\": \"token\", \"key\": \"play\", \"name\": \"Play Token\", \"symbol\": \"PLAY\", \"initialSupply\": \"1000000\" }\n  ]\n}",
+    "ok": true,
+    "canon": "token|play|Play Token|PLAY|1000000|#"
+  },
+  {
+    "name": "example two-tokens.json",
+    "manifest": "{\n  \"schema\": 1,\n  \"modules\": [\n    { \"kind\": \"token\", \"key\": \"play\", \"name\": \"Play Token\", \"symbol\": \"PLAY\", \"initialSupply\": \"1000000\" },\n    { \"kind\": \"token\", \"key\": \"gold\", \"name\": \"Gold\", \"symbol\": \"GOLD\", \"initialSupply\": \"0\" },\n    { \"kind\": \"names\", \"tld\": \"play\" },\n    { \"kind\": \"converter\", \"pairs\": [\n      { \"source\": \"play\", \"target\": \"gold\", \"rate\": \"0.75\" },\n      { \"source\": \"gold\", \"target\": \"play\", \"rate\": \"1\" }\n    ] }\n  ]\n}",
+    "ok": true,
+    "canon": "token|play|Play Token|PLAY|1000000|;token|gold|Gold|GOLD|0|;names||||0|play;converter||||0|#play>gold@750000000000000000;gold>play@1000000000000000000"
+  },
+  {
+    "name": "schema 1",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|#"
+  },
+  {
+    "name": "schema 2 is unsupported",
+    "manifest": "{\"schema\":2,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "schema as the string \"1\" (parseJsonUint accepts it)",
+    "manifest": "{\"schema\":\"1\",\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|#"
+  },
+  {
+    "name": "schema as \"0x1\" (parseJsonUint reads hex)",
+    "manifest": "{\"schema\":\"0x1\",\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|#"
+  },
+  {
+    "name": "schema 1.0 is refused",
+    "manifest": "{\"schema\":1.0,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "schema true is refused",
+    "manifest": "{\"schema\":true,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "no schema",
+    "manifest": "{\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "no modules",
+    "manifest": "{\"schema\":1,\"modules\":[]}",
+    "ok": false
+  },
+  {
+    "name": "modules not an array",
+    "manifest": "{\"schema\":1,\"modules\":{\"a\":{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}}}",
+    "ok": false
+  },
+  {
+    "name": "unknown kind",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"vault\",\"key\":\"v\"}]}",
+    "ok": false
+  },
+  {
+    "name": "kind as a number is an unknown kind",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":1}]}",
+    "ok": false
+  },
+  {
+    "name": "token with no initialSupply is zero",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|0|#"
+  },
+  {
+    "name": "token missing its symbol",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token key with an uppercase letter",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"Play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token key starting with a digit",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"1play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token key of 17 characters",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"abcdefghijklmnopq\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token key of 16 characters",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"abcdefghijklmnop\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|abcdefghijklmnop|Play|PLAY|1000|#"
+  },
+  {
+    "name": "token name empty",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token name of 64 bytes",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|PLAY|1000|#"
+  },
+  {
+    "name": "token name of 65 bytes",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token name of 32 two-byte characters is 64 bytes",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"éééééééééééééééééééééééééééééééé\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|éééééééééééééééééééééééééééééééé|PLAY|1000|#"
+  },
+  {
+    "name": "token name of 33 two-byte characters is 66 bytes",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"ééééééééééééééééééééééééééééééééé\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token name null is the four-byte name \"null\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":null,\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|null|PLAY|1000|#"
+  },
+  {
+    "name": "token symbol lowercase",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"play\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "token symbol of 11 characters",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"ABCDEFGHIJK\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "duplicate symbol",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "initialSupply with a non-digit",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1,000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "initialSupply of 19 digits",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1111111111111111111\"}]}",
+    "ok": false
+  },
+  {
+    "name": "initialSupply of 18 digits",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"999999999999999999\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|999999999999999999|#"
+  },
+  {
+    "name": "initialSupply empty",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"\"}]}",
+    "ok": false
+  },
+  {
+    "name": "initialSupply as an exact 18-digit number",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":123456789012345678}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|123456789012345678|#"
+  },
+  {
+    "name": "initialSupply as 1e3 is \"1e+3\", not digits",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":1e3}]}",
+    "ok": false
+  },
+  {
+    "name": "names",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"names\",\"tld\":\"play\"}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;names||||0|play#"
+  },
+  {
+    "name": "two names modules",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"names\",\"tld\":\"play\"},{\"kind\":\"names\",\"tld\":\"alt\"}]}",
+    "ok": false
+  },
+  {
+    "name": "names tld invalid",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"names\",\"tld\":\"Play\"}]}",
+    "ok": false
+  },
+  {
+    "name": "names with no tld",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"names\"}]}",
+    "ok": false
+  },
+  {
+    "name": "a token keyed \"names\" collides with the names module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"names\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"names\",\"tld\":\"play\"}]}",
+    "ok": false
+  },
+  {
+    "name": "duplicate token key",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "converter",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@1000000000000000000"
+  },
+  {
+    "name": "two converters",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1\"}]},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"gold\",\"target\":\"play\",\"rate\":\"1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "converter with no pairs",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[]}]}",
+    "ok": false
+  },
+  {
+    "name": "converter with no pairs field",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\"}]}",
+    "ok": false
+  },
+  {
+    "name": "pair converts to itself",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"play\",\"rate\":\"1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "pair source is not a token key",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"iron\",\"target\":\"gold\",\"rate\":\"1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "pair target is not a token key",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"iron\",\"rate\":\"1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "pair and reverse multiply to exactly one",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"2\"},{\"source\":\"gold\",\"target\":\"play\",\"rate\":\"0.5\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@2000000000000000000;gold>play@500000000000000000"
+  },
+  {
+    "name": "pair and reverse mint value",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"2\"},{\"source\":\"gold\",\"target\":\"play\",\"rate\":\"0.51\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"1.5\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1.5\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@1500000000000000000"
+  },
+  {
+    "name": "rate \"5.\" (a trailing dot is five)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"5.\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@5000000000000000000"
+  },
+  {
+    "name": "rate \".5\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\".5\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"1.2.3\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1.2.3\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"-1\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"-1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"1e3\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1e3\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"0\" (zero)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"0\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"0.0\" (zero)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"0.0\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"1000000000000\" (the maximum)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1000000000000\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@1000000000000000000000000000000"
+  },
+  {
+    "name": "rate \"1000000000000.1\" (past the maximum)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1000000000000.1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"1000000000001\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"1000000000001\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate \"0.000000000000000001\" (18 places)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"0.000000000000000001\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@1"
+  },
+  {
+    "name": "rate \"0.0000000000000000001\" (19 places)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":\"0.0000000000000000001\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "rate 1.5 as a JSON number",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":1.5}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;token|gold|Gold|GOLD|1000|;converter||||0|#play>gold@1500000000000000000"
+  },
+  {
+    "name": "rate 1e3 as a JSON number is \"1e+3\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"token\",\"key\":\"gold\",\"name\":\"Gold\",\"symbol\":\"GOLD\",\"initialSupply\":\"1000\"},{\"kind\":\"converter\",\"pairs\":[{\"source\":\"play\",\"target\":\"gold\",\"rate\":1e3}]}]}",
+    "ok": false
+  },
+  {
+    "name": "contract with no args",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "contract key invalid",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"Shop\",\"contract\":\"Token\",\"args\":[]}]}",
+    "ok": false
+  },
+  {
+    "name": "contract with no contract field",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\"}]}",
+    "ok": false
+  },
+  {
+    "name": "address arg @treasury",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"@treasury\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "address arg referring to an earlier module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"@play\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "address arg referring to a later module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"@play\"}]},{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": false
+  },
+  {
+    "name": "address arg referring to itself",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"@shop\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "address arg referring to nothing",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"@iron\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "address arg, checksummed",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "address arg, wrong checksum (not checked)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "address arg without 0x",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"f39fd6e51aad88f6f4ce6ab8827279cfffb92266\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "address arg too short",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"0xf39fd6\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "uint256 arg decimal",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"500\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "uint256 arg hex",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"0x1f4\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "uint256 arg 1e3 (parseUint accepts it)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"1e3\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "uint256 arg 1.5e3 (a whole number)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"1.5e3\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "uint256 arg 1e-1 (not a whole number)",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"1e-1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "uint256 arg 1.5",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"1.5\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "uint256 arg negative",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"-1\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "uint256 arg past 2^256",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":\"1e78\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "uint256 arg as a JSON number",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\",\"value\":500}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "bool arg true",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bool\",\"value\":\"true\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "bool arg TRUE",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bool\",\"value\":\"TRUE\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "bool arg as a JSON boolean",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bool\",\"value\":true}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "bytes32 arg",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bytes32\",\"value\":\"0x0000000000000000000000000000000000000000000000000000000000000022\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "bytes32 arg short",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bytes32\",\"value\":\"0x22\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "bytes32 arg of 64 hex digits without 0x",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bytes32\",\"value\":\"0000000000000000000000000000000000000000000000000000000000000022\"}]}]}",
+    "ok": true,
+    "canon": "token|play|Play|PLAY|1000|;contract|shop|Token||0|#"
+  },
+  {
+    "name": "unsupported arg type",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"string\",\"value\":\"hello\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "arg missing its value",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"uint256\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "bytes32 arg short, without 0x",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bytes32\",\"value\":\"22\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "bytes32 arg with an uppercase 0X",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"bytes32\",\"value\":\"0X0000000000000000000000000000000000000000000000000000000000000022\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "address arg with an uppercase 0X",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"contract\",\"key\":\"shop\",\"contract\":\"Token\",\"args\":[{\"type\":\"address\",\"value\":\"0Xf39fd6e51aad88f6f4ce6ab8827279cfffb92266\"}]}]}",
+    "ok": false
+  },
+  {
+    "name": "token name as the JSON number 1e3 is named \"1e+3\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":1e3,\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|1e+3|PLAY|1000|#"
+  },
+  {
+    "name": "token name as the JSON number 1.50 keeps its text",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":1.50,\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|1.50|PLAY|1000|#"
+  },
+  {
+    "name": "token name as a JSON boolean is named \"true\"",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":true,\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
+    "ok": true,
+    "canon": "token|play|true|PLAY|1000|#"
+  }
+]
