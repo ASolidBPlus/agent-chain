@@ -167,9 +167,13 @@ jobs:
       # compares the WORKING TREE to the INDEX, so a change that was somehow
       # staged would be invisible to it. Against HEAD the comparison is to what
       # is committed, which is what the guarantee is about.
-      - name: fail if the committed ABI no longer matches the contracts
+      # BOTH generated files, from one run of the generator. bytecode.ts is what
+      # a deploy sends and what it compares codehashes against, so a stale one is
+      # worse than a stale ABI: it deploys old code, or reads current code as
+      # foreign code at its own address.
+      - name: fail if the committed ABI or bytecode no longer matches the contracts
         run: |
-          if ! git diff --exit-code HEAD -- svc/src/abi.ts; then
-            echo "::error::svc/src/abi.ts is stale. Run 'cd svc && bun run scripts/generate-abi.ts' and commit the result."
+          if ! git diff --exit-code HEAD -- svc/src/abi.ts svc/src/bytecode.ts; then
+            echo "::error::svc/src/abi.ts or svc/src/bytecode.ts is stale. Run 'cd svc && bun run scripts/generate-abi.ts' and commit the result."
             exit 1
           fi

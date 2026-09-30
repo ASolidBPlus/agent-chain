@@ -10,17 +10,30 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { keccak256, type Hex } from 'viem';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONTRACTS_ROOT = join(here, '..', '..', 'contracts');
 const OUT = join(CONTRACTS_ROOT, 'out');
 const TARGET = join(here, '..', 'src', 'abi.ts');
+const BYTECODE_TARGET = join(here, '..', 'src', 'bytecode.ts');
+
+/// The two halves of an artefact's `bytecode`/`deployedBytecode` this reads.
+export interface ArtifactCode {
+  object: string;
+  linkReferences?: Record<string, unknown>;
+  immutableReferences?: Record<string, unknown>;
+}
 
 export interface ArtifactContract {
   name: string;
   /// As Foundry recorded it, relative to contracts/: `src/Converter.sol`.
   sourcePath: string;
   abi: unknown[];
+  /// Absent on an artefact that carries no code section at all; an interface
+  /// has one, with `object: "0x"`.
+  bytecode?: ArtifactCode;
+  deployedBytecode?: ArtifactCode;
 }
 
 /// Every contract compiled from `contracts/src`, with its ABI.
@@ -64,6 +77,8 @@ export function contractsFromArtifacts(outDir: string, contractsRoot: string): A
       const path = join(outDir, entry.name, file);
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
         abi?: unknown[];
+        bytecode?: ArtifactCode;
+        deployedBytecode?: ArtifactCode;
         metadata?: { settings?: { compilationTarget?: Record<string, string> } };
       };
 
@@ -93,7 +108,13 @@ export function contractsFromArtifacts(outDir: string, contractsRoot: string): A
         throw new Error(`Artifact ${path} has no abi`);
       }
       seen.set(name, sourcePath);
-      found.push({ name, sourcePath, abi: parsed.abi });
+      found.push({
+        name,
+        sourcePath,
+        abi: parsed.abi,
+        bytecode: parsed.bytecode,
+        deployedBytecode: parsed.deployedBytecode,
+      });
     }
   }
 
@@ -130,6 +151,81 @@ function render(contracts: ArtifactContract[]): string {
   );
 }
 
+
+/// One contract's deployable code: what to send to create it, and the hash its
+/// code will have once it exists.
+export interface BytecodeEntry {
+  name: string;
+  creation: Hex;
+  runtimeHash: Hex;
+}
+
+const nonEmpty = (refs: Record<string, unknown> | undefined): boolean =>
+  refs !== undefined && refs !== null && Object.keys(refs).length > 0;
+
+/// The contracts that can be DEPLOYED from their artefact alone, with the hash
+/// their deployed code will have.
+///
+/// AN INTERFACE IS SKIPPED, NOT AN ERROR: it has an ABI and no code, so it is in
+/// abi.ts and not here.
+///
+/// A LINKED LIBRARY OR AN IMMUTABLE IS REFUSED, and the reason is that either one
+/// makes `runtimeHash` false. Idempotency compares it with the codehash on
+/// chain; a library's address is spliced into the code at deploy time, and an
+/// immutable is written into the runtime code by the constructor, so for either
+/// the code that exists differs from `deployedBytecode.object` and every such
+/// module would read as foreign code at its own address. Refused by name here,
+/// at generation, rather than discovered as a conflict at deploy. Measured: none
+/// of the deployable contracts carries either today, and `immutableReferences`
+/// is absent from their artefacts entirely rather than empty.
+export function bytecodeEntries(contracts: ArtifactContract[]): BytecodeEntry[] {
+  const entries: BytecodeEntry[] = [];
+  for (const c of contracts) {
+    const creation = c.bytecode?.object ?? '0x';
+    if (creation === '0x' || creation === '') continue;
+    const runtime = c.deployedBytecode?.object ?? '0x';
+    if (nonEmpty(c.bytecode?.linkReferences) || nonEmpty(c.deployedBytecode?.linkReferences)) {
+      throw new Error(
+        `${c.name} (${c.sourcePath}) links a library; its deployed code would not hash to ` +
+          `keccak256(deployedBytecode), so it cannot be shipped for idempotent deploys`,
+      );
+    }
+    if (nonEmpty(c.deployedBytecode?.immutableReferences)) {
+      throw new Error(
+        `${c.name} (${c.sourcePath}) has immutables; its constructor writes them into the ` +
+          `runtime code, so its deployed code would not hash to keccak256(deployedBytecode)`,
+      );
+    }
+    entries.push({ name: c.name, creation: creation as Hex, runtimeHash: keccak256(runtime as Hex) });
+  }
+  return entries;
+}
+
+function renderBytecode(entries: BytecodeEntry[]): string {
+  const body = entries
+    .map(
+      (e) =>
+        `  ${e.name}: {\n    creation:\n      '${e.creation}',\n    runtimeHash: '${e.runtimeHash}',\n  },`,
+    )
+    .join('\n');
+  return (
+    `// GENERATED FILE - do not edit by hand.\n` +
+    `// Regenerate with: cd svc && bun run scripts/generate-abi.ts\n` +
+    `// Source: the same artefacts as abi.ts. The contracts CI job regenerates both\n` +
+    `// files and fails on a diff.\n` +
+    `//\n` +
+    `// For every contract under contracts/src that has code: \`creation\` is what is\n` +
+    `// sent to create it, and \`runtimeHash\` is keccak256 of its deployed code - the\n` +
+    `// codehash it will have on chain, which is how a deploy tells a module that is\n` +
+    `// already there from foreign code at the same address. Valid only because the\n` +
+    `// generator refuses any contract that links a library or declares an immutable.\n\n` +
+    `import type { Hex } from 'viem';\n\n` +
+    `export const BYTECODE: Record<string, { creation: Hex; runtimeHash: Hex }> = {\n` +
+    body +
+    `\n};\n`
+  );
+}
+
 if (import.meta.main) {
   const contracts = contractsFromArtifacts(OUT, CONTRACTS_ROOT);
   if (contracts.length === 0) {
@@ -137,4 +233,7 @@ if (import.meta.main) {
   }
   writeFileSync(TARGET, render(contracts), 'utf8');
   console.log(`wrote ${TARGET} (${contracts.map((c) => c.name).join(', ')})`);
+  const entries = bytecodeEntries(contracts);
+  writeFileSync(BYTECODE_TARGET, renderBytecode(entries), 'utf8');
+  console.log(`wrote ${BYTECODE_TARGET} (${entries.map((e) => e.name).join(', ')})`);
 }

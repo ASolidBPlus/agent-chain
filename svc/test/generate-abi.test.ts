@@ -20,7 +20,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { contractsFromArtifacts } from '../scripts/generate-abi.ts';
+import { contractsFromArtifacts, bytecodeEntries } from '../scripts/generate-abi.ts';
+import { keccak256 } from 'viem';
 
 let root: string;
 let out: string;
@@ -157,5 +158,92 @@ describe('contractsFromArtifacts', () => {
     source('src/Converter.sol');
 
     expect(contractsFromArtifacts(out, root)[0]!.abi).toEqual(abi);
+  });
+});
+
+
+/// An artefact with code sections, shaped as Foundry writes them - measured:
+/// `immutableReferences` is ABSENT when there are none, not an empty object.
+function artifactWithCode(
+  sourcePath: string,
+  name: string,
+  code: {
+    creation?: string;
+    runtime?: string;
+    linkCreation?: Record<string, unknown>;
+    linkRuntime?: Record<string, unknown>;
+    immutables?: Record<string, unknown>;
+  },
+): void {
+  const dir = join(out, sourcePath.split('/').pop()!);
+  mkdirSync(dir, { recursive: true });
+  const deployedBytecode: Record<string, unknown> = {
+    object: code.runtime ?? '0x',
+    sourceMap: '',
+    linkReferences: code.linkRuntime ?? {},
+  };
+  if (code.immutables !== undefined) deployedBytecode.immutableReferences = code.immutables;
+  writeFileSync(
+    join(dir, `${name}.json`),
+    JSON.stringify({
+      abi: [{ type: 'fallback' }],
+      bytecode: { object: code.creation ?? '0x', sourceMap: '', linkReferences: code.linkCreation ?? {} },
+      deployedBytecode,
+      metadata: { settings: { compilationTarget: { [sourcePath]: name } } },
+    }),
+  );
+  source(sourcePath);
+}
+
+describe('bytecodeEntries', () => {
+  it('emits the creation code and the hash the deployed code will have', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', { creation: '0x6080aa', runtime: '0x6080bb' });
+    const [e] = bytecodeEntries(contractsFromArtifacts(out, root));
+    expect(e).toEqual({ name: 'Shop', creation: '0x6080aa', runtimeHash: keccak256('0x6080bb') });
+  });
+
+  // An interface is in abi.ts and not here: it has an ABI and nothing to deploy.
+  it('skips a contract with no code, and keeps it in the ABI list', () => {
+    artifactWithCode('src/IShop.sol', 'IShop', {});
+    artifactWithCode('src/Shop.sol', 'Shop', { creation: '0x60aa', runtime: '0x60bb' });
+    const all = contractsFromArtifacts(out, root);
+    expect(all.map((c) => c.name)).toEqual(['IShop', 'Shop']);
+    expect(bytecodeEntries(all).map((e) => e.name)).toEqual(['Shop']);
+  });
+
+  // THE REFUSALS. Either one makes the deployed code differ from
+  // deployedBytecode, so runtimeHash would be false and the module would read as
+  // foreign code at its own address. Each names the contract.
+  it('refuses a library link in the creation code', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', {
+      creation: '0x60aa', runtime: '0x60bb', linkCreation: { 'src/Lib.sol': { Lib: [{ start: 1, length: 20 }] } },
+    });
+    expect(() => bytecodeEntries(contractsFromArtifacts(out, root))).toThrow(/Shop \(src\/Shop\.sol\) links a library/);
+  });
+
+  it('refuses a library link in the deployed code', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', {
+      creation: '0x60aa', runtime: '0x60bb', linkRuntime: { 'src/Lib.sol': { Lib: [{ start: 1, length: 20 }] } },
+    });
+    expect(() => bytecodeEntries(contractsFromArtifacts(out, root))).toThrow(/Shop \(src\/Shop\.sol\) links a library/);
+  });
+
+  it('refuses an immutable', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', {
+      creation: '0x60aa', runtime: '0x60bb', immutables: { '12': [{ start: 5, length: 32 }] },
+    });
+    expect(() => bytecodeEntries(contractsFromArtifacts(out, root))).toThrow(/Shop \(src\/Shop\.sol\) has immutables/);
+  });
+
+  // THE CASES THAT MUST PASS, because they are what a real build produces. An
+  // over-eager guard here refuses every contract the repository has.
+  it('accepts immutableReferences absent - the shape every real artefact has', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', { creation: '0x60aa', runtime: '0x60bb' });
+    expect(bytecodeEntries(contractsFromArtifacts(out, root))).toHaveLength(1);
+  });
+
+  it('accepts immutableReferences present and empty', () => {
+    artifactWithCode('src/Shop.sol', 'Shop', { creation: '0x60aa', runtime: '0x60bb', immutables: {} });
+    expect(bytecodeEntries(contractsFromArtifacts(out, root))).toHaveLength(1);
   });
 });
