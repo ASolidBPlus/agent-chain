@@ -723,8 +723,9 @@ async function readBody(req: IncomingMessage): Promise<{ body: Record<string, un
     if (size > MAX_BODY_BYTES) throw new HttpError('invalid_request', 'request body too large');
     chunks.push(chunk as Buffer);
   }
-  const text = Buffer.concat(chunks).toString('utf8').trim();
-  if (text === '') return { body: {}, text };
+  // `text` is the body AS SENT, untrimmed: the deploy route stores it.
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (text.trim() === '') return { body: {}, text };
 
   let parsed: unknown;
   try {

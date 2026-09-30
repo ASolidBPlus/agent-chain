@@ -177,3 +177,52 @@ jobs:
             echo "::error::svc/src/abi.ts or svc/src/bytecode.ts is stale. Run 'cd svc && bun run scripts/generate-abi.ts' and commit the result."
             exit 1
           fi
+
+  # POST /admin/deploy against real chains (svc/scripts/verify-admin-deploy.ts).
+  # Two anvils: A is deployed by the route, B by the container's deploy-once.sh
+  # as the control, and the script compares the two results field by field,
+  # call by call and role by role. A script and not a *.test.ts, so ci.yml's
+  # unit job - which has no chain - never collects it.
+  admin-deploy:
+    runs-on: ubuntu-latest
+    env:
+      # anvil's well-known PUBLIC test phrase; nothing here holds value.
+      ANVIL_MNEMONIC: test test test test test test test test test test test junk
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.8.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: forge build
+        working-directory: contracts
+        run: forge build
+
+      # The chain image's flags (docker/entrypoint.sh), minus the state file:
+      # these chains live for one job.
+      - name: start two anvils
+        run: |
+          for port in 8545 8546; do
+            anvil -q --host 127.0.0.1 --port "$port" --chain-id 31337 --gas-price 0 --base-fee 0 \
+              --accounts 1 --balance 1000000 --mnemonic "$ANVIL_MNEMONIC" > "anvil-$port.log" 2>&1 &
+          done
+          for port in 8545 8546; do
+            for _ in $(seq 1 50); do
+              cast block-number --rpc-url "http://127.0.0.1:$port" > /dev/null 2>&1 && break
+              sleep 0.2
+            done
+            cast block-number --rpc-url "http://127.0.0.1:$port"
+          done
+
+      - name: verify-admin-deploy
+        working-directory: svc
+        run: bun run scripts/verify-admin-deploy.ts

@@ -153,7 +153,12 @@ async function deployOnce(holder: ServicesHolder, rawBody: string): Promise<Depl
   if (holder.current !== null) return reply;
 
   // 6 prepare, 7 write, 8 commit
-  const prepared = await prepareActivation(holder, deployment);
+  let prepared: Awaited<ReturnType<typeof prepareActivation>>;
+  try {
+    prepared = await prepareActivation(holder, deployment);
+  } catch (err) {
+    throw activationRefusal(err);
+  }
   // The manifest first: a crash between the two leaves no record, and the
   // retry compares against nothing and re-plans from the chain.
   writeDurably(manifestPath, rawBody, 0o600);
@@ -189,4 +194,26 @@ function canonical(v: unknown): string {
     }
     return x;
   });
+}
+
+/// Activation's refusals were written for boot, where they end the process and
+/// the log carries them. Here they answer a request, and the server strips
+/// every detail from an error that is not an HttpError - so without this the
+/// operator who wiped a store would read `internal_error` and nothing else
+/// (MEASURED, verify-admin-deploy step 8).
+///
+/// The two CODED refusals are the store and the chain disagreeing: 409, with the
+/// boot code first in the detail, so it reads the same as the boot log. The
+/// other refusals are chain-svc's own messages (each begins `chain-svc:`),
+/// written for an operator. Anything else is a bug and stays internal_error.
+function activationRefusal(err: unknown): unknown {
+  if (err instanceof HttpError || !(err instanceof Error)) return err;
+  const code = (err as { code?: unknown }).code;
+  if (code === 'ledger_wiped_beneath_live_game' || code === 'chain_replaced_under_store') {
+    return new HttpError('deployment_conflict', `${code}: ${err.message}`);
+  }
+  if (err.message.startsWith('chain-svc:')) {
+    return new HttpError('deployment_failed', `activation refused the deployment: ${err.message}`);
+  }
+  return err;
 }
