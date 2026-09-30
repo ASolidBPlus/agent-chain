@@ -55,10 +55,22 @@ STATE_FILE="${ANVIL_STATE_FILE:-/state/anvil.json}"
 # string with many escapes hits perl's 65534 recursion limit and fails as though
 # the string were unterminated - measured on a valid file, which would refuse to
 # restart a healthy chain. The loop below has no such limit.
-state_complete() {
+# Exit status says what was found: 0 a complete document, 1 one that ends
+# mid-document, 3 one containing a raw NUL byte, 2 a file that cannot be read.
+#
+# THE NUL CHECK IS SEPARATE, AND IT CLOSES A REAL HOLE. anvil's serializer
+# escapes every control character, so a raw NUL can only come from damage - and
+# it comes from a common one: a filesystem that commits a file's new size before
+# its data leaves the tail reading as zeros after a crash. The scan skips NUL
+# like any other byte outside a string, so a complete document followed by zeros
+# passed it. Measured on a real state file: the scan accepted it and anvil
+# refused it - and in between, this entrypoint would have copied it over the
+# good .prev.
+state_status() {
   perl -e '
     my $f = shift; open my $h, "<", $f or exit 2;
     local $/; my $s = <$h>; $s = "" unless defined $s;
+    exit 3 if index($s, "\0") >= 0;
     my ($d, $opened) = (0, 0);
     pos($s) = 0;
     while (pos($s) < length $s) {
@@ -80,14 +92,25 @@ state_complete() {
 }
 
 if [ -e "$STATE_FILE" ]; then
-  if ! state_complete "$STATE_FILE"; then
-    size=$(wc -c < "$STATE_FILE")
+  st=0; state_status "$STATE_FILE" || st=$?
+  if [ "$st" != 0 ]; then
+    size=$(wc -c < "$STATE_FILE" 2>/dev/null | tr -d ' ')
+    # WHAT IS WRONG, IN WORDS THAT ARE TRUE OF THIS FILE. "Truncated at N bytes"
+    # was not: a file padded with zeros is N bytes long and its document ends
+    # well before that. The size is stated as the file's, and the fault as what
+    # the scan found.
+    case "$st" in
+      3) what="is damaged (it is ${size:-an unknown number of} bytes and contains zero bytes where data should be)" ;;
+      2) what="cannot be read" ;;
+      *) what="is incomplete (it is ${size:-an unknown number of} bytes and ends mid-document)" ;;
+    esac
     # The backup is OFFERED only if it is itself complete. Pointing an operator
-    # at a .prev that is also cut off sends them straight into a second refusal.
-    if [ -e "$STATE_FILE.prev" ] && state_complete "$STATE_FILE.prev"; then
-      echo "anvil: state file $STATE_FILE is corrupt (truncated at $size bytes); move it aside to start fresh, or restore $STATE_FILE.prev" >&2
+    # at a .prev that is also damaged sends them straight into a second refusal.
+    pst=1; [ -e "$STATE_FILE.prev" ] && { state_status "$STATE_FILE.prev" && pst=0 || true; }
+    if [ "$pst" = 0 ]; then
+      echo "anvil: state file $STATE_FILE $what; move it aside to start fresh, or restore $STATE_FILE.prev" >&2
     else
-      echo "anvil: state file $STATE_FILE is corrupt (truncated at $size bytes); move it aside to start fresh - there is no complete $STATE_FILE.prev to restore" >&2
+      echo "anvil: state file $STATE_FILE $what; move it aside to start fresh - there is no complete $STATE_FILE.prev to restore" >&2
     fi
     # 2, the code anvil itself uses for this file, so anything already reading
     # the exit status does not see the meaning of a refusal change. Never an
@@ -107,9 +130,21 @@ if [ -e "$STATE_FILE" ]; then
   #
   # What restoring it costs: .prev is the state as of this boot, so a restore
   # loses whatever happened between this boot and the failure.
-  cp "$STATE_FILE" "$STATE_FILE.prev.tmp"
-  sync "$STATE_FILE.prev.tmp"
-  mv -f "$STATE_FILE.prev.tmp" "$STATE_FILE.prev"
+  #
+  # A FAILED REFRESH WARNS AND STARTS ANYWAY. The backup is a safety extra; a
+  # read-only /state or a full disk must not turn it into the reason a healthy
+  # chain stops booting, which is what `set -e` made of a failing cp. On any
+  # failure the partial temp file is removed - a full disk otherwise leaves one
+  # behind - the existing .prev is left exactly as it was, and anvil starts.
+  if err=$( { cp "$STATE_FILE" "$STATE_FILE.prev.tmp" \
+                && sync "$STATE_FILE.prev.tmp" \
+                && mv -f "$STATE_FILE.prev.tmp" "$STATE_FILE.prev"; } 2>&1 ); then
+    :
+  else
+    rm -f "$STATE_FILE.prev.tmp" 2>/dev/null || true
+    reason=$(printf '%s' "$err" | head -n 1)
+    echo "anvil: could not refresh $STATE_FILE.prev (${reason:-unknown error}); starting without a fresh backup" >&2
+  fi
 fi
 
 # FINDING 9: ONE ORIGIN, NOT ALL OF THEM.
