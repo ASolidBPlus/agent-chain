@@ -8,8 +8,9 @@ import {Token} from "./Token.sol";
 
 /// @title Escrow - first-to-complete bounties held out of supply.
 /// @notice A creator's treasury locks an amount by burning it. The first completion
-/// the hook accepts mints it to the winner's treasury; after the deadline anyone
-/// can refund it to the creator. Each escrow settles once.
+/// the hook accepts mints it to the winner's treasury, or to one of the winner's
+/// accounts; after the deadline anyone can refund it to the creator. Each escrow
+/// settles once.
 /// @dev Holds BURNER_ROLE and MINTER_ROLE on the tokens it serves and no admin role.
 /// State is written before every mint.
 contract Escrow {
@@ -31,6 +32,7 @@ contract Escrow {
         uint64 deadline;
         uint8 state;
         string winnerAlias;
+        string winnerAccount;
     }
 
     /// In storage rather than immutable: the ABI generator refuses immutables.
@@ -51,7 +53,7 @@ contract Escrow {
     error NotYet();
 
     event Created(bytes32 indexed id, string creatorAlias, address token, uint256 amount, address hook, uint64 deadline);
-    event Completed(bytes32 indexed id, string winnerAlias, uint256 amount);
+    event Completed(bytes32 indexed id, string winnerAlias, string winnerAccount, uint256 amount);
     event Refunded(bytes32 indexed id, string creatorAlias, uint256 amount);
 
     constructor(address names) {
@@ -89,20 +91,28 @@ contract Escrow {
         emit Created(id, creatorAlias, token, amount, hook, deadline);
     }
 
-    /// @notice Pay `winnerAlias`'s treasury, if the hook accepts this report and it is the first.
-    function complete(bytes32 id, string calldata winnerAlias) external {
+    /// @notice Pay the winner, if the hook accepts this report and it is the first.
+    /// An empty `winnerAccount` pays `<winnerAlias>:treasury`; any other pays
+    /// `<winnerAlias>:acc.<winnerAccount>`. The hook sees only `winnerAlias`.
+    function complete(bytes32 id, string calldata winnerAlias, string calldata winnerAccount) external {
         Record storage r = records[id];
         if (r.state != OPEN) revert NotOpen();
         if (block.timestamp > r.deadline) revert TooLate();
         if (!IEscrowHook(r.hook).check(r.hookData, r.creatorAlias, winnerAlias, msg.sender)) revert HookRefused();
-        address winner = registry.resolve(string.concat(winnerAlias, ":treasury"));
+        // Built from winnerAlias alone, so an account can only be the winner's own.
+        address winner = registry.resolve(
+            bytes(winnerAccount).length == 0
+                ? string.concat(winnerAlias, ":treasury")
+                : string.concat(winnerAlias, ":acc.", winnerAccount)
+        );
         if (winner == address(0)) revert UnknownWinner();
 
         r.state = COMPLETED;
         r.winnerAlias = winnerAlias;
+        r.winnerAccount = winnerAccount;
 
         Token(r.token).mint(winner, r.amount);
-        emit Completed(id, winnerAlias, r.amount);
+        emit Completed(id, winnerAlias, winnerAccount, r.amount);
     }
 
     /// @notice Return an expired escrow to its creator. Anyone may call it.
@@ -132,6 +142,7 @@ contract Escrow {
             uint64 deadline,
             uint8 state,
             string memory winnerAlias,
+            string memory winnerAccount,
             uint64 now
         )
     {
@@ -146,6 +157,7 @@ contract Escrow {
             r.deadline,
             r.state,
             r.winnerAlias,
+            r.winnerAccount,
             uint64(block.timestamp)
         );
     }

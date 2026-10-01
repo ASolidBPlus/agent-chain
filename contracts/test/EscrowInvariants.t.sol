@@ -56,11 +56,11 @@ contract EscrowHandler is Test {
         if (ids.length == 0) return;
         bytes32 id = ids[idSeed % ids.length];
         uint256 w = winnerSeed % 3;
-        (,, address token,,,,,,,) = escrow.get(id);
+        (,, address token,,,,,,,,) = escrow.get(id);
         uint256 before = Token(token).balanceOf(treasuries[w]);
 
         vm.prank(reporter % 4 == 3 ? stranger : judges[reporter % 4]);
-        try escrow.complete(id, aliases[w]) {
+        try escrow.complete(id, aliases[w], "") {
             settlements[id]++;
             paidOut[id] += Token(token).balanceOf(treasuries[w]) - before;
         } catch {}
@@ -69,7 +69,7 @@ contract EscrowHandler is Test {
     function refund(uint256 idSeed) public {
         if (ids.length == 0) return;
         bytes32 id = ids[idSeed % ids.length];
-        (, address creator, address token,,,,,,,) = escrow.get(id);
+        (, address creator, address token,,,,,,,,) = escrow.get(id);
         uint256 before = Token(token).balanceOf(creator);
 
         vm.prank(stranger);
@@ -133,7 +133,7 @@ contract EscrowInvariantsTest is Test {
     function invariant_eachEscrowSettlesExactlyOnceForItsAmount() public view {
         for (uint256 i = 0; i < handler.idCount(); i++) {
             bytes32 id = handler.ids(i);
-            (,,, uint256 amount,,,, uint8 state,,) = escrow.get(id);
+            (,,, uint256 amount,,,, uint8 state,,,) = escrow.get(id);
             assertEq(amount, handler.amountAtCreate(id), "stored amount changed");
             if (state == 1) {
                 assertEq(handler.settlements(id), 0, "an open escrow has settled");
@@ -149,7 +149,7 @@ contract EscrowInvariantsTest is Test {
     function invariant_mintedEqualsBurnedMinusLocked() public view {
         uint256[2] memory locked;
         for (uint256 i = 0; i < handler.idCount(); i++) {
-            (,, address token, uint256 amount,,,, uint8 state,,) = escrow.get(handler.ids(i));
+            (,, address token, uint256 amount,,,, uint8 state,,,) = escrow.get(handler.ids(i));
             if (state == 1) locked[token == address(play) ? 0 : 1] += amount;
         }
         assertEq(supplyAtStart[0] - play.totalSupply(), locked[0], "play: minted != burned - locked");

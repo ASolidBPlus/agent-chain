@@ -45,7 +45,7 @@ contract ReentrantToken {
         } catch (bytes memory reason) {
             reentryError = bytes4(reason);
         }
-        try escrow.complete(target, "winner") {
+        try escrow.complete(target, "winner", "") {
             reentered = true;
         } catch {}
     }
@@ -93,7 +93,7 @@ contract EscrowTest is Test {
     }
 
     function _state(bytes32 id) internal view returns (uint8 state) {
-        (,,,,,,, state,,) = escrow.get(id);
+        (,,,,,,, state,,,) = escrow.get(id);
     }
 
     // ── create ──────────────────────────────────────────────────────────────
@@ -117,6 +117,7 @@ contract EscrowTest is Test {
             uint64 deadline_,
             uint8 state,
             string memory winnerAlias,
+            string memory winnerAccount,
             uint64 now_
         ) = escrow.get(ID);
         assertEq(creatorAlias, "maker");
@@ -128,6 +129,7 @@ contract EscrowTest is Test {
         assertEq(deadline_, deadline);
         assertEq(state, 1);
         assertEq(winnerAlias, "");
+        assertEq(winnerAccount, "");
         assertEq(now_, block.timestamp);
     }
 
@@ -246,34 +248,116 @@ contract EscrowTest is Test {
         _create(JUDGE, uint64(block.timestamp + 1 days));
         uint256 supply = play.totalSupply();
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit Escrow.Completed(ID, "winner", AMOUNT);
+        emit Escrow.Completed(ID, "winner", "", AMOUNT);
         vm.prank(creatorJudge);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
 
         assertEq(play.balanceOf(winner), AMOUNT);
         assertEq(play.balanceOf(creatorJudge), 0);
         assertEq(play.totalSupply(), supply + AMOUNT);
-        (,,,,,,, uint8 state, string memory winnerAlias,) = escrow.get(ID);
+        (,,,,,,, uint8 state, string memory winnerAlias, string memory winnerAccount,) = escrow.get(ID);
         assertEq(state, 2);
         assertEq(winnerAlias, "winner");
+        assertEq(winnerAccount, "");
+    }
+
+    function test_CompletePaysANamedAccountOfTheWinner() public {
+        address vault = address(0xD3);
+        vm.prank(admin);
+        names.registerFor("winner:acc.vault", vault, vault);
+        _create(JUDGE, uint64(block.timestamp + 1 days));
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.Completed(ID, "winner", "vault", AMOUNT);
+        vm.prank(creatorJudge);
+        escrow.complete(ID, "winner", "vault");
+
+        assertEq(play.balanceOf(vault), AMOUNT);
+        assertEq(play.balanceOf(winner), 0);
+        (,,,,,,, uint8 state, string memory winnerAlias, string memory winnerAccount,) = escrow.get(ID);
+        assertEq(state, 2);
+        assertEq(winnerAlias, "winner");
+        assertEq(winnerAccount, "vault");
+    }
+
+    function test_AnEmptyAccountPaysTheTreasuryEvenWhenAccountsExist() public {
+        vm.prank(admin);
+        names.registerFor("winner:acc.vault", address(0xD3), address(0xD3));
+        _create(JUDGE, uint64(block.timestamp + 1 days));
+        vm.prank(creatorJudge);
+        escrow.complete(ID, "winner", "");
+        assertEq(play.balanceOf(winner), AMOUNT);
+        assertEq(play.balanceOf(address(0xD3)), 0);
+    }
+
+    function test_AnUnknownAccountIsAnUnknownWinner() public {
+        _create(JUDGE, uint64(block.timestamp + 1 days));
+        vm.prank(creatorJudge);
+        vm.expectRevert(Escrow.UnknownWinner.selector);
+        escrow.complete(ID, "winner", "nope");
+        assertEq(_state(ID), 1);
+    }
+
+    // The account name is built from winnerAlias, so naming an account that
+    // belongs to another participant resolves under the winner and misses.
+    function test_AnotherParticipantsAccountCannotBePaid() public {
+        address makerVault = address(0xC3);
+        vm.prank(admin);
+        names.registerFor("maker:acc.vault", makerVault, makerVault);
+        _create(JUDGE, uint64(block.timestamp + 1 days));
+        vm.prank(creatorJudge);
+        vm.expectRevert(Escrow.UnknownWinner.selector);
+        escrow.complete(ID, "winner", "vault");
+        assertEq(play.balanceOf(makerVault), 0);
+    }
+
+    // With both participants holding an account of the same name, the winner's
+    // is paid.
+    function test_TheWinnersAccountIsPaidNotTheCreatorsOfTheSameName() public {
+        address makerVault = address(0xC3);
+        address winnerVault = address(0xD3);
+        vm.startPrank(admin);
+        names.registerFor("maker:acc.vault", makerVault, makerVault);
+        names.registerFor("winner:acc.vault", winnerVault, winnerVault);
+        vm.stopPrank();
+        _create(JUDGE, uint64(block.timestamp + 1 days));
+        vm.prank(creatorJudge);
+        escrow.complete(ID, "winner", "vault");
+        assertEq(play.balanceOf(winnerVault), AMOUNT);
+        assertEq(play.balanceOf(makerVault), 0);
+    }
+
+    // The hook judges winnerAlias only: in mode 1 the winner's own judge may
+    // report, whatever account it names.
+    function test_TheAccountDoesNotChangeWhoMayJudge() public {
+        address vault = address(0xD3);
+        vm.prank(admin);
+        names.registerFor("winner:acc.vault", vault, vault);
+        _create(EACH_JUDGE, uint64(block.timestamp + 1 days));
+        vm.prank(creatorJudge);
+        vm.expectRevert(Escrow.HookRefused.selector);
+        escrow.complete(ID, "winner", "vault");
+        vm.prank(winnerJudge);
+        escrow.complete(ID, "winner", "vault");
+        assertEq(play.balanceOf(vault), AMOUNT);
     }
 
     function test_CompleteRefusesAnUnknownId() public {
         vm.prank(creatorJudge);
         vm.expectRevert(Escrow.NotOpen.selector);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
     }
 
     function test_FirstReportWinsAndTheNextBlockIsRefused() public {
         _create(JUDGE, uint64(block.timestamp + 1 days));
         vm.prank(creatorJudge);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
 
         vm.roll(block.number + 1);
         vm.warp(block.timestamp + 1);
         vm.prank(creatorJudge);
         vm.expectRevert(Escrow.NotOpen.selector);
-        escrow.complete(ID, "maker");
+        escrow.complete(ID, "maker", "");
         assertEq(play.balanceOf(winner), AMOUNT);
         assertEq(play.balanceOf(creator), 900e18);
     }
@@ -284,7 +368,7 @@ contract EscrowTest is Test {
         escrow.refund(ID);
         vm.prank(creatorJudge);
         vm.expectRevert(Escrow.NotOpen.selector);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
     }
 
     function test_CompleteRefusesAReporterTheHookRejects() public {
@@ -293,7 +377,7 @@ contract EscrowTest is Test {
         for (uint256 i = 0; i < others.length; i++) {
             vm.prank(others[i]);
             vm.expectRevert(Escrow.HookRefused.selector);
-            escrow.complete(ID, "winner");
+            escrow.complete(ID, "winner", "");
         }
         assertEq(_state(ID), 1);
     }
@@ -302,7 +386,7 @@ contract EscrowTest is Test {
         _create(JUDGE, uint64(block.timestamp + 1 days));
         vm.prank(creatorJudge);
         vm.expectRevert(Escrow.UnknownWinner.selector);
-        escrow.complete(ID, "nobody");
+        escrow.complete(ID, "nobody", "");
         assertEq(_state(ID), 1);
     }
 
@@ -312,7 +396,7 @@ contract EscrowTest is Test {
         escrow.create(ID, "maker", address(play), AMOUNT, address(hook), JUDGE, uint64(block.timestamp + 1 days));
         vm.prank(creatorJudge);
         vm.expectRevert();
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         assertEq(hook.calls(), 0);
         assertEq(_state(ID), 1);
     }
@@ -322,7 +406,7 @@ contract EscrowTest is Test {
         escrow.create(ID, "maker", address(play), AMOUNT, address(play), JUDGE, uint64(block.timestamp + 1 days));
         vm.prank(creatorJudge);
         vm.expectRevert();
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         vm.warp(block.timestamp + 1 days + 1);
         escrow.refund(ID);
         assertEq(play.balanceOf(creator), 1_000e18);
@@ -350,7 +434,7 @@ contract EscrowTest is Test {
     function test_RefundRefusesACompletedEscrow() public {
         _create(JUDGE, uint64(block.timestamp + 1 days));
         vm.prank(creatorJudge);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         vm.warp(block.timestamp + 1 days + 1);
         vm.expectRevert(Escrow.NotOpen.selector);
         escrow.refund(ID);
@@ -374,7 +458,7 @@ contract EscrowTest is Test {
         vm.expectRevert(Escrow.NotYet.selector);
         escrow.refund(ID);
         vm.prank(creatorJudge);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         assertEq(_state(ID), 2);
     }
 
@@ -384,7 +468,7 @@ contract EscrowTest is Test {
         vm.warp(uint256(deadline) + 1);
         vm.prank(creatorJudge);
         vm.expectRevert(Escrow.TooLate.selector);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         escrow.refund(ID);
         assertEq(_state(ID), 3);
     }
@@ -408,7 +492,7 @@ contract EscrowTest is Test {
         escrow.create(ID, "maker", address(token), AMOUNT, address(judge), JUDGE, uint64(block.timestamp + 1));
         token.arm(escrow, ID);
         vm.prank(creatorJudge);
-        escrow.complete(ID, "winner");
+        escrow.complete(ID, "winner", "");
         assertFalse(token.reentered());
         assertEq(token.reentryError(), Escrow.NotOpen.selector);
     }
@@ -464,10 +548,18 @@ contract JudgeHookTest is Test {
         assertFalse(hook.check(abi.encodePacked(uint8(255), "judge"), "maker", "winner", makerJudge));
     }
 
-    function test_ShortHookDataIsRefused() public view {
-        assertFalse(hook.check("", "maker", "winner", makerJudge));
-        assertFalse(hook.check(hex"00", "maker", "winner", makerJudge));
-        assertFalse(hook.check(hex"01", "maker", "maker", makerJudge));
+    // A one-byte hookData would name the empty backend, which resolves
+    // "<alias>:". That name is registrable, so register it: the length check
+    // is then the only thing refusing.
+    function test_ShortHookDataIsRefused() public {
+        address emptyJudge = address(0xF1);
+        vm.startPrank(admin);
+        names.registerFor("maker:", emptyJudge, emptyJudge);
+        names.registerFor("winner:", emptyJudge, emptyJudge);
+        vm.stopPrank();
+        assertFalse(hook.check("", "maker", "winner", emptyJudge));
+        assertFalse(hook.check(hex"00", "maker", "winner", emptyJudge));
+        assertFalse(hook.check(hex"01", "maker", "winner", emptyJudge));
     }
 
     // An unregistered judge name resolves to zero, which only a zero sender

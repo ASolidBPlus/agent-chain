@@ -678,6 +678,11 @@ export const EscrowAbi = [
         "name": "winnerAlias",
         "type": "string",
         "internalType": "string"
+      },
+      {
+        "name": "winnerAccount",
+        "type": "string",
+        "internalType": "string"
       }
     ],
     "outputs": [],
@@ -783,6 +788,11 @@ export const EscrowAbi = [
         "internalType": "string"
       },
       {
+        "name": "winnerAccount",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
         "name": "now",
         "type": "uint64",
         "internalType": "uint64"
@@ -828,6 +838,12 @@ export const EscrowAbi = [
       },
       {
         "name": "winnerAlias",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "winnerAccount",
         "type": "string",
         "indexed": false,
         "internalType": "string"
