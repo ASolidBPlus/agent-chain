@@ -548,5 +548,52 @@
     "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":true,\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"}]}",
     "ok": true,
     "canon": "token|play|true|PLAY|1000|#"
+  },
+  {
+    "name": "case escrow.json",
+    "manifest": "{\n  \"schema\": 1,\n  \"modules\": [\n    { \"kind\": \"token\", \"key\": \"play\", \"name\": \"Play Token\", \"symbol\": \"PLAY\", \"initialSupply\": \"1000000\" },\n    { \"kind\": \"token\", \"key\": \"gold\", \"name\": \"Gold\", \"symbol\": \"GOLD\", \"initialSupply\": \"0\" },\n    { \"kind\": \"names\", \"tld\": \"play\" },\n    { \"kind\": \"converter\", \"pairs\": [\n      { \"source\": \"play\", \"target\": \"gold\", \"rate\": \"0.75\" },\n      { \"source\": \"gold\", \"target\": \"play\", \"rate\": \"1\" }\n    ] },\n    { \"kind\": \"escrow\" },\n    { \"kind\": \"judgehook\" }\n  ]\n}\n",
+    "ok": true,
+    "canon": "token|play|Play Token|PLAY|1000000|;token|gold|Gold|GOLD|0|;names||||0|play;converter||||0|;escrow||||0|;judgehook||||0|#play>gold@750000000000000000;gold>play@1000000000000000000"
+  },
+  {
+    "name": "escrow and judgehook straight after names, with no token",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"names\",\"tld\":\"play\"},{\"kind\":\"escrow\"},{\"kind\":\"judgehook\"}]}",
+    "ok": true,
+    "canon": "names||||0|play;escrow||||0|;judgehook||||0|#"
+  },
+  {
+    "name": "escrow with no names module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"escrow\"}]}",
+    "ok": false
+  },
+  {
+    "name": "escrow before the names module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"escrow\"},{\"kind\":\"names\",\"tld\":\"play\"}]}",
+    "ok": false
+  },
+  {
+    "name": "judgehook with no names module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"token\",\"key\":\"play\",\"name\":\"Play\",\"symbol\":\"PLAY\",\"initialSupply\":\"1000\"},{\"kind\":\"judgehook\"}]}",
+    "ok": false
+  },
+  {
+    "name": "judgehook before the names module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"judgehook\"},{\"kind\":\"names\",\"tld\":\"play\"}]}",
+    "ok": false
+  },
+  {
+    "name": "two escrow modules",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"names\",\"tld\":\"play\"},{\"kind\":\"escrow\"},{\"kind\":\"escrow\"}]}",
+    "ok": false
+  },
+  {
+    "name": "two judgehook modules",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"names\",\"tld\":\"play\"},{\"kind\":\"judgehook\"},{\"kind\":\"judgehook\"}]}",
+    "ok": false
+  },
+  {
+    "name": "a contract keyed escrow beside the escrow module",
+    "manifest": "{\"schema\":1,\"modules\":[{\"kind\":\"names\",\"tld\":\"play\"},{\"kind\":\"escrow\"},{\"kind\":\"contract\",\"key\":\"escrow\",\"contract\":\"Token\",\"args\":[]}]}",
+    "ok": false
   }
 ]

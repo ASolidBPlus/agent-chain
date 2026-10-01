@@ -13,6 +13,8 @@ export const MODULES = {
   token: 'Token',
   names: 'NameRegistry',
   converter: 'Converter',
+  escrow: 'Escrow',
+  judgehook: 'JudgeHook',
 } as const;
 
 export type ModuleKind = keyof typeof MODULES;
@@ -289,6 +291,8 @@ export async function buildModules(
       // Address only, no chain read: its pairs live on the contract, and what
       // is callable on it is the allowlist's business, not the registry's.
       converter = { address: m.address };
+    } else if (m.kind === 'escrow' || m.kind === 'judgehook') {
+      // Reached through `byKey` under its kind, like a custom contract.
     } else if (m.kind === 'contract') {
       // NO TYPED SLOT, and none is missing. A custom contract is reached
       // through `byKey` alone - that is what "no chain-svc code per feature"

@@ -236,6 +236,9 @@ export function validateDeployment(parsed: Record<string, unknown>, path: string
       // address were checked above, and that is all a converter entry carries.
       // It claims its implicit key like the names module does.
       claim('converter');
+    } else if (kind === 'escrow' || kind === 'judgehook') {
+      // Singletons with no key and no tld; each claims its kind as its key.
+      claim(kind);
     } else {
       throw new Error(`chain-svc: ${path} module kind "${String(kind)}" has no validation rule`);
     }

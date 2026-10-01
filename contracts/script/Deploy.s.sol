@@ -6,6 +6,8 @@ import {console} from "forge-std/console.sol";
 import {Token} from "../src/Token.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
 import {Converter} from "../src/Converter.sol";
+import {Escrow} from "../src/Escrow.sol";
+import {JudgeHook} from "../src/JudgeHook.sol";
 
 /// @title Deploy - brings up the modules a deployment's manifest asks for.
 /// @notice Reads deployments/manifest.json, deploys each module in the order it
@@ -40,6 +42,12 @@ contract Deploy is Script {
     string internal constant CONTRACT_TOKEN = "Token";
     string internal constant CONTRACT_NAMES = "NameRegistry";
     string internal constant CONTRACT_CONVERTER = "Converter";
+    /// Singletons that take the names module's address as their only argument,
+    /// so a names module must come earlier in the manifest.
+    string internal constant KIND_ESCROW = "escrow";
+    string internal constant KIND_JUDGEHOOK = "judgehook";
+    string internal constant CONTRACT_ESCROW = "Escrow";
+    string internal constant CONTRACT_JUDGEHOOK = "JudgeHook";
 
     uint256 internal constant SCHEMA = 1;
 
@@ -235,6 +243,10 @@ contract Deploy is Script {
                 Converter c = new Converter{salt: saltFor(KIND_CONVERTER, "")}(treasury);
                 plan.addrs[i] = address(c);
                 converterAddr = address(c);
+            } else if (_eq(mods[i].kind, KIND_ESCROW)) {
+                plan.addrs[i] = address(new Escrow{salt: saltFor(KIND_ESCROW, "")}(namesAddr));
+            } else if (_eq(mods[i].kind, KIND_JUDGEHOOK)) {
+                plan.addrs[i] = address(new JudgeHook{salt: saltFor(KIND_JUDGEHOOK, "")}(namesAddr));
             } else {
                 // A custom contract, deployed by name with static-typed args. Kept
                 // in its own function so deploy()'s stack stays within limits.
@@ -271,6 +283,7 @@ contract Deploy is Script {
                 Token(tgt).grantRole(Token(tgt).MINTER_ROLE(), converterAddr);
             }
         }
+        _grantEscrow(mods, plan.addrs);
         vm.stopBroadcast();
 
         // ASSERTED ON BOTH PATHS. See `_assertDeployment`.
@@ -315,6 +328,8 @@ contract Deploy is Script {
         ModuleSpec[] memory mods = new ModuleSpec[](n);
         uint256 namesSeen = 0;
         uint256 convertersSeen = 0;
+        uint256 escrowsSeen = 0;
+        uint256 hooksSeen = 0;
         for (uint256 i = 0; i < n; i++) {
             string memory at = string.concat(".modules[", vm.toString(i), "]");
             string memory kind = vm.parseJsonString(json, string.concat(at, ".kind"));
@@ -351,6 +366,16 @@ contract Deploy is Script {
                 mods[i].kind = KIND_CONVERTER;
                 // Pairs are parsed and validated in `_readConverterPairs`, which
                 // needs the full module list to resolve source/target keys.
+            } else if (_eq(kind, KIND_ESCROW)) {
+                escrowsSeen++;
+                if (escrowsSeen > 1) revert("Deploy: manifest: more than one escrow module");
+                if (namesSeen == 0) revert("Deploy: manifest: escrow needs a names module earlier in the manifest");
+                mods[i].kind = KIND_ESCROW;
+            } else if (_eq(kind, KIND_JUDGEHOOK)) {
+                hooksSeen++;
+                if (hooksSeen > 1) revert("Deploy: manifest: more than one judgehook module");
+                if (namesSeen == 0) revert("Deploy: manifest: judgehook needs a names module earlier in the manifest");
+                mods[i].kind = KIND_JUDGEHOOK;
             } else if (_eq(kind, KIND_CONTRACT)) {
                 mods[i].kind = KIND_CONTRACT;
                 mods[i].key = vm.parseJsonString(json, string.concat(at, ".key"));
@@ -1106,12 +1131,16 @@ contract Deploy is Script {
                         "Deploy: converter lacks MINTER_ROLE on a target token"
                     );
                 }
+            } else if (_eq(mods[i].kind, KIND_ESCROW) || _eq(mods[i].kind, KIND_JUDGEHOOK)) {
+                // Roles are checked across every module in _assertEscrowRoles.
+                require(addrs[i].code.length > 0, "Deploy: escrow or judgehook has no code");
             } else {
                 // A custom contract: it exists and has code. No roles are asserted
                 // because the deploy grants it none.
                 require(addrs[i].code.length > 0, "Deploy: contract has no code");
             }
         }
+        _assertEscrowRoles(mods, addrs);
 
     }
 
@@ -1171,6 +1200,12 @@ contract Deploy is Script {
         } else if (_eq(mods[i].kind, KIND_CONVERTER)) {
             initcode = abi.encodePacked(type(Converter).creationCode, abi.encode(treasury));
             salt = saltFor(KIND_CONVERTER, "");
+        } else if (_eq(mods[i].kind, KIND_ESCROW)) {
+            initcode = abi.encodePacked(type(Escrow).creationCode, abi.encode(_namesAddr(mods, addrs)));
+            salt = saltFor(KIND_ESCROW, "");
+        } else if (_eq(mods[i].kind, KIND_JUDGEHOOK)) {
+            initcode = abi.encodePacked(type(JudgeHook).creationCode, abi.encode(_namesAddr(mods, addrs)));
+            salt = saltFor(KIND_JUDGEHOOK, "");
         } else {
             initcode = abi.encodePacked(
                 vm.getCode(string.concat(mods[i].name, ".sol:", mods[i].name)),
@@ -1300,8 +1335,7 @@ contract Deploy is Script {
             bool isContract = _eq(mods[i].kind, KIND_CONTRACT);
             // A custom contract records its own Solidity name; the fixed kinds
             // record their fixed contract.
-            string memory contractName =
-                isToken ? CONTRACT_TOKEN : isNames ? CONTRACT_NAMES : isContract ? mods[i].name : CONTRACT_CONVERTER;
+            string memory contractName = _contractNameOf(mods[i]);
             // THE RUNTIME CODEHASH, recorded at write time so the skip path can
             // ask whether the code at that address is still the code this
             // manifest describes. Without it "the address has code" was the
@@ -1352,5 +1386,97 @@ contract Deploy is Script {
         // this file into place only when that status is zero.
         vm.writeJson(out, string.concat(path, ".pending"));
         console.log("Deploy: wrote", string.concat(path, ".pending"));
+    }
+
+    // ── escrow and judgehook ─────────────────────────────────────────────────
+
+    /// The names module's address, planned or deployed. The manifest reader has
+    /// already refused an escrow or judgehook with no names module before it.
+    function _namesAddr(ModuleSpec[] memory mods, address[] memory addrs) internal pure returns (address) {
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_NAMES)) return addrs[i];
+        }
+        revert("Deploy: manifest: no names module");
+    }
+
+    function _addrOfKind(ModuleSpec[] memory mods, address[] memory addrs, string memory kind)
+        internal
+        pure
+        returns (address)
+    {
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, kind)) return addrs[i];
+        }
+        return address(0);
+    }
+
+    function _contractNameOf(ModuleSpec memory m) internal pure returns (string memory) {
+        if (_eq(m.kind, KIND_TOKEN)) return CONTRACT_TOKEN;
+        if (_eq(m.kind, KIND_NAMES)) return CONTRACT_NAMES;
+        if (_eq(m.kind, KIND_CONVERTER)) return CONTRACT_CONVERTER;
+        if (_eq(m.kind, KIND_ESCROW)) return CONTRACT_ESCROW;
+        if (_eq(m.kind, KIND_JUDGEHOOK)) return CONTRACT_JUDGEHOOK;
+        if (_eq(m.kind, KIND_CONTRACT)) return m.name;
+        revert(string.concat('Deploy: no contract name for kind "', m.kind, '"'));
+    }
+
+    /// BURNER then MINTER on every token, in manifest order, each only if missing.
+    /// The route sends the same grants in the same order.
+    function _grantEscrow(ModuleSpec[] memory mods, address[] memory addrs) internal {
+        address escrow = _addrOfKind(mods, addrs, KIND_ESCROW);
+        if (escrow == address(0)) return;
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (!_eq(mods[i].kind, KIND_TOKEN)) continue;
+            Token t = Token(addrs[i]);
+            if (!t.hasRole(t.BURNER_ROLE(), escrow)) t.grantRole(t.BURNER_ROLE(), escrow);
+            if (!t.hasRole(t.MINTER_ROLE(), escrow)) t.grantRole(t.MINTER_ROLE(), escrow);
+        }
+    }
+
+    /// Escrow burns and mints every token and administers nothing; the judge hook
+    /// holds no role on any module.
+    function _assertEscrowRoles(ModuleSpec[] memory mods, address[] memory addrs) internal view {
+        address escrow = _addrOfKind(mods, addrs, KIND_ESCROW);
+        address hook = _addrOfKind(mods, addrs, KIND_JUDGEHOOK);
+        for (uint256 i = 0; i < mods.length; i++) {
+            if (_eq(mods[i].kind, KIND_TOKEN)) {
+                Token t = Token(addrs[i]);
+                if (escrow != address(0)) {
+                    require(t.hasRole(t.BURNER_ROLE(), escrow), "Deploy: escrow lacks BURNER_ROLE on a token");
+                    require(t.hasRole(t.MINTER_ROLE(), escrow), "Deploy: escrow lacks MINTER_ROLE on a token");
+                    require(!t.hasRole(t.FREEZER_ROLE(), escrow), "Deploy: escrow must not hold FREEZER_ROLE");
+                    require(
+                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), escrow), "Deploy: escrow must not hold DEFAULT_ADMIN_ROLE"
+                    );
+                }
+                if (hook != address(0)) {
+                    require(
+                        !t.hasRole(t.DEFAULT_ADMIN_ROLE(), hook) && !t.hasRole(t.MINTER_ROLE(), hook)
+                            && !t.hasRole(t.BURNER_ROLE(), hook) && !t.hasRole(t.FREEZER_ROLE(), hook),
+                        "Deploy: judgehook must hold no role on a token"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_NAMES)) {
+                NameRegistry r = NameRegistry(addrs[i]);
+                if (escrow != address(0)) {
+                    require(
+                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), escrow),
+                        "Deploy: escrow must not hold DEFAULT_ADMIN_ROLE on the registry"
+                    );
+                }
+                if (hook != address(0)) {
+                    require(
+                        !r.hasRole(r.DEFAULT_ADMIN_ROLE(), hook) && !r.hasRole(r.REGISTRAR_ROLE(), hook),
+                        "Deploy: judgehook must hold no role on the registry"
+                    );
+                }
+            } else if (_eq(mods[i].kind, KIND_CONVERTER) && hook != address(0)) {
+                Converter c = Converter(addrs[i]);
+                require(
+                    !c.hasRole(c.DEFAULT_ADMIN_ROLE(), hook) && !c.hasRole(c.RATE_ADMIN_ROLE(), hook),
+                    "Deploy: judgehook must hold no role on the converter"
+                );
+            }
+        }
     }
 }
