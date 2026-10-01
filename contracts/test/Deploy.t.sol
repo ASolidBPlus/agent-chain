@@ -6,6 +6,8 @@ import {Deploy} from "../script/Deploy.s.sol";
 import {Token} from "../src/Token.sol";
 import {NameRegistry} from "../src/NameRegistry.sol";
 import {Converter} from "../src/Converter.sol";
+import {Escrow} from "../src/Escrow.sol";
+import {JudgeHook} from "../src/JudgeHook.sol";
 import {Fixture} from "./fixtures/Fixture.sol";
 
 /// The deploy script, driven end to end inside `forge test` - no live Anvil, no
@@ -1004,6 +1006,116 @@ contract DeployTest is Test {
             "converter address is not CREATE2 from its salt and init code"
         );
 
+        _clean(dir);
+    }
+
+    function _escrowCase() internal view returns (string memory) {
+        return vm.readFile("../deployments/cases/escrow.json");
+    }
+
+    function test_EscrowAndJudgeHookDeployWithTheirGrants() public {
+        string memory dir = _dir("escrow");
+        _write(dir, _escrowCase());
+        Deploy d = _script();
+        _deployed(d, dir, "");
+
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        assertEq(vm.parseJsonString(out, ".modules[4].kind"), "escrow");
+        assertEq(vm.parseJsonString(out, ".modules[4].contract"), "Escrow");
+        assertEq(vm.parseJsonString(out, ".modules[5].kind"), "judgehook");
+        assertEq(vm.parseJsonString(out, ".modules[5].contract"), "JudgeHook");
+        for (uint256 i = 4; i < 6; i++) {
+            string memory at = string.concat(".modules[", vm.toString(i), "]");
+            assertFalse(vm.keyExistsJson(out, string.concat(at, ".key")), "a singleton carries no key");
+            assertFalse(vm.keyExistsJson(out, string.concat(at, ".tld")), "only names carries a tld");
+        }
+
+        Token play = Token(vm.parseJsonAddress(out, ".modules[0].address"));
+        Token gold = Token(vm.parseJsonAddress(out, ".modules[1].address"));
+        NameRegistry names = NameRegistry(vm.parseJsonAddress(out, ".modules[2].address"));
+        Converter c = Converter(vm.parseJsonAddress(out, ".modules[3].address"));
+        Escrow escrow = Escrow(vm.parseJsonAddress(out, ".modules[4].address"));
+        JudgeHook hook = JudgeHook(vm.parseJsonAddress(out, ".modules[5].address"));
+
+        assertEq(address(escrow.registry()), address(names));
+        assertEq(address(hook.registry()), address(names));
+
+        Token[2] memory tokens = [play, gold];
+        for (uint256 i = 0; i < 2; i++) {
+            Token t = tokens[i];
+            assertTrue(t.hasRole(t.BURNER_ROLE(), address(escrow)), "escrow burns every token");
+            assertTrue(t.hasRole(t.MINTER_ROLE(), address(escrow)), "escrow mints every token");
+            assertFalse(t.hasRole(t.FREEZER_ROLE(), address(escrow)));
+            assertFalse(t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(escrow)));
+            assertFalse(t.hasRole(t.DEFAULT_ADMIN_ROLE(), address(hook)));
+            assertFalse(t.hasRole(t.MINTER_ROLE(), address(hook)));
+            assertFalse(t.hasRole(t.BURNER_ROLE(), address(hook)));
+            assertFalse(t.hasRole(t.FREEZER_ROLE(), address(hook)));
+            // The converter's grants are unchanged beside the escrow's.
+            assertTrue(t.hasRole(t.BURNER_ROLE(), address(c)));
+            assertTrue(t.hasRole(t.MINTER_ROLE(), address(c)));
+        }
+        assertFalse(names.hasRole(names.DEFAULT_ADMIN_ROLE(), address(escrow)));
+        assertFalse(names.hasRole(names.DEFAULT_ADMIN_ROLE(), address(hook)));
+        assertFalse(names.hasRole(names.REGISTRAR_ROLE(), address(hook)));
+        assertFalse(c.hasRole(c.DEFAULT_ADMIN_ROLE(), address(hook)));
+        assertFalse(c.hasRole(c.RATE_ADMIN_ROLE(), address(hook)));
+
+        // CREATE2 from the bare kind and the names address as the only argument.
+        address deployer = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+        bytes memory escrowInit = abi.encodePacked(type(Escrow).creationCode, abi.encode(address(names)));
+        bytes memory hookInit = abi.encodePacked(type(JudgeHook).creationCode, abi.encode(address(names)));
+        assertEq(address(escrow), vm.computeCreate2Address(d.saltFor("escrow", ""), keccak256(escrowInit), deployer));
+        assertEq(address(hook), vm.computeCreate2Address(d.saltFor("judgehook", ""), keccak256(hookInit), deployer));
+
+        _clean(dir);
+    }
+
+    function test_AWipedEscrowRedeploysToTheSameAddress() public {
+        string memory dir = _dir("escrow-wiped");
+        _write(dir, _escrowCase());
+        Deploy d = _script();
+        _deployed(d, dir, "");
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        address escrow = vm.parseJsonAddress(out, ".modules[4].address");
+        address names = vm.parseJsonAddress(out, ".modules[2].address");
+
+        // The names module is skipped on the second run; the escrow must still be
+        // built against its address.
+        vm.etch(escrow, "");
+        vm.resetNonce(escrow); // etch keeps the nonce, and CREATE2 would collide
+        d.deploy(dir, "", "", KEY);
+        assertGt(escrow.code.length, 0, "the escrow was not redeployed");
+        assertEq(address(Escrow(escrow).registry()), names);
+        _clean(dir);
+    }
+
+    function test_TheSkipPathNoticesAnEscrowGrantRevoked() public {
+        string memory dir = _dir("escrow-revoked");
+        _write(dir, _escrowCase());
+        Deploy d = _script();
+        _deployed(d, dir, "");
+        string memory out = vm.readFile(string.concat(dir, "/local.json"));
+        Token gold = Token(vm.parseJsonAddress(out, ".modules[1].address"));
+        address escrow = vm.parseJsonAddress(out, ".modules[4].address");
+
+        bytes32 minter = gold.MINTER_ROLE();
+        vm.prank(treasury);
+        gold.revokeRole(minter, escrow);
+        vm.expectRevert(bytes("Deploy: escrow lacks MINTER_ROLE on a token"));
+        d.deploy(dir, "", "", KEY);
+        _clean(dir);
+    }
+
+    function test_EscrowWithoutAnEarlierNamesModuleIsARefusal() public {
+        string memory dir = _dir("escrow-no-names");
+        _write(
+            dir,
+            '{"schema":1,"modules":[{"kind":"escrow"},{"kind":"names","tld":"play"}]}'
+        );
+        Deploy d = _script();
+        vm.expectRevert(bytes("Deploy: manifest: escrow needs a names module earlier in the manifest"));
+        d.deploy(dir, "", "1", KEY);
         _clean(dir);
     }
 

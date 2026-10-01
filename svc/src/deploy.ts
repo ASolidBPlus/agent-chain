@@ -28,6 +28,8 @@ import { HttpError } from './errors.ts';
 import {
   KIND_CONTRACT,
   KIND_CONVERTER,
+  KIND_ESCROW,
+  KIND_JUDGEHOOK,
   KIND_NAMES,
   KIND_TOKEN,
   effectiveKey,
@@ -44,6 +46,8 @@ const CONTRACT_FOR_KIND: Record<string, string> = {
   [KIND_TOKEN]: 'Token',
   [KIND_NAMES]: 'NameRegistry',
   [KIND_CONVERTER]: 'Converter',
+  [KIND_ESCROW]: 'Escrow',
+  [KIND_JUDGEHOOK]: 'JudgeHook',
 };
 
 /// Deploy.s.sol `saltFor`: keccak256 of "kind:key", or of the bare kind for a
@@ -91,6 +95,9 @@ function initcodeFor(m: ModuleSpec, index: number, mods: ModuleSpec[], addrs: Ad
     ]);
   } else if (m.kind === KIND_NAMES || m.kind === KIND_CONVERTER) {
     args = encodeAbiParameters([{ type: 'address' }], [treasury]);
+  } else if (m.kind === KIND_ESCROW || m.kind === KIND_JUDGEHOOK) {
+    // The names module's address; the grammar puts it earlier in the manifest.
+    args = encodeAbiParameters([{ type: 'address' }], [addrs[mods.findIndex((x) => x.kind === KIND_NAMES)]]);
   } else {
     args = contractArgs(m, index, mods, addrs, treasury);
   }
@@ -271,6 +278,21 @@ export async function sendDeployment(
       }
     }
   }
+
+  // BURNER then MINTER on every token, in manifest order, each only if missing:
+  // the order Deploy.s.sol `_grantEscrow` uses, so the two send the same list.
+  const escrow = planned.find((p) => p.spec.kind === KIND_ESCROW);
+  if (escrow) {
+    for (const p of planned) {
+      if (p.spec.kind !== KIND_TOKEN) continue;
+      for (const name of ['BURNER_ROLE', 'MINTER_ROLE']) {
+        const r = await read<Hex>(chain, p.address, TokenAbi, name);
+        if (!(await read<boolean>(chain, p.address, TokenAbi, 'hasRole', [r, escrow.address]))) {
+          txs.push(await sendCall(chain, p.address, TokenAbi, 'grantRole', [r, escrow.address]));
+        }
+      }
+    }
+  }
   return txs;
 }
 
@@ -322,9 +344,52 @@ export async function assertDeployment(chain: Chain, manifest: Manifest, planned
         if (!(await has(src, TokenAbi, await role(src, TokenAbi, 'BURNER_ROLE'), a))) fail('converter lacks BURNER_ROLE on a source token');
         if (!(await has(tgt, TokenAbi, await role(tgt, TokenAbi, 'MINTER_ROLE'), a))) fail('converter lacks MINTER_ROLE on a target token');
       }
+    } else if (p.spec.kind === KIND_ESCROW || p.spec.kind === KIND_JUDGEHOOK) {
+      const code = await chain.publicClient.getCode({ address: a });
+      if (code === undefined || code === '0x') fail('escrow or judgehook has no code');
     } else {
       const code = await chain.publicClient.getCode({ address: a });
       if (code === undefined || code === '0x') fail('contract has no code');
+    }
+  }
+  await assertEscrowRoles(chain, planned, fail);
+}
+
+/// Deploy.s.sol `_assertEscrowRoles`: the escrow burns and mints every token and
+/// administers nothing; the judge hook holds no role on any module.
+async function assertEscrowRoles(chain: Chain, planned: PlannedModule[], fail: (what: string) => never): Promise<void> {
+  const escrow = planned.find((p) => p.spec.kind === KIND_ESCROW)?.address;
+  const hook = planned.find((p) => p.spec.kind === KIND_JUDGEHOOK)?.address;
+  const holds = async (addr: Address, abi: unknown, name: string, who: Address) =>
+    read<boolean>(chain, addr, abi, 'hasRole', [await read<Hex>(chain, addr, abi, name), who]);
+  const holdsAny = async (addr: Address, abi: unknown, names: string[], who: Address) => {
+    for (const name of names) if (await holds(addr, abi, name, who)) return true;
+    return false;
+  };
+
+  for (const p of planned) {
+    const a = p.address;
+    if (p.spec.kind === KIND_TOKEN) {
+      if (escrow) {
+        if (!(await holds(a, TokenAbi, 'BURNER_ROLE', escrow))) fail('escrow lacks BURNER_ROLE on a token');
+        if (!(await holds(a, TokenAbi, 'MINTER_ROLE', escrow))) fail('escrow lacks MINTER_ROLE on a token');
+        if (await holds(a, TokenAbi, 'FREEZER_ROLE', escrow)) fail('escrow must not hold FREEZER_ROLE');
+        if (await holds(a, TokenAbi, 'DEFAULT_ADMIN_ROLE', escrow)) fail('escrow must not hold DEFAULT_ADMIN_ROLE');
+      }
+      if (hook && (await holdsAny(a, TokenAbi, ['DEFAULT_ADMIN_ROLE', 'MINTER_ROLE', 'BURNER_ROLE', 'FREEZER_ROLE'], hook))) {
+        fail('judgehook must hold no role on a token');
+      }
+    } else if (p.spec.kind === KIND_NAMES) {
+      if (escrow && (await holds(a, NameRegistryAbi, 'DEFAULT_ADMIN_ROLE', escrow))) {
+        fail('escrow must not hold DEFAULT_ADMIN_ROLE on the registry');
+      }
+      if (hook && (await holdsAny(a, NameRegistryAbi, ['DEFAULT_ADMIN_ROLE', 'REGISTRAR_ROLE'], hook))) {
+        fail('judgehook must hold no role on the registry');
+      }
+    } else if (p.spec.kind === KIND_CONVERTER && hook) {
+      if (await holdsAny(a, ConverterAbi, ['DEFAULT_ADMIN_ROLE', 'RATE_ADMIN_ROLE'], hook)) {
+        fail('judgehook must hold no role on the converter');
+      }
     }
   }
 }

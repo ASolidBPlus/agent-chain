@@ -41,6 +41,9 @@ export const KIND_TOKEN = 'token';
 export const KIND_NAMES = 'names';
 export const KIND_CONVERTER = 'converter';
 export const KIND_CONTRACT = 'contract';
+/// Singletons built against the names module, which must come earlier.
+export const KIND_ESCROW = 'escrow';
+export const KIND_JUDGEHOOK = 'judgehook';
 
 /// A JSON number, carried as the text forge would coerce it to.
 export class JsonNumber {
@@ -203,6 +206,8 @@ export function readManifest(doc: unknown): Manifest {
   const mods: ModuleSpec[] = [];
   let namesSeen = 0;
   let convertersSeen = 0;
+  let escrowsSeen = 0;
+  let hooksSeen = 0;
   for (let i = 0; i < list.length; i++) {
     const node = list[i] as Record<string, unknown> | null;
     const field = (name: string): unknown => (isObject(node) ? node[name] : undefined);
@@ -231,6 +236,14 @@ export function readManifest(doc: unknown): Manifest {
       m = { kind, tld };
     } else if (kind === KIND_CONVERTER) {
       if (++convertersSeen > 1) refuse('more than one converter module');
+      m = { kind };
+    } else if (kind === KIND_ESCROW) {
+      if (++escrowsSeen > 1) refuse('more than one escrow module');
+      if (namesSeen === 0) refuse('escrow needs a names module earlier in the manifest');
+      m = { kind };
+    } else if (kind === KIND_JUDGEHOOK) {
+      if (++hooksSeen > 1) refuse('more than one judgehook module');
+      if (namesSeen === 0) refuse('judgehook needs a names module earlier in the manifest');
       m = { kind };
     } else if (kind === KIND_CONTRACT) {
       const key = jsonString(field('key'), `modules[${i}].key`);

@@ -35,6 +35,7 @@ import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 TEST_NAME = re.compile(r"((?:testFuzz_|test_|invariant_)\w+)")
+INVARIANT_LINE = re.compile(r"^invariant_\w+\(\) \(runs: \d+")
 
 # (id, file, description, anchor, replacement, the test that MUST fail)
 MUTANTS = [
@@ -139,6 +140,117 @@ MUTANTS = [
      "        if (amountOut == 0) revert NothingMinted(amountIn, rate);\n",
      "",
      "test_ConvertRevertsWhenNothingMinted"),
+    # Escrow
+    ("E1", "src/Escrow.sol", "create accepts an id already in use",
+     "        if (records[id].state != NONE) revert Exists();\n", "",
+     "test_CreateRefusesAnIdInUse"),
+    ("E2", "src/Escrow.sol", "create accepts a zero amount",
+     "        if (amount == 0) revert ZeroAmount();\n", "",
+     "test_CreateRefusesZero"),
+    ("E3", "src/Escrow.sol", "create accepts a deadline equal to now",
+     "if (deadline <= block.timestamp) revert BadDeadline();",
+     "if (deadline < block.timestamp) revert BadDeadline();",
+     "test_CreateRefusesADeadlineThatIsNowOrPast"),
+    ("E4", "src/Escrow.sol", "create skips the creator check",
+     "        if (registry.resolve(string.concat(creatorAlias, \":treasury\")) != msg.sender) revert NotCreator();\n", "",
+     "test_CreateRefusesTheCreatorsJudgeWallet"),
+    ("E5", "src/Escrow.sol", "create accepts a hook with no code",
+     "        if (hook.code.length == 0) revert BadHook();\n", "",
+     "test_CreateRefusesAHookWithNoCode"),
+    ("E6", "src/Escrow.sol", "the role check calls a token with no code",
+     "        if (token.code.length == 0) return false;\n", "",
+     "test_CreateRefusesAnAddressWithNoCodeAsToken"),
+    ("E7", "src/Escrow.sol", "the role check ignores a missing BURNER_ROLE",
+     "            if (!burner) return false;\n", "",
+     "test_CreateRefusesATokenMissingEitherRole"),
+    ("E8", "src/Escrow.sol", "the role check ignores a missing MINTER_ROLE",
+     "            return minter;", "            return true;",
+     "test_CreateRefusesATokenMissingEitherRole"),
+    ("E9", "src/Escrow.sol", "create never burns",
+     "        Token(token).burnFrom(msg.sender, amount);\n", "",
+     "invariant_mintedEqualsBurnedMinusLocked"),
+    ("E10", "src/Escrow.sol", "create burns one unit less than it stores",
+     "        Token(token).burnFrom(msg.sender, amount);", "        Token(token).burnFrom(msg.sender, amount - 1);",
+     "invariant_mintedEqualsBurnedMinusLocked"),
+    ("E11", "src/Escrow.sol", "complete accepts a settled escrow",
+     "        if (r.state != OPEN) revert NotOpen();\n        if (block.timestamp > r.deadline) revert TooLate();",
+     "        if (block.timestamp > r.deadline) revert TooLate();",
+     "test_FirstReportWinsAndTheNextBlockIsRefused"),
+    ("E12", "src/Escrow.sol", "complete is refused at the deadline",
+     "if (block.timestamp > r.deadline) revert TooLate();",
+     "if (block.timestamp >= r.deadline) revert TooLate();",
+     "test_AtTheDeadlineCompleteSucceedsAndRefundIsNotYet"),
+    ("E13", "src/Escrow.sol", "complete ignores the hook",
+     "        if (!IEscrowHook(r.hook).check(r.hookData, r.creatorAlias, winnerAlias, msg.sender)) revert HookRefused();\n", "",
+     "test_CompleteRefusesAReporterTheHookRejects"),
+    ("E14", "src/Escrow.sol", "complete pays a winner with no treasury",
+     "        if (winner == address(0)) revert UnknownWinner();\n", "",
+     "test_CompleteRefusesAWinnerWithNoTreasury"),
+    ("E15", "src/Escrow.sol", "complete mints before it settles",
+     "        r.state = COMPLETED;\n        r.winnerAlias = winnerAlias;\n        r.winnerAccount = winnerAccount;\n\n        Token(r.token).mint(winner, r.amount);",
+     "        Token(r.token).mint(winner, r.amount);\n        r.state = COMPLETED;\n        r.winnerAlias = winnerAlias;\n        r.winnerAccount = winnerAccount;",
+     "test_StateIsSettledBeforeTheCompleteMint"),
+    ("E16", "src/Escrow.sol", "complete pays one unit more than stored",
+     "        Token(r.token).mint(winner, r.amount);", "        Token(r.token).mint(winner, r.amount + 1);",
+     "invariant_eachEscrowSettlesExactlyOnceForItsAmount"),
+    ("E17", "src/Escrow.sol", "refund is allowed at the deadline",
+     "if (block.timestamp <= r.deadline) revert NotYet();",
+     "if (block.timestamp < r.deadline) revert NotYet();",
+     "test_AtTheDeadlineCompleteSucceedsAndRefundIsNotYet"),
+    ("E18", "src/Escrow.sol", "refund leaves the escrow open",
+     "        r.state = REFUNDED;\n", "",
+     "invariant_eachEscrowSettlesExactlyOnceForItsAmount"),
+    ("E19", "src/Escrow.sol", "refund mints before it settles",
+     "        r.state = REFUNDED;\n\n        Token(r.token).mint(r.creator, r.amount);",
+     "        Token(r.token).mint(r.creator, r.amount);\n        r.state = REFUNDED;",
+     "test_StateIsSettledBeforeTheRefundMint"),
+    ("E20", "src/Escrow.sol", "refund pays the caller instead of the creator",
+     "        Token(r.token).mint(r.creator, r.amount);", "        Token(r.token).mint(msg.sender, r.amount);",
+     "test_RefundByAnyoneAfterTheDeadlinePaysTheCreator"),
+    ("E21", "src/Escrow.sol", "refund accepts a completed escrow",
+     "        if (r.state != OPEN) revert NotOpen();\n        if (block.timestamp <= r.deadline) revert NotYet();",
+     "        if (block.timestamp <= r.deadline) revert NotYet();",
+     "test_RefundRefusesACompletedEscrow"),
+    ("E22", "src/Escrow.sol", "the account path is built from the creator's alias",
+     ": string.concat(winnerAlias, \":acc.\", winnerAccount)",
+     ": string.concat(r.creatorAlias, \":acc.\", winnerAccount)",
+     "test_TheWinnersAccountIsPaidNotTheCreatorsOfTheSameName"),
+    ("E23", "src/Escrow.sol", "a named account is ignored and the treasury paid",
+     "            bytes(winnerAccount).length == 0\n",
+     "            true\n",
+     "test_CompletePaysANamedAccountOfTheWinner"),
+    ("E24", "src/Escrow.sol", "the paid account is not stored",
+     "        r.winnerAccount = winnerAccount;\n", "",
+     "test_CompletePaysANamedAccountOfTheWinner"),
+    # JudgeHook
+    ("J1", "src/JudgeHook.sol", "mode 0 asks the winner's judge",
+     "if (mode == ONE_JUDGE) return sender == registry.resolve(string.concat(creatorAlias, \":\", backend));",
+     "if (mode == ONE_JUDGE) return sender == registry.resolve(string.concat(winnerAlias, \":\", backend));",
+     "test_ModeZeroAcceptsOnlyTheCreatorsJudge"),
+    ("J2", "src/JudgeHook.sol", "mode 1 asks the creator's judge",
+     "if (mode == EACH_OWN_COPY) return sender == registry.resolve(string.concat(winnerAlias, \":\", backend));",
+     "if (mode == EACH_OWN_COPY) return sender == registry.resolve(string.concat(creatorAlias, \":\", backend));",
+     "test_ModeOneAcceptsOnlyTheWinnersOwnJudge"),
+    ("J3", "src/JudgeHook.sol", "unknown modes are accepted",
+     "        return false;\n    }\n}", "        return true;\n    }\n}",
+     "test_OtherModesAreRefused"),
+    ("J4", "src/JudgeHook.sol", "the backend name is not separated by a colon",
+     "string.concat(creatorAlias, \":\", backend)", "string.concat(creatorAlias, backend)",
+     "test_GoldenVectorIsModeZeroAndJudge"),
+    ("J5", "src/JudgeHook.sol", "a one-byte hookData is decoded",
+     "if (hookData.length < 2) return false;", "if (hookData.length < 1) return false;",
+     "test_ShortHookDataIsRefused"),
+    # Deploy.s.sol, the escrow kinds
+    ("D1", "script/Deploy.s.sol", "escrow may come before the names module",
+     "                if (namesSeen == 0) revert(\"Deploy: manifest: escrow needs a names module earlier in the manifest\");\n", "",
+     "test_EveryRowMatchesTheContainerGrammar"),
+    ("D2", "script/Deploy.s.sol", "the escrow is granted nothing",
+     "        address escrow = _addrOfKind(mods, addrs, KIND_ESCROW);\n        if (escrow == address(0)) return;\n        for",
+     "        address escrow = _addrOfKind(mods, addrs, KIND_ESCROW);\n        return;\n        for",
+     "test_EscrowAndJudgeHookDeployWithTheirGrants"),
+    ("D3", "script/Deploy.s.sol", "the escrow's MINTER_ROLE is not asserted",
+     "                    require(t.hasRole(t.MINTER_ROLE(), escrow), \"Deploy: escrow lacks MINTER_ROLE on a token\");\n", "",
+     "test_TheSkipPathNoticesAnEscrowGrantRevoked"),
 ]
 
 
@@ -175,15 +287,28 @@ def parse(output):
     """
     compiled = "Compiler run failed" not in output and "Error: compilation" not in output.lower()
     passed, failed = set(), set()
+    # An invariant that fails with a message prints `[FAIL: <message>]`, then
+    # the call sequence, and only then `invariant_x() (runs: ...)` on a line of
+    # its own. Without this, that failure belonged to no test and read as a
+    # survivor.
+    unnamed_fail = False
     for line in output.splitlines():
         stripped = line.strip()
         match = TEST_NAME.search(stripped)
+        if stripped.startswith("[FAIL") and not match:
+            unnamed_fail = True
+            continue
         if not match:
             continue
         if stripped.startswith("[PASS"):
             passed.add(match.group(1))
+            unnamed_fail = False
         elif stripped.startswith("[FAIL"):
             failed.add(match.group(1))
+            unnamed_fail = False
+        elif unnamed_fail and INVARIANT_LINE.match(stripped):
+            failed.add(match.group(1))
+            unnamed_fail = False
     return passed, failed, compiled
 
 

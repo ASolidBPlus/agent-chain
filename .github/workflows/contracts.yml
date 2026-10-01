@@ -209,13 +209,13 @@ jobs:
 
       # The chain image's flags (docker/entrypoint.sh), minus the state file:
       # these chains live for one job.
-      - name: start four anvils (a fresh pair per manifest)
+      - name: start six anvils (a fresh pair per manifest)
         run: |
-          for port in 8545 8546 8547 8548; do
+          for port in 8545 8546 8547 8548 8549 8550; do
             anvil -q --host 127.0.0.1 --port "$port" --chain-id 31337 --gas-price 0 --base-fee 0 \
               --accounts 1 --balance 1000000 --mnemonic "$ANVIL_MNEMONIC" > "anvil-$port.log" 2>&1 &
           done
-          for port in 8545 8546 8547 8548; do
+          for port in 8545 8546 8547 8548 8549 8550; do
             for _ in $(seq 1 50); do
               cast block-number --rpc-url "http://127.0.0.1:$port" > /dev/null 2>&1 && break
               sleep 0.2
@@ -235,4 +235,14 @@ jobs:
           MANIFEST: deployments/cases/contract-entries.json
           RPC_A: http://127.0.0.1:8547
           RPC_B: http://127.0.0.1:8548
+        run: bun run scripts/verify-admin-deploy.ts
+
+      # The escrow and judgehook singletons, granted on both tokens beside the
+      # converter.
+      - name: verify-admin-deploy (escrow)
+        working-directory: svc
+        env:
+          MANIFEST: deployments/cases/escrow.json
+          RPC_A: http://127.0.0.1:8549
+          RPC_B: http://127.0.0.1:8550
         run: bun run scripts/verify-admin-deploy.ts
