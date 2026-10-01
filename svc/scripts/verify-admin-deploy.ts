@@ -182,7 +182,11 @@ async function roleTable(url: string, record: DeployReply['deployment'], treasur
           ? [NameRegistryAbi, ['DEFAULT_ADMIN_ROLE', 'REGISTRAR_ROLE']]
           : m.kind === 'converter' || contract === 'Converter'
             ? [ConverterAbi, ['DEFAULT_ADMIN_ROLE', 'RATE_ADMIN_ROLE']]
-            : die(`no role table for ${m.kind} ${contract}; add one rather than skip it`);
+            : m.kind === 'escrow' || m.kind === 'judgehook'
+              ? // No roles of their own; what they hold elsewhere is in the rows
+                // above, since every module is a holder.
+                [null, []]
+              : die(`no role table for ${m.kind} ${contract}; add one rather than skip it`);
     for (const name of names) {
       const role = (await client.readContract({ address: m.address, abi: abi as never, functionName: name as never })) as Hex;
       for (const [label, addr] of who) {
@@ -296,6 +300,19 @@ try {
   const routeCalls = await calls(RPC_A, reply.txs);
   check(`the same ${forgeCalls.length} transactions, in order, calldata and all`, JSON.stringify(routeCalls) === JSON.stringify(forgeCalls),
     routeCalls.length !== forgeCalls.length ? `${routeCalls.length} vs ${forgeCalls.length}` : `first difference at ${routeCalls.findIndex((c, i) => c !== forgeCalls[i])}`);
+  // Escrow and judgehook take the names address as their constructor argument.
+  for (const kind of ['escrow', 'judgehook']) {
+    const m = routeRecord.modules.find((x: { kind: string }) => x.kind === kind);
+    if (!m) continue;
+    const names = routeRecord.modules.find((x: { kind: string }) => x.kind === 'names').address;
+    const client = createPublicClient({ transport: http(RPC_A) });
+    const registry = await client.readContract({
+      address: m.address,
+      abi: [{ type: 'function', name: 'registry', inputs: [], outputs: [{ type: 'address' }], stateMutability: 'view' }],
+      functionName: 'registry',
+    });
+    check(`${kind} reads the names module`, String(registry).toLowerCase() === String(names).toLowerCase(), `${registry} vs ${names}`);
+  }
   const rolesA = await roleTable(RPC_A, routeRecord, treasury);
   const rolesB = await roleTable(RPC_B, containerRecord, treasury);
   check(`the same ${rolesA.length} role facts`, rolesA.length > 0 && JSON.stringify(rolesA) === JSON.stringify(rolesB),
